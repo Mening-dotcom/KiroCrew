@@ -186,6 +186,7 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: F401
     effective_session_key,
     history_corpus_unreadable,
     is_harness_slash_command,
+    note_authorization_session_key,
 )
 from kiro_crew.dashboard.chat_utils import (
     replacement_shares_transcript as _replacement_shares_transcript,
@@ -3861,6 +3862,13 @@ def _app_cancel_denied(
         reason = (
             "app cannot access unscoped slots" if not slot._app else "app does not own this slot"
         )
+    elif getattr(slot, "linked_session_claim", ""):
+        # A refused binding is deliberately absent from ``target_key`` so no
+        # operation can route to it. It still quarantines the slot for app
+        # authorization; otherwise rejection would be indistinguishable from a
+        # genuinely unbound app slot and this destructive action would return
+        # success against a different session than the attempted binding named.
+        reason = "app does not own the session this slot is linked to"
     elif target_key != _history_key_for(slot.key):
         reason = "app does not own the session this slot is linked to"
     else:
@@ -10261,7 +10269,7 @@ def _check_slot_app_ownership(
             error="app does not own this slot",
         )
         return _slot_not_found()
-    if effective_session_key(slot) != _history_key_for(slot.key):
+    if getattr(slot, "linked_session_claim", ""):
         sel().log_api_access(
             caller=request_app,
             operation=operation,
@@ -10916,7 +10924,12 @@ async def api_chat_slot_note(request: web.Request) -> web.Response:
             # Both immediate halves resolve their destination LATE, so each
             # records the session it was authorized against -- same reason the
             # deferred arm below does, and checked at those later seams.
-            context_entry["noteSession"] = effective_session_key(slot)
+            # Stamp with ``note_authorization_session_key`` (not the live
+            # ``effective_session_key``): a refused app-slot binding leaves the
+            # slot on its own dashboard session but keeps a claim, and the drain
+            # and save compare against that claim -- stamping the live key here
+            # would make a newly accepted note mismatch and be dropped silently.
+            context_entry["noteSession"] = note_authorization_session_key(slot)
             slot.append_pending_context(context_entry)
 
     # Caller-controlled content reaching the visible transcript (SSE plus the
@@ -10965,8 +10978,11 @@ async def api_chat_slot_note(request: web.Request) -> web.Response:
             # The session this note was authorized against. The gate above
             # only admits a slot that still routes to its own session, but
             # an unbound slot can acquire a foreign binding while the note
-            # is held, and the flush resolves its target late.
-            "session": effective_session_key(slot),
+            # is held, and the flush resolves its target late. Use the
+            # authorization key (claim-aware) so the deferred flush, which
+            # checks the same key, does not drop a newly accepted note on a
+            # slot whose foreign binding was refused.
+            "session": note_authorization_session_key(slot),
         }
         # The transcript this authorization resolves to, captured in the SAME
         # routing observation as the session stamp above: the durable write
@@ -10992,7 +11008,10 @@ async def api_chat_slot_note(request: web.Request) -> web.Response:
             cls="reconcile-note",
             broadcast=True,
             meta={
-                "noteSession": effective_session_key(slot),
+                # Claim-aware authorization key, matching the drain/save
+                # check: a refused app-slot binding must not make this newly
+                # accepted note mismatch and be dropped silently.
+                "noteSession": note_authorization_session_key(slot),
                 # Attribute the note through the SAME app-label pill an app
                 # inject row already uses (``meta.appLabel`` ->
                 # ``components.mcpApp.from_app``): ``display_source`` is the

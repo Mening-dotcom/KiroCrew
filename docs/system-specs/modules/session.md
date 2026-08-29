@@ -2557,6 +2557,26 @@ and restore path to share one mutation protocol with in-memory dashboard state.
 The request path chooses the smaller fail-safe rule instead: stale sidecars are
 reversible, while deleting a successor's state is not.
 
+**App-owned slot binding isolation:** `linked_session_key` is session authority,
+not display metadata: chat routes authorize an app against the slot owner and
+then run the turn on the slot's effective session. An app-owned slot therefore
+never carries a linked channel or cron session. The slot attribute refuses the
+binding at the shared mutation boundary (factory arguments, channel-name
+inference, restore, and background injectors all pass through it), emits a
+best-effort SEL denial, and leaves the slot on its own `dashboard:` session. The
+refused key remains as an authorization-only claim, separate from the live route:
+app gates therefore keep refusing the quarantined slot instead of treating the
+failed mutation as an ordinary unbound slot, and note content stamped before the
+attempt is dropped at its late drain/save seams. The claim never selects a
+provider or transcript and is not serialized as a live binding; assigning an
+explicit empty binding clears it.
+The restore path is covered separately: `_is_app_owned_channel_row`
+(`dashboard/slot_persistence/restore_inputs.py`) does not surface an app-owned
+row whose transcript is a channel thread at all, so a row persisted by an older
+vulnerable build is dropped rather than disarmed-and-surfaced on upgrade.
+Unscoped dashboard/channel slots keep the historical auto-bind and restore
+behavior.
+
 ## Slack Thread Linking
 
 Sessions can be linked to Slack threads via `SessionMap` fields

@@ -2577,6 +2577,20 @@ async def api_chat_slot_folder(request: web.Request) -> web.Response:
             ),
         )
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    if request_app and getattr(slot, "linked_session_claim", ""):
+        # A refused app-slot binding is held only as an authorization claim;
+        # treating it as unbound would let the app file a slot whose attempted
+        # binding named a session it does not own. Same rule as
+        # ``_check_slot_app_ownership`` and the pin/mode writes.
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_folder",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error="app does not own the session this slot is linked to",
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     # Capture the transcript key the ownership decision above just covered,
     # BEFORE the body-parse await: ``linked_session_key`` is rebound on
     # already-live slots with no ``running`` gate (cron completions, workflow
@@ -2752,6 +2766,21 @@ async def api_chat_slot_pin(request: web.Request) -> web.Response:
             ),
         )
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    if request_app and getattr(slot, "linked_session_claim", ""):
+        # A binding the slot boundary refused is held as an authorization-only
+        # claim (never a live route). Treating the refused slot as ordinarily
+        # unbound would let the app pin a slot whose attempted binding named a
+        # session it does not own -- the same reason ``_check_slot_app_ownership``
+        # refuses on the claim.
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_pin",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error="app does not own the session this slot is linked to",
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     # Capture the transcript key the lookup above just covered, BEFORE the
     # body-parse await — the same rebind window api_chat_slot_folder
     # documents. The re-check below and the save's expected_history_key pin
@@ -2896,6 +2925,20 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
                 if not getattr(slot, "_app", "")
                 else "app does not own this slot"
             ),
+        )
+        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    if request_app and getattr(slot, "linked_session_claim", ""):
+        # A refused app-slot binding is held only as an authorization claim;
+        # treating it as unbound would let the app change the mode of a slot
+        # whose attempted binding named a session it does not own. Same rule as
+        # ``_check_slot_app_ownership`` and the pin write.
+        sel().log_api_access(
+            caller=request_app,
+            operation="chat.slot_mode",
+            outcome="denied",
+            source="app_isolation",
+            resources=f"slot={slot.key}",
+            error="app does not own the session this slot is linked to",
         )
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
     # ``_app`` says who owns the slot OBJECT; the write persists into the

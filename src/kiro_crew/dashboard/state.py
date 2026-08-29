@@ -743,6 +743,19 @@ def _link_label(channel_type: str) -> str:
     return _CHANNEL_LABELS.get(channel_type, channel_type)
 
 
+def _is_app_own_session(session_key: str) -> bool:
+    """A session an app-owned slot is allowed to bind — the app's OWN session.
+
+    A ``taskrunner:`` session is created BY the task runner for an app's
+    task-review chat (``_task_result_slot``) and carries that run's execution
+    context. It is the app's own conversation, not a human's Slack/Discord/cron
+    session, so binding an app-owned slot to it is legitimate and must survive
+    both creation (binding then ``_app``) and restore (``_app`` then binding).
+    Every other linked key on an app-owned slot stays refused.
+    """
+    return session_key.startswith("taskrunner:")
+
+
 def _redacted_link_target(target: str | None) -> str:
     """Return a non-sensitive tail hint, never a raw conversation id."""
     if not target:
@@ -2894,7 +2907,7 @@ class _ChatSlot:
         "_pending_context",
         "_deferred_notes",
         "_dropped_note_ids",
-        "_app",
+        "_app_raw",
         "_human_seen",
         "_origin",
         "_pending_variants",
@@ -2916,7 +2929,8 @@ class _ChatSlot:
         "_pending_rewrite",
         "_file_changes",
         "_turn_reply_mids",
-        "linked_session_key",
+        "_linked_session_key",
+        "_refused_linked_session_key",
         # Remote-execution binding: this slot lives in the LOCAL list and local
         # history, but its turns run on a connected peer crew. See
         # ``dashboard/remote_relay.py``.
@@ -3876,7 +3890,7 @@ class _ChatSlot:
         # be retired by a save — the ids recorded here are how the next full
         # save knows to retire entries whose rows will never exist.
         self._dropped_note_ids: set[str] = set()
-        self._app: str = ""  # App identity tag (App Kit §5.2)
+        self._app_raw: str = ""  # App identity tag (App Kit §5.2); see the _app property
         # FIX 1 (unattended approval park). Evidence that a HUMAN has driven
         # this slot through a dashboard-user route (typed a message, answered an
         # approval). Only ever set by a caller with an empty ``request_app``, so
@@ -4013,7 +4027,12 @@ class _ChatSlot:
         # mid-turn (a workflow or sub-agent completion) is never this turn's
         # reply, whatever its position. Reset where the turn's start is captured.
         self._turn_reply_mids: list[str] = []
-        self.linked_session_key: str = ""  # when set, _run_chat uses this as session key
+        self._linked_session_key: str = ""  # when set, _run_chat uses this as session key
+        # A refused app-slot binding is not routing authority, but forgetting it
+        # would make authorization treat the attempted rebind as if it never
+        # happened. Keep it separately so downstream gates and stamped-note
+        # checks fail closed without exposing the foreign session to a turn.
+        self._refused_linked_session_key: str = ""
         # Where the turn CURRENTLY in flight actually started, as opposed to
         # where the slot would route a new one. The two diverge whenever the
         # routing above is reassigned on a live slot — a cron injection binds an
@@ -4326,6 +4345,115 @@ class _ChatSlot:
             # impossible and a missed bump can only cause an extra (harmless)
             # flush, never a skipped one.
             self._dirty_gen += 1
+
+    @property
+    def _app(self) -> str:
+        """App identity tag (App Kit §5.2).
+
+        Written through a setter so the app-slot binding invariant holds in
+        BOTH assignment orders. ``get_or_create_slot`` and restore set ``_app``
+        before any binding, so the :attr:`linked_session_key` setter catches a
+        foreign binding; but ``_task_result_slot`` sets a binding first and
+        ``_app`` second. If a FOREIGN binding were ever assigned before
+        ``_app``, re-check it here so the slot cannot end up app-owned yet still
+        holding a session it may not route to. A ``taskrunner:`` key is the
+        app's own session and is kept.
+        """
+        return self._app_raw
+
+    @_app.setter
+    def _app(self, value: str) -> None:
+        self._app_raw = value
+        live = getattr(self, "_linked_session_key", "")
+        if value and live and not _is_app_own_session(live):
+            # A foreign binding was present before this slot became app-owned.
+            # Quarantine it exactly as the binding setter would: drop it from
+            # the live route but keep it as an authorization-only claim so app
+            # gates and the note seams still fail closed.
+            logger.warning(
+                "quarantining pre-existing binding on now-app-scoped slot %r (app=%r)",
+                getattr(self, "key", ""),
+                value,
+            )
+            try:
+                sel().log_api_access(
+                    caller=value,
+                    operation="slot_session_bind",
+                    outcome="denied",
+                    source="app_isolation",
+                    resources=f"slot={getattr(self, 'key', '')}",
+                    error="app-scoped slots cannot carry a linked session binding",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("SEL write for a quarantined slot binding failed", exc_info=True)
+            self._refused_linked_session_key = live
+            self._linked_session_key = ""
+
+    @property
+    def linked_session_key(self) -> str:
+        """The session this slot's conversation actually runs on, if any.
+
+        A binding is authority: app routes authorize against ``_app`` and then
+        address ``effective_session_key(slot)``. Slot ownership does not imply
+        ownership of a channel or cron session, so an app-owned slot may not
+        carry a binding.
+
+        Keep the rule at the attribute boundary because bindings are assigned
+        by the slot factory, restore paths, and background injectors. This also
+        disarms app-owned rows persisted by an older vulnerable build when
+        those rows are restored after an upgrade.
+        """
+        return self._linked_session_key
+
+    @linked_session_key.setter
+    def linked_session_key(self, value: str) -> None:
+        if value and getattr(self, "_app", "") and not _is_app_own_session(value):
+            # Refuse without raising: one poisoned legacy tab must not abort an
+            # otherwise healthy restore. The app keeps its own dashboard
+            # conversation and loses only authority it was never granted.
+            #
+            # A ``taskrunner:`` key is the app's OWN task-review session, bound
+            # by ``_task_result_slot`` so the review chat continues the run's
+            # exact execution context. It is NOT a foreign Slack/Discord/cron
+            # session, so it is exempt above — otherwise restore (which sets
+            # ``_app`` before the binding) would strip it and the chat would
+            # fall back to a dashboard session missing the execution context.
+            logger.warning(
+                "refusing session binding on app-scoped slot %r (app=%r)",
+                getattr(self, "key", ""),
+                self._app,
+            )
+            try:
+                sel().log_api_access(
+                    caller=self._app,
+                    operation="slot_session_bind",
+                    outcome="denied",
+                    source="app_isolation",
+                    resources=f"slot={getattr(self, 'key', '')}",
+                    error="app-scoped slots cannot carry a linked session binding",
+                )
+            except Exception:  # noqa: BLE001
+                # The audit is best-effort; the refusal itself is the control.
+                logger.debug("SEL write for a refused slot binding failed", exc_info=True)
+            # Preserve the denied claim separately from the live route. If it
+            # vanished into the empty-string fallback, downstream app gates
+            # would authorize reset/note/context against the dashboard session
+            # and already-stamped note content would survive the rebind attempt.
+            self._refused_linked_session_key = value
+            return
+        self._refused_linked_session_key = ""
+        self._linked_session_key = value
+
+    @property
+    def linked_session_claim(self) -> str:
+        """The accepted or refused binding relevant to authorization.
+
+        This value must never be used for routing or persistence. A refused
+        binding is retained only so a later operation cannot reinterpret the
+        slot as safely unbound, and so content stamped before a rebind attempt
+        is discarded at its late delivery seams.
+        """
+        return self._refused_linked_session_key or self._linked_session_key
 
     @property
     def _stop_state(self) -> str:
@@ -7796,6 +7924,11 @@ class DashboardState:
         reads the persisted link off the slot's effective session key, so a
         binding applied later would hydrate against the wrong key and leave a
         channel-born tab looking unlinked.
+
+        A channel-shaped *name* also resolves a binding for an unscoped caller.
+        An app-owned slot takes no binding through either route; the
+        :attr:`_ChatSlot.linked_session_key` property enforces that invariant
+        across explicit assignment and legacy restore as well.
         """
         existing, creation = _registry_for(self).prepare_creation(
             self,
