@@ -126,12 +126,51 @@ function legacyWire(loop: LegacyGoalLoop): AutoNudgeLoop {
     active: loop.active,
     last_fire_ts: loop.lastFireAt,
     next_due_ts: loop.nextDueAt ?? 0,
+    // The goal editor tells a PAUSED loop (resumable in place) from a STOPPED
+    // one on this field alone; dropping it here rendered every inactive loop,
+    // including one the user had just paused, as Stopped with an erase control.
+    stopped_reason: loop.stoppedReason,
     ...(loop.stopSentinelPath !== undefined ? { stop_sentinel_path: loop.stopSentinelPath } : {}),
     ...(loop.judge !== undefined ? { judge: loop.judge } : {}),
     ...(loop.judge_last_verdict !== undefined
       ? { judge_last_verdict: loop.judge_last_verdict }
       : {}),
   }
+}
+
+/** A fire control's fire leg landed (`onFired`): the loop's next cycle is
+ *  armed to run now. This is the ONE place a fire result becomes a record,
+ *  and it is derived from the record the parent holds NOW, never from a
+ *  snapshot: `pressed` is the record the fire was PRESSED on (the written
+ *  record when a write preceded it, else the editor's loop), and only its
+ *  identity and its pre-request `last_fire_ts` are read. The fire route's
+ *  answer is not consulted at all. The route arms a zero-delay timer, and the
+ *  server writes no deadline for it (that write could not be made durable
+ *  without a suspension point that raced several lock-free writers), so the
+ *  answer carries no due reading; worse, it is the live loop serialized after
+ *  the route's audit await, so a delivery completing inside that window makes
+ *  it post-delivery -- `last_fire_ts` equal to the `fired` frame's -- and a
+ *  parent measured against it read the delivered cycle as the one just armed
+ *  and rolled it back to due for a whole interval (GPT, head cd2c53e472).
+ *  Measured against the press instead, a parent record that has fired since
+ *  the press (the `fired` frame landed: count up, deadline a full interval
+ *  away) leaves nothing to arm, whatever the answer says. Not a fiction
+ *  otherwise: the cycle IS armed to run now, and the delivery's `fired` frame
+ *  reconciles the shared cache moments later; if that frame beats nothing and
+ *  lands after the arming, it simply overwrites the due reading with the
+ *  delivered one.
+ *
+ *  Nothing to arm, so null, when the parent's record is not this loop (the
+ *  closure outlived it), when it is no longer running (another writer paused
+ *  it in the gap: `fire_now` refuses an inactive loop, and the timer body
+ *  re-checks `active` before a cycle it already armed), or when the loop
+ *  FIRED since the press. */
+function armedNow(current: AutomationRecord | null, pressed: AutoNudgeLoop, nowTs: number): LegacyGoalLoop | null {
+  if (current?.kind !== 'legacy_goal_loop') return null
+  if (String(current.id) !== String(pressed.id) || current.slotKey !== pressed.slot_key) return null
+  if (!current.active) return null
+  if (current.lastFireAt > (pressed.last_fire_ts || 0)) return null
+  return { ...current, nextDueAt: nowTs }
 }
 
 function boundedInteger(
@@ -494,8 +533,32 @@ export default function SessionAutomationPopover({
       open={open}
       onOpenChange={requestOpenChange}
       onChange={loop => {
-        if (automationRef.current !== automation) return
+        // Applied only while the parent still holds the record this press was
+        // rendered against -- object identity, the same test the bounded
+        // monitor's writes make above (`responseIsCurrent`). The record
+        // carries no revision, so "moved since the press" is the one ordering
+        // this bridge can know: the parent re-identifies `automation` on every
+        // store dispatch, so a moved record means a frame landed, frames
+        // arrive in the server's order, and the write's own `updated` frame is
+        // among them or follows. A response arriving after one is a snapshot
+        // the frame may already have moved past: a PATCH answered before
+        // another tab's pause but delivered after the pause's frame put the
+        // active record back over the paused one, and frames fire on change,
+        // so nothing corrected it short of a reconnect (GPT, head
+        // 9b921e2fa2). So it is dropped, and the slot's cold read invalidated
+        // instead ("Refetch remains authoritative"). Nothing the press needs
+        // is lost: the fire leg never reports through here (`onFired` arms
+        // the record the parent holds), and the editor took the stored fields
+        // off the response itself.
+        if (automationRef.current !== automation) {
+          queryClient.invalidateQueries({ queryKey: ['session-automation', slotKey] })
+          return
+        }
         onChange(loop ? normalizeAutomationRecord(loop) : null)
+      }}
+      onFired={pressed => {
+        const armed = armedNow(automationRef.current, pressed, Date.now() / 1000)
+        if (armed) onChange(armed)
       }}
       onSetUpBoundedMonitor={legacyLoop ? undefined : () => setBoundedModeSlot(slotKey)}
       writeDisabled={sessionModeUnsupported}
