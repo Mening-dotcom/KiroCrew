@@ -137,6 +137,30 @@ whether a transport is USABLE, which is the package-relative question above, and
 is declined the same way every other invalid entry is: the entry is dropped and
 named, and the import goes on.
 
+**An endpoint server is refused for the same reason, on the other spelling.** A
+`url` entry has a transport and no package-relative field, so neither test above
+catches it -- yet it registers on no converted app at all. `_register_mcp_servers`
+writes an entry carrying a `url` only when it can resolve a LIVE backend port for
+the app and scrubs it otherwise, because a manifest's illustrative port is a
+reachable-LOOKING dead URL that kiro-cli dials on every request; and this
+converter emits no `backend` section, so there is never a port to resolve. Emitted,
+the entry would be dropped at registration with one INFO line and the operator who
+read "1 server(s)" here would find its tools missing -- exactly the silent loss
+this section exists to prevent. So it is refused and reported instead:
+
+```
+mcpServers[acme] [d] the server is reached at an endpoint, and a converted app
+  declares no backend, so registration has no live port to resolve and drops the
+  entry rather than writing a URL nothing answers -- url transport
+```
+
+The test is `bool(config.get("url"))`, which is the predicate
+`_register_mcp_servers` itself calls an HTTP entry -- not a stricter one, so the
+two cannot disagree about which entries are endpoints, and an entry carrying both
+a `url` and a `command` is refused here exactly as it is skipped there. The
+transport is NAMED rather than quoted in `detail`: the url is foreign text this
+report prints to a terminal, and `kind` already identifies the entry.
+
 Detection asks one question: does this value resolve against a DIRECTORY rather
 than against `PATH`? Three shapes answer yes. A value carrying a separator, in
 either spelling, because both `bin/server` and `.\bin\server` resolve against the
