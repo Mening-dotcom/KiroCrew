@@ -3257,6 +3257,7 @@ def _path_in_home_dirs(
     *,
     strict: bool = False,
     pre_resolved: bool = False,
+    anchors_inline: bool | None = None,
 ) -> bool:
     """Return True if *path_str* resolves under any of *home_dirs* (``$HOME``-relative).
 
@@ -3290,15 +3291,25 @@ def _path_in_home_dirs(
     such a caller is by contract on its own worker thread, so the anchors are
     resolved inline as well (``_home_dir_targets(inline=True)``): the whole
     check then performs no ``mc-pathres`` submission.
+
+    ``anchors_inline`` decouples the ANCHOR resolution from the candidate's
+    ``pre_resolved`` form, for the one caller that has both: a canonical
+    candidate (so its tail is matched lexically and never re-resolved) that
+    nonetheless runs ON the event loop (so the ``$HOME`` anchors must go through
+    the bounded ``mc-pathres`` pool, not an unbounded inline ``realpath`` a
+    stalled share could hang). ``None`` (every other caller) keeps the historic
+    coupling ``anchors_inline == pre_resolved``.
     """
     if not path_str:
         return False
+    if anchors_inline is None:
+        anchors_inline = pre_resolved
 
     try:
         candidates = _candidate_forms(path_str, base_dir, pre_resolved=pre_resolved)
         # The anchors are bounded the same way (see _rebuild_targets_bounded):
         # a stall with no prior canonical resolution to serve refuses too.
-        sensitive_targets = _home_dir_targets(home_dirs, inline=pre_resolved)
+        sensitive_targets = _home_dir_targets(home_dirs, inline=anchors_inline)
     except PathResolutionStalled:
         # Canonical form unavailable (wedged mount under the path): refuse.  A
         # lexical-only match here would pass a workspace symlink into a
@@ -3331,6 +3342,7 @@ def _is_keystone_publish_artifact(
     *,
     strict: bool = False,
     pre_resolved: bool = False,
+    anchors_inline: bool | None = None,
 ) -> bool:
     """Return True if *path_str* is the atomic-write temp or lock beside a keystone leaf.
 
@@ -3354,8 +3366,10 @@ def _is_keystone_publish_artifact(
     """
     if not path_str:
         return False
+    if anchors_inline is None:
+        anchors_inline = pre_resolved
     try:
-        artifact_parents = _home_dir_targets(_KEYSTONE_ARTIFACT_PARENTS, inline=pre_resolved)
+        artifact_parents = _home_dir_targets(_KEYSTONE_ARTIFACT_PARENTS, inline=anchors_inline)
         candidates = _candidate_forms(path_str, base_dir, pre_resolved=pre_resolved)
     except PathResolutionStalled:
         if strict:
@@ -3385,7 +3399,9 @@ def _is_keystone_publish_artifact(
 DENIED_ROOT_PARTS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker"})
 
 
-def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
+def is_sensitive_path(
+    path_str: str, base_dir: str | None = None, *, pre_resolved: bool = False
+) -> bool:
     """Return True if the path points to a read+write-sensitive location.
 
     Used across every file-access surface (hooks.on_tool_call, validate_file_path,
@@ -3404,9 +3420,10 @@ def is_sensitive_path(path_str: str, base_dir: str | None = None) -> bool:
     spelling, so the two cannot diverge. A stall is refused there (a string) and is
     therefore ``True`` here: the callers that only hold this boolean keep refusing
     fail-closed; what they lose is the distinct WORDING, which is the gate
-    consumers' business.
+    consumers' business. ``pre_resolved`` matches an already-canonical candidate
+    lexically without re-resolving it (the Windows held-chain validator's seam).
     """
-    return sensitive_path_refusal(path_str, base_dir) is not None
+    return sensitive_path_refusal(path_str, base_dir, pre_resolved=pre_resolved) is not None
 
 
 def is_sensitive_resolved_path(resolved: str) -> bool:
@@ -3445,6 +3462,30 @@ def is_sensitive_resolved_path(resolved: str) -> bool:
     return _path_in_home_dirs(resolved, _SENSITIVE_HOME_DIRS, pre_resolved=True) or (
         resolved.casefold().endswith(_KEYSTONE_ARTIFACT_SUFFIXES)
         and _is_keystone_publish_artifact(resolved, pre_resolved=True)
+    )
+
+
+def is_sensitive_prevalidated_bounded_path(resolved: str) -> bool:
+    """:func:`is_sensitive_resolved_path`, but with the ANCHORS resolved BOUNDED.
+
+    The one fence for a caller that has a canonical candidate it must NOT
+    re-resolve, yet runs ON the event loop. ``is_sensitive_resolved_path`` fits the
+    first half (candidate matched lexically, never re-resolved) but resolves the
+    ``$HOME`` anchors INLINE -- an unbounded ``realpath`` a stalled network home hangs
+    on the loop. This bounds them through the ``mc-pathres`` pool
+    (``anchors_inline=False``), so a wedged mount costs the pool's limit, not the loop.
+    Used by the held-chain validator's ``CHAIN_MISSING`` arm (canonical prefix + text
+    tail, on-loop). The settled ``CHAIN_HELD`` arm uses :func:`is_sensitive_path` with
+    ``pre_resolved=True`` instead.
+    *resolved* MUST be the canonical spelling, same contract as
+    :func:`is_sensitive_resolved_path`: the candidate half is still lexical, only
+    the anchor resolution is bounded rather than inline.
+    """
+    return _path_in_home_dirs(
+        resolved, _SENSITIVE_HOME_DIRS, pre_resolved=True, anchors_inline=False
+    ) or (
+        resolved.casefold().endswith(_KEYSTONE_ARTIFACT_SUFFIXES)
+        and _is_keystone_publish_artifact(resolved, pre_resolved=True, anchors_inline=False)
     )
 
 
@@ -3511,7 +3552,9 @@ def is_unverifiable_path_refusal(reason: str) -> bool:
     return reason.startswith(UNVERIFIABLE_PATH_PREFIX)
 
 
-def sensitive_path_refusal(path_str: str, base_dir: str | None = None) -> str | None:
+def sensitive_path_refusal(
+    path_str: str, base_dir: str | None = None, *, pre_resolved: bool = False
+) -> str | None:
     """The path tier of the tool gate: the refusal for *path_str*, or ``None``.
 
     Reason-or-``None`` like the other tiers (``is_sensitive_bash_command``,
@@ -3532,8 +3575,10 @@ def sensitive_path_refusal(path_str: str, base_dir: str | None = None) -> str | 
     """
     try:
         matched = _path_in_home_dirs(
-            path_str, _SENSITIVE_HOME_DIRS, base_dir, strict=True
-        ) or _is_keystone_publish_artifact(path_str, base_dir, strict=True)
+            path_str, _SENSITIVE_HOME_DIRS, base_dir, strict=True, pre_resolved=pre_resolved
+        ) or _is_keystone_publish_artifact(
+            path_str, base_dir, strict=True, pre_resolved=pre_resolved
+        )
     except PathResolutionStalled:
         return (
             f"{UNVERIFIABLE_PATH_PREFIX} (symlink resolution did not complete in time), "

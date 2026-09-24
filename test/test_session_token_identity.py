@@ -1032,7 +1032,9 @@ def test_kiro_identity_projection_fails_closed_on_settings_errors(
         path.unlink()
         path.parent.rmdir()
         make_dir_link(path.parent, target)
-        monkeypatch.setattr(hooks, "is_sensitive_path", lambda raw: Path(raw) == target_file)
+        monkeypatch.setattr(
+            hooks, "is_sensitive_path", lambda raw, *_a, **_k: Path(raw) == target_file
+        )
         monkeypatch.setattr(
             hooks.platform_compat,
             "open_file_no_reparse",

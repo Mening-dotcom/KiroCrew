@@ -100,7 +100,17 @@ def test_unverifiable_or_refused_descriptor_is_closed_without_reading(
     descriptors = _track_open(monkeypatch)
     _forbid_content_read(monkeypatch)
     if failure == "unknown_path":
-        monkeypatch.setattr(hooks, "_fd_real_path", lambda _fd: None)
+        # Fail the witness for the SAFE-READ layer's own descriptor only. On Windows
+        # validate_file_path's held-chain walk also resolves through _fd_real_path, and
+        # blanking it there would refuse at validate (opening nothing) instead of
+        # exercising the safe-read layer's open-then-close-on-unverifiable path this
+        # test is about. The safe-read fds are the tracked ones.
+        real_witness = hooks._fd_real_path
+        monkeypatch.setattr(
+            hooks,
+            "_fd_real_path",
+            lambda fd: None if fd in descriptors else real_witness(fd),
+        )
     elif failure == "sensitive_path":
         real_witness = hooks._fd_real_path
 
