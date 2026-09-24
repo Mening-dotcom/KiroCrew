@@ -407,7 +407,109 @@ class TestHandleMessage:
         assert any(r[1]["emoji"] == "lobster" for r in reacts)
 
     @pytest.mark.asyncio
-    async def test_thinking_posted_then_updated(self):
+    async def test_working_indicators_cleared_on_cancellation(self):
+        """Regression: a turn cancelled mid-stream must still tear down the
+        'working' indicators.
+
+        asyncio.CancelledError is a BaseException, so it is not caught by the
+        handler's ``except Exception``; before the fix, it propagated out of
+        handle_message before the post-try/finally cleanup ran, leaving the
+        native "…is working" thread-status label and the inline Stop button
+        (posted for threaded turns) stuck. The clears now live in ``finally``,
+        so they must fire even though the CancelledError still propagates.
+        """
+
+        class _CancellingProvider(FakeProvider):
+            async def stream(self, message, timeout=120.0):
+                yield LLMEvent(kind="text_chunk", text="partial")
+                raise asyncio.CancelledError()
+
+        slack = MockSlackClient()
+        sessions = FakeSessionManager(_CancellingProvider())
+        # thread_ts truthy → the inline "⏳ Working… / ⏹ Stop" block is posted.
+        with pytest.raises(asyncio.CancelledError):
+            await handle_message(slack, sessions, "C1", "hi", "thr1", "msg1", "U1")
+
+        # The Stop button block was posted, then deleted on the cancellation path.
+        block_ts = [a[1]["ts"] for a in slack.actions if a[0] == "blocks"]
+        assert block_ts, "inline Stop button was never posted"
+        deleted = [a[1]["ts"] for a in slack.actions if a[0] == "delete"]
+        assert block_ts[0] in deleted, "inline Stop button not removed on cancellation"
+        # The native thread status was cleared (set back to empty string).
+        status_clears = [
+            a for a in slack.actions if a[0] == "set_thread_status" and a[1]["status"] == ""
+        ]
+        assert status_clears, "thread status not cleared on cancellation"
+
+    @pytest.mark.asyncio
+    async def test_working_indicators_cleared_on_unexpected_error(self):
+        """A generic exception mid-stream must also clear both indicators (the
+        handler swallows Exception, so this exits normally through the cleanup)."""
+
+        class _RaisingProvider(FakeProvider):
+            async def stream(self, message, timeout=120.0):
+                yield LLMEvent(kind="text_chunk", text="partial")
+                raise RuntimeError("boom")
+
+        slack = MockSlackClient()
+        sessions = FakeSessionManager(_RaisingProvider())
+        await handle_message(slack, sessions, "C1", "hi", "thr1", "msg1", "U1")
+
+        block_ts = [a[1]["ts"] for a in slack.actions if a[0] == "blocks"]
+        assert block_ts, "inline Stop button was never posted"
+        deleted = [a[1]["ts"] for a in slack.actions if a[0] == "delete"]
+        assert block_ts[0] in deleted, "inline Stop button not removed on error"
+        status_clears = [
+            a for a in slack.actions if a[0] == "set_thread_status" and a[1]["status"] == ""
+        ]
+        assert status_clears, "thread status not cleared on error"
+
+    @pytest.mark.asyncio
+    async def test_review_mode_working_status_cleared_on_early_cancel(self):
+        """Regression: a review-mode turn cancelled BEFORE it reaches the draft
+        delivery path must still clear the "…is working" thread status.
+
+        The review-mode status exemption (keep "Awaiting review…" rather than
+        clear) belongs only to the normal draft-delivery path, which sets that
+        label itself. An early exit — a message cancelled or the gateway
+        shutting down before the LLM call — never sets "Awaiting review…", so if
+        the teardown skipped the status clear in review mode on those paths too,
+        "is working" would stay stuck on the thread. The clear must therefore
+        run on this path (``keep_review_status`` defaults False).
+        """
+
+        class _CancelledSessions(FakeSessionManager):
+            def is_cancelled(self, key, msg_ts):
+                return True  # bail at the early cancellation check, before the LLM call
+
+        from kiro_crew.slack.handler import ACTIVATION_REVIEW
+
+        slack = MockSlackClient()
+        sessions = _CancelledSessions(FakeProvider([]))
+        await handle_message(
+            slack,
+            sessions,
+            "C1",
+            "hi",
+            "thr1",
+            "msg1",
+            "U1",
+            channel_activation=ACTIVATION_REVIEW,
+        )
+
+        # The native thread status was cleared (set back to empty string), even
+        # though this is a review-mode channel and the turn never delivered a draft.
+        status_clears = [
+            a for a in slack.actions if a[0] == "set_thread_status" and a[1]["status"] == ""
+        ]
+        assert status_clears, "review-mode thread status not cleared on early cancellation"
+        # It was NOT left on "Awaiting review…" (which only the delivery path sets).
+        awaiting = [
+            a
+            for a in slack.actions
+            if a[0] == "set_thread_status" and a[1]["status"] == "Awaiting review…"
+        ]
+        assert not awaiting, "early-cancel path must not leave an 'Awaiting review…' label"
         slack = MockSlackClient()
         provider = FakeProvider([LLMEvent(kind="text_chunk", text="hello")])
         sessions = FakeSessionManager(provider)
