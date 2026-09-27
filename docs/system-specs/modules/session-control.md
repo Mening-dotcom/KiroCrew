@@ -437,9 +437,12 @@ session's folder or project in the dashboard package and holds the
 request-driven ones to that decision, naming why each other writer (a restore, a
 fork's copy, a channel or cron placement from configuration, a session's own
 project) is not a filing. The `steering_dirs` declaration gate at both of its
-write sites (`_refuse_agent_steering_dirs`, spec'd in `config.md`) is main's
-#11827 rule: an app's or a member's declaration is refused with that gate's own
-403 (`steering_dirs_forbidden`). `session_create` itself still resolves the child's project from
+write sites (`_refuse_agent_steering_dirs`, spec'd in `config.md`) keys on the
+same bit: a steering declaration is a gateway host-file read that lands in the
+person's chats, the same gap class as a binding, so every non-person caller is
+refused it with that gate's own 403 (`steering_dirs_forbidden`) -- the person
+alone declares; clearing to `[]` stays allowed for every principal, as it only
+removes reads. `session_create` itself still resolves the child's project from
 the caller's workspace (`default_project_dir`), not from the folder it files
 into; #11680 adds that inheritance. The caller's OWN slot is filed the same way
 with `chat_folder_file_self` (folder tools, same server): it takes no `session`
