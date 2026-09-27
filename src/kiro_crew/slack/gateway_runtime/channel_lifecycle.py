@@ -249,7 +249,8 @@ async def _connect_slack(self: GatewayOrchestrator) -> bool:
     dashboard, cron, and task runner keep running in dashboard-only mode.
 
     ponytail: no background retry of the initial connect — Slack DM stays
-    disabled until the next gateway restart.
+    disabled until the operator reconnects (``reconnect_slack``, behind
+    ``POST /api/slack/reconnect``) or the gateway restarts.
 
     Slack is a GOVERNED transport like every other channel: a ``channels``
     policy that denies ``slack`` must stop it from CONNECTING, not merely drop
