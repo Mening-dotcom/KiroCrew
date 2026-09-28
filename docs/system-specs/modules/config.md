@@ -3227,7 +3227,8 @@ corrupt existing document as described above.
 `skills.max_triggered=0` disables per-message trigger injection, not discovery.
 The default entry (`lazy_load=true`) is a bounded usage-ranked index carrying each
 skill's path, and one line naming the families it leaves out. `lazy_load=false`
-selects the shorter entry: up to eight usage-ranked names with short purposes plus
+selects the shorter entry: up to eight names (up to six of them the user's own
+skills, the rest the highest-ranked remaining skills) with short purposes plus
 `skill_search` guidance for short keywords. An agent with its own `skill://`
 mapping gets neither -- those skills arrive as complete instructions. Both preserve pinned instructions, confined project-body
 limits and explicit loading. Thread history scales with the model window
