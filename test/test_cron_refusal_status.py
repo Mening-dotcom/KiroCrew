@@ -125,6 +125,7 @@ def _run_cron_runs(
             captured_cb = on_job
             svc = MagicMock()
             svc.start = AsyncMock()
+            svc.get_job = MagicMock(return_value=None)
             return svc
 
         mock_cron_cls.create = AsyncMock(side_effect=capture_cron)

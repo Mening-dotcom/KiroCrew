@@ -1044,6 +1044,15 @@ _EXEMPT_READ_DECIDE_WRITE: dict[tuple[str, str], str] = {
         "The same verb-dispatcher shape as `_cron_dispatch` -- one branch per tool, "
         "so no branch reads and then decides a write."
     ),
+    ("src/kiro_crew/slack/gateway.py", "_init_cron"): (
+        "The cron callback's `get_job` is a destination REFRESH, not a "
+        "read-that-decides-a-write: it is `get_job(job.id) or job`, so an "
+        "unreadable store (an empty snapshot -> None) falls straight back to the "
+        "job already captured for this run and in hand. The Slack post happens "
+        "either way, against the captured job, so a degraded read never makes the "
+        "caller skip the write or report success over a corrupt store -- it only "
+        "chooses between the fresh record and the one it already holds."
+    ),
 }
 
 

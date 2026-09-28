@@ -1649,6 +1649,7 @@ class TestInitCron:
         orch.subagent_mgr.running = []
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs.return_value = mock_cs_inst
@@ -1666,6 +1667,7 @@ class TestInitCron:
         orch.subagent_mgr.running = []
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs.return_value = mock_cs_inst
@@ -1704,6 +1706,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -1780,6 +1783,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -1856,6 +1860,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -1932,6 +1937,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -2024,6 +2030,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -2110,6 +2117,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -2188,6 +2196,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -2257,6 +2266,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -2325,6 +2335,7 @@ class TestInitCron:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -3033,6 +3044,7 @@ class TestCronFailurePaths:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -3106,6 +3118,7 @@ class TestCronFailurePaths:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -3179,6 +3192,7 @@ class TestCronFailurePaths:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -3888,6 +3902,7 @@ class TestCronSuccessReminder:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -6366,6 +6381,7 @@ class TestCronAcpRetry:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -6748,6 +6764,7 @@ class TestCronAckedItems:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()
@@ -7590,6 +7607,7 @@ class TestCronSlackDeliveryFailure:
 
         with patch("kiro_crew.slack.gateway.CronService") as mock_cs:
             mock_cs_inst = MagicMock()
+            mock_cs_inst.get_job = MagicMock(return_value=None)
             mock_cs_inst.start = AsyncMock()
             mock_cs_inst.start_reaper = MagicMock()
             mock_cs_inst.register_active_session_key = MagicMock()

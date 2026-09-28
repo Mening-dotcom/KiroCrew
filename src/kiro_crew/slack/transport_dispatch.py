@@ -203,6 +203,7 @@ async def handle_message_transport(
     from_trusted_bot: bool = False,
     dm_single_session: bool = False,
     start_priority: StartPriority = StartPriority.BACKGROUND,
+    links_generation: int | None = None,
 ) -> None:
     """Drive a Slack message through the new transport path end-to-end.
 
@@ -217,6 +218,11 @@ async def handle_message_transport(
     state to the session-directive consumer, so a monitor directive on a
     dashboard-owned thread can resolve the slot instead of failing closed on
     the sessions-backed stand-in.
+
+    ``links_generation`` is the Slack-link generation as of the event's receipt
+    (see ``handler.handle_message``): every thread binding this turn writes
+    presents it, so a workspace switch that swept the former workspace's
+    destinations while the turn was suspended refuses the write.
     """
     Stats().inc_message_received()
     _t0 = time.monotonic()
@@ -440,6 +446,7 @@ async def handle_message_transport(
         sessions,
         post_thread_ts or "",
         not _flat_key,
+        links_generation=links_generation,
     )
     if _only_modifier:
         # Message was nothing but the modifier(s) — no LLM turn.
@@ -616,7 +623,7 @@ async def handle_message_transport(
             sessions.get_session_for_thread(reply_ts) or session_key,
         )
         if is_new:
-            await sessions.set_channel(session_key, channel)
+            await sessions.set_channel(session_key, channel, generation=links_generation)
         if (
             not _flat_key
             and not linked_session_key
@@ -643,7 +650,10 @@ async def handle_message_transport(
             #
             # reply_ts (not session_key) is the true Slack timestamp -- storing
             # the namespaced key as slack_thread_ts would corrupt reply routing.
-            sessions.set_slack_link(session_key, reply_ts, channel)
+            #
+            # Fenced by the receipt generation (see the docstring): a claim
+            # captured in the former workspace must not land after a switch.
+            sessions.set_slack_link(session_key, reply_ts, channel, generation=links_generation)
         # Publish this turn's session identity so managed MCP tools resolve
         # X-Session-Key; one shared writer lives in messaging.identity.
         await publish_turn_identity(sessions, session_key)
