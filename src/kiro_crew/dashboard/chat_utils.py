@@ -57,6 +57,7 @@ from kiro_crew.execution_context import (
     tighten_live_session_execution,
 )
 from kiro_crew.external_text import redact_external_text
+from kiro_crew.gateway.constants import QUEUED_GATEWAY_MCP_META_KEY
 from kiro_crew.history import (
     is_incognito_transcript,
     transcript_lock_stems,
@@ -372,7 +373,9 @@ def _redact_tool_field(text: str | None, *, limit: int = _MAX_TOOL_FIELD) -> str
     return text
 
 
-def _build_stream_chunk(msg: dict, *, include_row_meta: bool = False) -> str:
+def _build_stream_chunk(
+    msg: dict, *, include_row_meta: bool = False, include_turn_origin: bool = False
+) -> str:
     """Build a JSON SSE chunk from a slot message, with meta redaction for permissions.
 
     ``include_row_meta`` carries the row's own durable ``meta`` dict (tool
@@ -380,17 +383,23 @@ def _build_stream_chunk(msg: dict, *, include_row_meta: bool = False) -> str:
     SSE / OpenAI-compat stream keeps its "only permission rows carry meta"
     contract; the RELAY drain turns it on, because a relay reader (``_apply_row``)
     rebuilds the local row from this record and would otherwise lose that tool
-    correlation permanently on a local refresh.
+    correlation permanently on a local refresh. ``include_turn_origin`` is the
+    narrower Gateway path: it exposes only ``_gateway_turn_origin`` so an
+    initiating client can correlate its own SSE rows without receiving unrelated
+    private metadata.
     """
     try:
         meta = parse_cls_meta(msg.get("cls", "")) if msg.get("role") == "permission" else None
     except Exception:
         logger.warning("Failed to parse cls meta for permission message", exc_info=True)
         meta = None
-    if meta is None and include_row_meta:
-        row_meta = msg.get("meta")
-        if isinstance(row_meta, dict):
-            meta = row_meta
+    row_meta = msg.get("meta")
+    if meta is None and include_row_meta and isinstance(row_meta, dict):
+        meta = row_meta
+    if include_turn_origin and isinstance(row_meta, dict):
+        origin = row_meta.get("_gateway_turn_origin")
+        if isinstance(origin, str) and origin:
+            meta = {**(meta or {}), "_gateway_turn_origin": origin}
     if meta:
         meta = _redact_deep(meta)
     # One shared guard for content: redact recursively and hold the
@@ -3984,22 +3993,27 @@ def carries_attachments(item: dict) -> bool:
 
 
 def _dequeue_next_message(slot, merge_enabled: bool) -> tuple:
-    """Drain the queue: merge non-cron messages or pop the first one.
+    """Drain the queue: merge compatible user messages or pop the first one.
 
     A merge run stops at a system injection, at an attachment-bearing entry
-    (see :func:`carries_attachments`) and at a possibly-delivered steer
-    (``STEER_POSSIBLY_DELIVERED_META``); either of the last two at the head of
-    the queue pops alone.
+    (see :func:`carries_attachments`), at a possibly-delivered steer
+    (``STEER_POSSIBLY_DELIVERED_META``), and at a Gateway-admission entry. The
+    last owns one immutable per-turn MCP snapshot and therefore cannot share a
+    turn with an ordinary queued message; the steer and the attachment-bearing
+    entry at the head of the queue pop alone.
     """
     if merge_enabled and len(slot._queue) > 1:
         to_merge: list[dict] = []
         for item in list(slot._queue):
+            meta = item.get("meta")
+            has_gateway_admission = isinstance(meta, dict) and QUEUED_GATEWAY_MCP_META_KEY in meta
             if (
                 is_system_injection_item(item)
                 or carries_attachments(item)
+                or has_gateway_admission
                 # Its note speaks for one message; merged, it would vouch that
                 # messages never written to any pipe may already have run.
-                or (item.get("meta") or {}).get(STEER_POSSIBLY_DELIVERED_META)
+                or (meta or {}).get(STEER_POSSIBLY_DELIVERED_META)
             ):
                 break
             to_merge.append(item)
