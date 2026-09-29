@@ -153,12 +153,26 @@ def _url_payload_command(n: int) -> str:
 #: Windows file too large to hash on the gate is never served, so a dotless target
 #: there is pending, and the ssh self-target refusal note says so.
 #:
+#: Raised again, from 28,399, for naming the program and target tokens in a self-kill
+#: refusal: ``argv_floor`` splits the command into shell words at their real source
+#: offsets through the shared quote/escape state machine, aligns those raw word spans
+#: to the resolved frame's tokens by index, and brackets the kill program and its
+#: target at their true offsets even when the program entered through a ``$VAR``
+#: expansion, so the assignment that only mentions the name is not mistaken for the
+#: target; only the offset-mappable top-level frame is bracketed and a raw/token count
+#: mismatch falls back to the whole span. ``diagnostics`` carries the optional program
+#: and target spans plus the ``RefusalTokenSpan`` record, keeping the ``span=`` line
+#: byte-identical when they are omitted. The offset machinery lives in a new
+#: ``argv_spans`` module -- the raw word-span splitter and its index alignment -- so
+#: ``argv_floor`` stays under its per-module cap; most of the cost is that machinery
+#: and its record, not new matching logic.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 28_399
+_PACKAGE_LINE_BUDGET = 28_631
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
