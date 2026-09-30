@@ -207,6 +207,17 @@ describe('automation transport normalizer', () => {
     expect(record).toMatchObject({ kind: 'structured_monitor', actionable: false })
   })
 
+  // 0 is this budget's unlimited sentinel, so it is IN bounds where its siblings
+  // reject it -- a record carrying it must stay usable rather than fail closed.
+  it('accepts an unlimited wake budget', () => {
+    const record = normalizeAutomationRecord(structuredLoop({
+      budgets: { max_runtime_secs: 14_400, max_agent_turns: 0, max_tokens: 250_000, max_provider_errors: 3 },
+    }))
+
+    expect(record).toMatchObject({ kind: 'structured_monitor' })
+    expect((record as { budgets: { maxAgentTurns: number } }).budgets.maxAgentTurns).toBe(0)
+  })
+
   it.each([
     ['token usage boolean', { token_usage_known: 'yes' }],
     ['wake-in-flight boolean', { wake_in_flight: 1 }],

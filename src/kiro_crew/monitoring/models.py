@@ -337,8 +337,10 @@ def monitor_frontend_contract() -> dict[str, object]:
                 "maximum": MAX_MONITOR_RUNTIME_SECS,
                 "defaultValue": DEFAULT_MONITOR_RUNTIME_SECS,
             },
+            # Zero is admitted as the unlimited sentinel, which is why this one
+            # field has a floor of 0 where its three siblings have 1.
             "maxAgentTurns": {
-                "minimum": 1,
+                "minimum": 0,
                 "maximum": MAX_MONITOR_AGENT_TURNS,
                 "defaultValue": DEFAULT_MONITOR_AGENT_TURNS,
             },
@@ -398,7 +400,10 @@ class MonitorActionCompletion:
 class MonitorBudgets:
     """Hard bounds for a structured monitor.
 
-    Unlike legacy AutoNudge values, zero never means unlimited here.
+    ``max_agent_turns`` is the one field where zero means unlimited, matching the
+    legacy prompt loop's ``max_cycles``. The other three reject it: a watch with
+    no runtime, token or provider-error bound is a watch with no cost ceiling at
+    all, which is what the unlimited wake count relies on to stay affordable.
     """
 
     max_runtime_secs: int = DEFAULT_MONITOR_RUNTIME_SECS
@@ -414,12 +419,18 @@ class MonitorBudgets:
             "max_provider_errors",
         ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
+            floor = 0 if name == "max_agent_turns" else 1
+            if isinstance(value, bool) or not isinstance(value, int) or value < floor:
+                requirement = (
+                    "a non-negative integer, where zero means unlimited"
+                    if floor == 0
+                    else "a positive integer"
+                )
+                raise ValueError(f"{name} must be {requirement}")
         if self.max_runtime_secs > MAX_MONITOR_RUNTIME_SECS:
             raise ValueError(f"max_runtime_secs must be at most {MAX_MONITOR_RUNTIME_SECS}")
-        if self.max_agent_turns > DEFAULT_MONITOR_AGENT_TURNS:
-            raise ValueError(f"max_agent_turns must be at most {DEFAULT_MONITOR_AGENT_TURNS}")
+        if self.max_agent_turns > MAX_MONITOR_AGENT_TURNS:
+            raise ValueError(f"max_agent_turns must be at most {MAX_MONITOR_AGENT_TURNS}")
 
 
 class MonitorSeverity(str, Enum):
