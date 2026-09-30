@@ -46,7 +46,7 @@
  */
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { AlarmClock, ArrowLeft, Check, ChevronRight, Circle, Goal, LayoutDashboard, ListChecks, MessageCircleQuestionMark, NotebookPen, Plus, RotateCw, Route, Sparkles, Square, Star, Users, Zap } from 'lucide-react'
+import { AlarmClock, ArrowLeft, Check, ChevronRight, Circle, Goal, LayoutDashboard, ListChecks, MessageCircleQuestionMark, MessageSquare, NotebookPen, Plus, RotateCw, Route, Sparkles, Square, Star, Users, Zap } from 'lucide-react'
 import { PanelRightSolid } from '../../components/icons/panels'
 import { Btn } from '../../components/ui'
 import { CrewMemberMark } from '../../components/CrewMemberMark'
@@ -109,8 +109,9 @@ import {
   type MemberSignals, type MemberSort, type MemberSourceFilter, type MemberStatusFilter, type RosterQuery,
 } from './rosterFilter'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { isSidePanelHidden, shouldMountSidePanel, sidePanelDockMotion } from '../chat/sidePanelMount'
+import { isSidePanelHidden, shouldMountSidePanel } from '../chat/sidePanelMount'
 import SidePanel, { SIDE_PANEL_MIN_W, SIDE_PANEL_RESERVED_W, type SidePanelLeadingTab, type SidePanelWithholdable } from '../chat/SidePanel'
+import MembersPageTabBar from './MembersPageTabBar'
 import { CHAT_TRANSCRIPT_VIEWS, VIEW_DATA_SOURCE, useAnyLiveAppTab, usePanelTabs, type ViewKind } from '../../hooks/usePanelTabs'
 import { usePanelTabDescriptors } from '../../hooks/panelTabRegistry'
 import CrewWakeSection from '../../components/CrewWakeSection'
@@ -217,20 +218,30 @@ const ROSTER_WIDTH_KEY = 'mc-members-roster-width'
  *  ring means older in-window events were dropped, so a count off it is a
  *  floor, not exact. */
 const ACTIVITY_RING = 50
+export const CREW_CHAT_TAB_ID = 'crew-chat'
 export const CREW_NOTES_TAB_ID = 'crew-notes'
 export const CREW_WORK_LOG_TAB_ID = 'crew-work-log'
 export const CREW_DASHBOARD_TAB_ID = 'crew-dashboard'
 export const CREW_SCHEDULES_TAB_ID = 'crew-schedules'
-/** Host tabs of the crewmate panel, in strip order. Notes is the default focus.
- *  Must not collide with a chat `TabKind` — `'summary'` is the chat page's
- *  session-summary view, a different thing.
+/** Host tabs of the crewmate page, in bar order. Chat is the FIRST tab and the
+ *  default focus — its body is the DM thread; Notes / Work log / Dashboard /
+ *  Schedules are panel bodies. The whole set drives a page-level tab bar
+ *  (`MembersPageTabBar`); each fills the content area (Chat included). None may
+ *  collide with a chat `TabKind` — `'summary'` is the chat page's
+ *  session-summary view, a different thing. Chat is a bar-only tab: it has no
+ *  SidePanel leading body (when Chat is active the thread renders in place of
+ *  the panel), but it IS in `leadingIds` so a fresh strip opens on it and focus
+ *  can fall back to it.
  *
  *  Schedules is last and is the one tab that WRITES: it hosts the same
  *  `CrewWakeSection` the crew editor's Schedules pane hosts, so the page's "never
  *  a second editor" rule holds by identity rather than by omission — there is one
  *  schedules editor in the product, mounted on two surfaces. Everything else the
  *  crew editor owns (template, memory, cloud, routing) still lives only there. */
-export const CREW_PANEL_TAB_IDS: readonly string[] = [CREW_NOTES_TAB_ID, CREW_WORK_LOG_TAB_ID, CREW_DASHBOARD_TAB_ID, CREW_SCHEDULES_TAB_ID]
+export const CREW_PANEL_TAB_IDS: readonly string[] = [CREW_CHAT_TAB_ID, CREW_NOTES_TAB_ID, CREW_WORK_LOG_TAB_ID, CREW_DASHBOARD_TAB_ID, CREW_SCHEDULES_TAB_ID]
+/** The panel's OWN leading tabs (Notes / Work log / Dashboard / Schedules) —
+ *  Chat is not one of them, its body is the thread column, not a panel body. */
+export const CREW_PANEL_BODY_TAB_IDS: readonly string[] = [CREW_NOTES_TAB_ID, CREW_WORK_LOG_TAB_ID, CREW_DASHBOARD_TAB_ID, CREW_SCHEDULES_TAB_ID]
 /** Chat-panel views this page withholds from the strip and the + menu
  *  (`SidePanel.hiddenViews`). The unfed half is DERIVED, not enumerated: every
  *  view `VIEW_DATA_SOURCE` classifies as `chat-transcript` (Changes / Issues /
@@ -375,9 +386,6 @@ const DRIVING_STATUS: Record<TabStatus, { cls: string; text: string; label: stri
 }
 // Module-level so the resize hook's memoised resolver isn't invalidated every render.
 const loadRosterWidth = () => loadColumnWidth(ROSTER_WIDTH_KEY, ROSTER_MIN, ROSTER_MAX, ROSTER_DEFAULT)
-/** The chat side panel's right-dock mount preset — module-pure, so one
- *  constant serves every render. */
-const dockMotion = sidePanelDockMotion('right')
 /** The auto-nudge service's terminal codes (`NudgeLoop.stopped_reason`) a
  *  member slot can actually receive, each mapped to the sentence the patrol
  *  block shows for a stopped loop. A code not listed here — a future terminal
@@ -1016,7 +1024,7 @@ export default function MembersPage() {
   // — so dismissing the drawer must not also hide the column the next time the
   // window widens.
   const [dockedOpen, setDockedOpen] = usePersistedBool(PANEL_OPEN_KEY, true)
-  const { panelVisible, showOpener } = panelChrome({ beside, dockedOpen, overlayOpen })
+  const { panelVisible: basePanelVisible, showOpener: baseShowOpener } = panelChrome({ beside, dockedOpen, overlayOpen })
   const closeDocked = useCallback(() => setDockedOpen(false), [setDockedOpen])
   // One gesture drives whichever placement is live, so the header button and
   // the dashboard's side-panel chord share it. The chord reaches this page the
@@ -1684,10 +1692,45 @@ export default function MembersPage() {
   // Whether the Schedules section is mounted, readable from the effect below without
   // making it depend on a value computed further down this render.
   const schedulesMountedRef = useRef(false)
-  const activeTabId = shownTabId ?? tabsCtl.activeId
-  const notesVisible = panelVisible && activeTabId === CREW_NOTES_TAB_ID
-  const workLogVisible = panelVisible && activeTabId === CREW_WORK_LOG_TAB_ID
-  const dashboardVisible = panelVisible && activeTabId === CREW_DASHBOARD_TAB_ID
+  // The tab the PAGE shows is the true stored focus (`tabsCtl.activeId`), never
+  // the SidePanel's reported tab: Chat is not one of the panel's leading tabs,
+  // so the panel resolves its own active to its first body tab (Notes) and
+  // would otherwise clobber a Chat click the instant it reported. A null focus
+  // reads as Chat (a fresh strip opens on `CREW_PANEL_TAB_IDS[0]`).
+  const activeTabId = tabsCtl.activeId ?? CREW_CHAT_TAB_ID
+  const chatVisible = activeTabId === CREW_CHAT_TAB_ID
+  // Desktop (Option 1): every tab fills the content region, so there is no
+  // open/close toggle — the panel body is "visible" exactly when a non-Chat
+  // body tab is the active one, and Chat shows the thread column instead. The
+  // header opener is gone on desktop (the bar switches tabs). Mobile keeps the
+  // overlay semantics: `basePanelVisible` (overlayOpen) and its opener.
+  const panelVisible = beside ? !chatVisible : basePanelVisible
+  const showOpener = beside ? false : baseShowOpener
+  // The panel's own body data-read gates use what the PANEL shows (`shownTabId`
+  // via onActiveTabChange), falling back to the page focus — a body tab
+  // withheld while unconfirmed makes the panel report a fallback, and its data
+  // read must follow the body actually on screen.
+  const panelActiveTabId = shownTabId ?? activeTabId
+  const notesVisible = panelVisible && panelActiveTabId === CREW_NOTES_TAB_ID
+  const workLogVisible = panelVisible && panelActiveTabId === CREW_WORK_LOG_TAB_ID
+  const dashboardVisible = panelVisible && panelActiveTabId === CREW_DASHBOARD_TAB_ID
+  // The page-level tab bar's fixed HEAD, MINUS Schedules — Chat first (its body
+  // is the thread), then the panel bodies Notes / Work log / Dashboard. Only the
+  // id/title/icon are read by the bar (the bodies themselves render below the
+  // bar); Chat's `render` is a no-op placeholder since the thread column, not a
+  // panel body, is its content. The Schedules head tab carries a live badge and
+  // a draft guard, both of which depend on values computed further down, so it is
+  // appended in `barHeadTabs` below rather than baked in here.
+  const barHead = useMemo<SidePanelLeadingTab[]>(() => [
+    { id: CREW_CHAT_TAB_ID, title: t('pages.membersPage.chat_tab'), icon: <MessageSquare className="lucide-inline" aria-hidden="true" />, render: () => null },
+    { id: CREW_NOTES_TAB_ID, title: t('pages.membersPage.notes_tab'), icon: <NotebookPen className="lucide-inline" aria-hidden="true" />, render: () => null },
+    { id: CREW_WORK_LOG_TAB_ID, title: t('pages.membersPage.work_log_tab'), icon: <ListChecks className="lucide-inline" aria-hidden="true" />, render: () => null },
+    { id: CREW_DASHBOARD_TAB_ID, title: t('pages.membersPage.dashboard_tab'), icon: <LayoutDashboard className="lucide-inline" aria-hidden="true" />, render: () => null },
+  ], [t])
+  // Bridges the SidePanel's GUARDED tab close (dirty-file confirmation) to the
+  // page tab bar: SidePanel publishes its `handleCloseTab` here, the bar calls
+  // it so closing a dynamic document tab cannot silently drop an unsaved buffer.
+  const closeTabRef = useRef<((id: string) => void) | null>(null)
   const [dashboardVisitedFor, setDashboardVisitedFor] = useState<string | null>(null)
   useEffect(() => {
     if (dashboardVisible) setDashboardVisitedFor(activeMemberKey)
@@ -1835,10 +1878,15 @@ export default function MembersPage() {
   // Same key and same queryFn as the pane inside (`crewWakeQueryKey` +
   // `api.crons()`), so opening the tab spends no second request and the chip can
   // never disagree with the list it summarizes.
+  // Gated on a member being OPEN, not on the panel being visible: the badge
+  // lives on the page tab bar's Schedules head tab, which is on screen for every
+  // open crewmate regardless of which tab is active (Chat is the default, so a
+  // `panelVisible` gate would leave the badge unread until the user opened a
+  // panel tab — the very thing the badge exists to make unnecessary).
   const schedulesCountQuery = useQuery({
     queryKey: crewWakeQueryKey(activeMemberName),
     queryFn: () => api.crons(),
-    enabled: panelVisible && !!activeMemberName,
+    enabled: !!activeMemberName,
   })
   // An unreadable list is UNKNOWN, not zero: the crew editor's rail makes the
   // same distinction (`schedulesUnknown`), and a chip reading "0" would state
@@ -1923,7 +1971,35 @@ export default function MembersPage() {
     if (ok) releaseSchedRetention()
     return ok
   }, [confirmSched, t, releaseSchedRetention])
-  // The overlay scrim closes the panel without passing through the panel's own close
+  // The final bar-head handed to `MembersPageTabBar`: `barHead` (Chat / Notes /
+  // Work log / Dashboard) plus the Schedules head tab, which — unlike the other
+  // four — carries a live badge (its jobs' live/total count) and a draft guard
+  // (`onBeforeLeave`), both depending on values computed above. The bar renders
+  // the badge and routes a switch AWAY from Schedules through `mayLeaveSchedules`
+  // first, since the SidePanel's own strip (which used to own that guard) is
+  // hidden here (`hideStrip`).
+  const barHeadTabs = useMemo<SidePanelLeadingTab[]>(() => [
+    ...barHead,
+    {
+      id: CREW_SCHEDULES_TAB_ID,
+      title: t('pages.membersPage.schedules_tab'),
+      icon: <AlarmClock className="lucide-inline" aria-hidden="true" />,
+      render: () => null,
+      onBeforeLeave: mayLeaveSchedules,
+      badge: schedulesUnknown || schedulesTotalCount === 0 ? undefined : (
+        <span
+          className="font-mono text-[11px] text-muted"
+          data-testid="member-schedules-count"
+          title={t('pages.membersPage.schedules_count_title', {
+            active: schedulesActiveCount,
+            total: schedulesTotalCount,
+          })}
+        >
+          {schedulesActiveCount}/{schedulesTotalCount}
+        </span>
+      ),
+    },
+  ], [barHead, t, mayLeaveSchedules, schedulesUnknown, schedulesTotalCount, schedulesActiveCount])
   // control, so it asks the draft question here. Gated on the tab actually being shown:
   // the dirty flag only means anything while the section is mounted.
   const requestCloseOverlay = useCallback(async () => {
@@ -2704,6 +2780,145 @@ export default function MembersPage() {
     </div>
   )
 
+  // The persistent per-member status header (Back button, identity/edit Glass
+  // pill with live CrewStateAvatar, panel-toggle). Extracted to a variable so
+  // it can render in TWO places without duplicating its JSX or moving any
+  // closure out of scope: on desktop (`beside`) it is the topmost child of the
+  // content column, ABOVE the tab bar, so it stays visible on EVERY tab (Chat
+  // and non-Chat alike); below md (`!beside`, single-pane) it renders inside
+  // the thread section exactly where it works today. Gated on `active` only —
+  // never on `chatVisible` — so a non-Chat tab no longer hides it on desktop.
+  const memberThreadHeader = active ? (
+    <header className="grid grid-cols-[1fr_minmax(0,auto)_1fr] items-center gap-2 px-3 py-2" data-testid="member-thread-header">
+      <div className="flex items-center justify-start min-w-0">
+        <button
+          // Back to the roster. When this entry was pushed from the
+          // roster on this page, pop it — the browser's own Back then
+          // lands on whatever preceded the roster, with no duplicate
+          // roster entry. A deep link (no such state) has no roster
+          // entry behind it, so drop the param in place instead.
+          onClick={() => {
+            const go = () => {
+              if ((location.state as { fromRoster?: boolean } | null)?.fromRoster) navigate(-1)
+              else setSearchParams({}, { replace: true })
+            }
+            // Clearing the member param unmounts the panel subtree with the
+            // Schedules form in it, so this asks like every other exit. The
+            // replace branch is the one that needed it most: a replace raises no
+            // `popstate`, so neither the published stake nor `NavigationBackGuard`
+            // can see it, and a deep-linked crewmate on a narrow window reaches
+            // it with an ordinary tap.
+            if (!schedAtStakeRef.current()) { go(); return }
+            void schedGuardRef.current().then((ok) => { if (ok) go() })
+          }}
+          className="md:hidden inline-flex items-center p-1 -ml-1 rounded hover:bg-accent/40"
+          aria-label={t('pages.membersPage.title')}
+          data-testid="member-back"
+        >
+          <ArrowLeft size={16} className="lucide-inline" />
+        </button>
+      </div>
+      {/* The identity pill: one centred Glass chip holding the face and
+          the name, the same material as the composer dock and the
+          follow-up chips (components/Glass.tsx), so the crewmate's name
+          reads as a floating title over its own thread rather than a
+          left-aligned toolbar label. The chip solidifies with the rest
+          of the glass when the Translucent-panels setting is off or
+          the platform reduces transparency. Only the pill carries the
+          material — the side controls stay bare so the header has one
+          pane, not three.
+
+          The pill IS the member's edit entry: the whole chip is one
+          button (the pane's host, `as="button"`, so the material and
+          the control are the same element) that opens the member's
+          WHOLE editor in the crew manager — name, template, model,
+          workspace, triggers, avatar — so the label says "Edit
+          crewmate". It navigates rather than editing here: this page
+          never becomes a second writer (issue #9103). There is no
+          separate pencil: the maintainer dropped the hover-revealed
+          pencil that used to sit right of the name (#9425) once the
+          identity became one clickable pill — a chip that already reads
+          as a control does not need a second control inside it. The
+          face is still not an edit control of its own (#9116): it is a
+          plain face inside the pill, and the pill's label names the
+          editor, not the avatar. No hover step: the pane is the same
+          glass at rest and under the pointer (maintainer decision --
+          the Glass material carries no hover state of its own), so the
+          pointer cursor and the tooltip are the affordance; focus is
+          the app's own ring. The button's accessible NAME is its content — the
+          crewmate's name — so a screen reader still hears who the
+          thread is with and voice control can say the name; what the
+          click does ("Edit crewmate") rides along as the tooltip,
+          which doubles as the accessible description. An aria-label
+          would replace the identity with the verb. */}
+      <Glass
+        as="button"
+        type="button"
+        variant="chip"
+        radius={999}
+        // Through `leave`, not a raw `navigate`: this pill sits in the header
+        // that is on screen at the same time as the panel's Schedules tab, and
+        // it leaves the route entirely, so an ungated click would discard a
+        // typed draft with no recovery. Same call shape as the Dashboard tab's
+        // "Set up". The pencil this replaced (#9425) carried the same guard.
+        onClick={() => {
+          const destination = crewEditPath(active.name)
+          leave(() => navigate(destination), destination)
+        }}
+        className="glass-shadow flex items-center gap-2.5 pl-2.5 pr-4 py-1.5 min-w-0 max-w-full justify-self-center cursor-pointer text-left focus-ring"
+        title={t('pages.membersPage.edit_member')}
+        data-testid="member-identity-pill"
+      >
+        {/* The same reactive CrewStateAvatar as before — a plain face,
+            no scrim, no badge (issue #9425). */}
+        <CrewStateAvatar
+          seed={active.name}
+          avatar={active.avatar}
+          slotKey={activeSlot || active.slot_key}
+          running={!!isRunning(active)}
+          size={30}
+          working="full"
+        />
+        {/* Title row = name (+ the ID when a label covers it). */}
+        <div className="min-w-0 flex items-center gap-1.5" data-testid="member-title-row">
+          <div className="text-[13.5px] font-semibold truncate max-w-[24rem]">{crewDisplayName(active)}</div>
+          {/* The ID stays visible when a label covers it — routes, crons
+              and spawn params address the ID, never the label. */}
+          {crewDisplayName(active) !== active.name && (
+            <div className="text-[11px] font-mono text-muted truncate max-w-[11rem]" title={t('components.agentSelector.agent_id_tooltip', { name: active.name })}>{active.name}</div>
+          )}
+        </div>
+      </Glass>
+      {/* The panel's opener. Same icon and hit-target as the chat
+          page's side-panel toggle, so the two surfaces teach one
+          gesture, and the dashboard's side-panel chord fires it too.
+          Docked, it appears only while the panel is hidden — the open
+          panel's own strip carries the close control, which is exactly
+          how the chat page splits the two halves of the gesture. As an
+          overlay it stays put and reads pressed while the drawer is up.
+          The pin chip was removed: every member thread is pinned by
+          construction (a server invariant, not a per-thread state), so
+          announcing it taught the user a term for a thing that can
+          never be otherwise. The member's edit entry is not a peer of
+          this toggle: it is the identity pill in the middle. */}
+      <div className="flex items-center justify-end min-w-0">
+        {showOpener && (
+          <button
+            onClick={togglePanel}
+            className="flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 text-muted hover:text-text hover:bg-bg-hover cursor-pointer"
+            aria-pressed={panelVisible}
+            aria-controls="member-side-panel"
+            aria-label={t('pages.membersPage.details')}
+            title={t('pages.membersPage.details')}
+            data-testid="member-panel-toggle"
+          >
+            <PanelRightSolid size={15} />
+          </button>
+        )}
+      </div>
+    </header>
+  ) : null
+
   return (
     // No bottom inset on the root: the card columns carry their own pb-2 and
     // the side panel brings the chat SidePanel's mb-2, so all three end 8px
@@ -3164,6 +3379,31 @@ export default function MembersPage() {
         </div>
       </aside>
 
+      {/* Content column (desktop): the persistent per-member status header on
+          top (permanent — visible on EVERY tab), then the page tab bar, then
+          the region that swaps between the thread (Chat tab) and the panel body
+          (Notes / Work log / Dashboard / dynamic tabs). Each fills the swapping
+          region, so switching tabs replaces that area (Option 1) while the
+          header and tab bar stay put. Below md this wrapper is transparent to
+          layout (`contents`): the header, tab bar and thread / overlay render
+          inside the section exactly as before (the header is emitted there via
+          `!beside && memberThreadHeader`). */}
+      <div className={beside ? 'flex flex-1 min-w-0 flex-col min-h-0 gap-2 pb-2' : 'contents'}>
+        {/* Topmost, permanent, desktop-only: the status header. Gated on
+            `active && beside`, never on `chatVisible`, so it no longer vanishes
+            when the user switches to Notes / Work log / Dashboard / Schedules.
+            Below md it is rendered inside the thread section instead. */}
+        {active && beside && memberThreadHeader}
+        {active && beside && (
+          <MembersPageTabBar
+            tabsCtl={tabsCtl}
+            activeId={activeTabId}
+            leadingTabs={barHeadTabs}
+            hiddenViews={hiddenViews}
+            projectDir={projectDir}
+            onCloseTab={(id) => closeTabRef.current?.(id)}
+          />
+        )}
       {/* DM thread */}
       <section
         // Below md the column shows only while a chat or a team view is open —
@@ -3172,7 +3412,12 @@ export default function MembersPage() {
         // failure and its retry are said. A greeting notice sits over its
         // chat; once that chat is closed the roster is the screen and the
         // notice waits for the reopen.
-        className={`${activeName || activeTeam || postCreateError?.kind === 'roster' ? 'flex' : 'hidden md:flex'} flex-1 min-w-0 flex-col min-h-0`}
+        //
+        // Desktop (Option 1): when a member is open and a NON-Chat body tab is
+        // active, the thread hides and the panel body fills the content column
+        // in its place. Chat (or no member) keeps the thread on screen. The
+        // team view and hero states are `!active`, so they are unaffected.
+        className={`${active && beside && !chatVisible ? 'hidden' : activeName || activeTeam || postCreateError?.kind === 'roster' ? 'flex' : 'hidden md:flex'} flex-1 min-w-0 flex-col min-h-0`}
       >
         {!greetingNoticeInRoster && postCreateNotice}
         {/* The hero yields to a post-create notice: after the FIRST create a
@@ -3250,143 +3495,15 @@ export default function MembersPage() {
         )}
         {active && (
           <>
-            {/* No rule under the header: it shares the transcript's background
-                and is set off by spacing alone, the way ChatPage's session
-                header sits over its transcript (bg-bg, no border-b). A hairline
-                here read as a second frame inside the pane (issue #9425).
-                Three columns, the outer two equal, so the identity pill in the
-                middle is centred on the pane whether or not the back button
-                (narrow) or the panel opener (docked, panel hidden) is present:
-                a flex row with `flex-1` around the pill would shift it by the
-                width of whichever side control is missing. */}
-            <header className="grid grid-cols-[1fr_minmax(0,auto)_1fr] items-center gap-2 px-3 py-2" data-testid="member-thread-header">
-              <div className="flex items-center justify-start min-w-0">
-                <button
-                  // Back to the roster. When this entry was pushed from the
-                  // roster on this page, pop it — the browser's own Back then
-                  // lands on whatever preceded the roster, with no duplicate
-                  // roster entry. A deep link (no such state) has no roster
-                  // entry behind it, so drop the param in place instead.
-                  onClick={() => {
-                    const go = () => {
-                      if ((location.state as { fromRoster?: boolean } | null)?.fromRoster) navigate(-1)
-                      else setSearchParams({}, { replace: true })
-                    }
-                    // Clearing the member param unmounts the panel subtree with the
-                    // Schedules form in it, so this asks like every other exit. The
-                    // replace branch is the one that needed it most: a replace raises no
-                    // `popstate`, so neither the published stake nor `NavigationBackGuard`
-                    // can see it, and a deep-linked crewmate on a narrow window reaches
-                    // it with an ordinary tap.
-                    if (!schedAtStakeRef.current()) { go(); return }
-                    void schedGuardRef.current().then((ok) => { if (ok) go() })
-                  }}
-                  className="md:hidden inline-flex items-center p-1 -ml-1 rounded hover:bg-accent/40"
-                  aria-label={t('pages.membersPage.title')}
-                  data-testid="member-back"
-                >
-                  <ArrowLeft size={16} className="lucide-inline" />
-                </button>
-              </div>
-              {/* The identity pill: one centred Glass chip holding the face and
-                  the name, the same material as the composer dock and the
-                  follow-up chips (components/Glass.tsx), so the crewmate's name
-                  reads as a floating title over its own thread rather than a
-                  left-aligned toolbar label. The chip solidifies with the rest
-                  of the glass when the Translucent-panels setting is off or
-                  the platform reduces transparency. Only the pill carries the
-                  material — the side controls stay bare so the header has one
-                  pane, not three.
-
-                  The pill IS the member's edit entry: the whole chip is one
-                  button (the pane's host, `as="button"`, so the material and
-                  the control are the same element) that opens the member's
-                  WHOLE editor in the crew manager — name, template, model,
-                  workspace, triggers, avatar — so the label says "Edit
-                  crewmate". It navigates rather than editing here: this page
-                  never becomes a second writer (issue #9103). There is no
-                  separate pencil: the maintainer dropped the hover-revealed
-                  pencil that used to sit right of the name (#9425) once the
-                  identity became one clickable pill — a chip that already reads
-                  as a control does not need a second control inside it. The
-                  face is still not an edit control of its own (#9116): it is a
-                  plain face inside the pill, and the pill's label names the
-                  editor, not the avatar. No hover step: the pane is the same
-                  glass at rest and under the pointer (maintainer decision --
-                  the Glass material carries no hover state of its own), so the
-                  pointer cursor and the tooltip are the affordance; focus is
-                  the app's own ring. The button's accessible NAME is its content — the
-                  crewmate's name — so a screen reader still hears who the
-                  thread is with and voice control can say the name; what the
-                  click does ("Edit crewmate") rides along as the tooltip,
-                  which doubles as the accessible description. An aria-label
-                  would replace the identity with the verb. */}
-              <Glass
-                as="button"
-                type="button"
-                variant="chip"
-                radius={999}
-                // Through `leave`, not a raw `navigate`: this pill sits in the header
-                // that is on screen at the same time as the panel's Schedules tab, and
-                // it leaves the route entirely, so an ungated click would discard a
-                // typed draft with no recovery. Same call shape as the Dashboard tab's
-                // "Set up". The pencil this replaced (#9425) carried the same guard.
-                onClick={() => {
-                  const destination = crewEditPath(active.name)
-                  leave(() => navigate(destination), destination)
-                }}
-                className="glass-shadow flex items-center gap-2.5 pl-2.5 pr-4 py-1.5 min-w-0 max-w-full justify-self-center cursor-pointer text-left focus-ring"
-                title={t('pages.membersPage.edit_member')}
-                data-testid="member-identity-pill"
-              >
-                {/* The same reactive CrewStateAvatar as before — a plain face,
-                    no scrim, no badge (issue #9425). */}
-                <CrewStateAvatar
-                  seed={active.name}
-                  avatar={active.avatar}
-                  slotKey={activeSlot || active.slot_key}
-                  running={!!isRunning(active)}
-                  size={30}
-                  working="full"
-                />
-                {/* Title row = name (+ the ID when a label covers it). */}
-                <div className="min-w-0 flex items-center gap-1.5" data-testid="member-title-row">
-                  <div className="text-[13.5px] font-semibold truncate max-w-[24rem]">{crewDisplayName(active)}</div>
-                  {/* The ID stays visible when a label covers it — routes, crons
-                      and spawn params address the ID, never the label. */}
-                  {crewDisplayName(active) !== active.name && (
-                    <div className="text-[11px] font-mono text-muted truncate max-w-[11rem]" title={t('components.agentSelector.agent_id_tooltip', { name: active.name })}>{active.name}</div>
-                  )}
-                </div>
-              </Glass>
-              {/* The panel's opener. Same icon and hit-target as the chat
-                  page's side-panel toggle, so the two surfaces teach one
-                  gesture, and the dashboard's side-panel chord fires it too.
-                  Docked, it appears only while the panel is hidden — the open
-                  panel's own strip carries the close control, which is exactly
-                  how the chat page splits the two halves of the gesture. As an
-                  overlay it stays put and reads pressed while the drawer is up.
-                  The pin chip was removed: every member thread is pinned by
-                  construction (a server invariant, not a per-thread state), so
-                  announcing it taught the user a term for a thing that can
-                  never be otherwise. The member's edit entry is not a peer of
-                  this toggle: it is the identity pill in the middle. */}
-              <div className="flex items-center justify-end min-w-0">
-                {showOpener && (
-                  <button
-                    onClick={togglePanel}
-                    className="flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 text-muted hover:text-text hover:bg-bg-hover cursor-pointer"
-                    aria-pressed={panelVisible}
-                    aria-controls="member-side-panel"
-                    aria-label={t('pages.membersPage.details')}
-                    title={t('pages.membersPage.details')}
-                    data-testid="member-panel-toggle"
-                  >
-                    <PanelRightSolid size={15} />
-                  </button>
-                )}
-              </div>
-            </header>
+            {/* The status header renders here ONLY below md (single-pane
+                overlay): on this narrow path the section IS the whole screen
+                and there is no separate top wrapper, so the header keeps its
+                original spot at the top of the thread. On desktop (`beside`)
+                the SAME `memberThreadHeader` is rendered as the topmost child
+                of the content column instead (above the tab bar), so it stays
+                visible on every tab; rendering it here too would double it.
+                See the comment on the `memberThreadHeader` const. */}
+            {!beside && memberThreadHeader}
             {/* A failed document read from the panel's Files / Artifacts tabs.
                 Reported here, above the thread, rather than inside the tab
                 that failed to open — there is no such tab. Dismissable. No
@@ -3558,7 +3675,6 @@ export default function MembersPage() {
           </>
         )}
       </section>
-      </div>
 
       {/* Side panel — the chat page's tabbed SidePanel, docked to this page.
           Read-only observation lives in its permanent first tab (Crew
@@ -4194,6 +4310,16 @@ export default function MembersPage() {
             leadingTabs,
             slotTitle: crewDisplayName(activeView ?? active),
             canDockBottom: false,
+            // Desktop (Option 1): the page tab bar drives the tabs, so the
+            // panel's OWN strip is suppressed — otherwise the page would show
+            // two tab rows. Mobile keeps the panel's strip (it is the overlay's
+            // own chrome).
+            hideStrip: beside,
+            // Desktop: the panel fills a wide content column, so center each
+            // body at a reading measure like the chat transcript. Mobile is
+            // already narrow, so no cap there.
+            bodyMaxWidth: beside ? '900px' : undefined,
+            closeTabRef,
           }
           // ONE SidePanel instance for both placements. Docked and overlay differ
           // only in the wrapper (an in-flow column vs a fixed sheet below the
@@ -4217,7 +4343,14 @@ export default function MembersPage() {
           // from the right edge. Both axes are named in every target — see
           // sidePanelDockMotion for why an axis left out of `animate` freezes.
           const outerMotion = beside
-            ? dockMotion
+            /* Desktop (Option 1): the panel fills the content column via
+               `flex-1`, so a width reveal (dockMotion) would fight the layout.
+               A plain opacity fade in/out instead. */
+            ? {
+              initial: { opacity: 0 },
+              animate: { opacity: 1 },
+              exit: { opacity: 0 },
+            }
             : {
               initial: { opacity: 0, width: 'auto', height: '100%' },
               animate: { opacity: 1, width: 'auto', height: '100%' },
@@ -4237,7 +4370,10 @@ export default function MembersPage() {
                   exit={outerMotion.exit}
                   transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
                   className={beside
-                    ? 'h-full overflow-visible flex justify-end shrink-0'
+                    /* Desktop (Option 1): fill the content column below the tab
+                       bar. The thread section is hidden when a body tab is
+                       active, so the panel body occupies the same area. */
+                    ? 'flex-1 min-w-0 min-h-0 flex overflow-visible'
                     /* Both placements are dismissable, and the overlay carries a
                        second dismiss on top of the strip's close: the scrim,
                        the drawer convention. On a phone the panel is
@@ -4258,7 +4394,7 @@ export default function MembersPage() {
                     animate={innerMotion.animate}
                     exit={innerMotion.exit}
                     transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
-                    className={beside ? 'h-full flex justify-end relative' : 'h-full flex justify-end max-w-full relative'}
+                    className={beside ? 'flex-1 min-w-0 h-full flex relative' : 'h-full flex justify-end max-w-full relative'}
                   >
                     {/* The open reply thread covers the panel's tabs while it is on
                         screen and slides away on close, so the tabs the user had are
@@ -4313,6 +4449,8 @@ export default function MembersPage() {
             </AnimatePresence>
           )
         })()}
+      </div>
+      </div>
       {/* New team / Edit team. A saved team opens its team view; a deleted one
           that was open drops `?team=` and the bare URL falls to the page's
           default (the remembered or most recently used crewmate, or the hero

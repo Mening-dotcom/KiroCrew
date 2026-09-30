@@ -64,6 +64,15 @@ const KIND_ICON: Record<BuiltinTabKind, ReactNode> = {
   app: <PanelRight size={16} />, git: <GitBranch size={16} />,
 }
 
+/** The glyph for a BUILT-IN tab kind (`KIND_ICON`). App-contributed kinds
+ *  (`app:<…>`) resolve their manifest icon through `appIcon` at the call site,
+ *  so this returns `null` for them. Exported so other tab surfaces (the Crew
+ *  Members page's own tab bar) render the same built-in glyphs. */
+export function kindIcon(kind: TabKind): ReactNode {
+  if (isPanelTabKind(kind)) return null
+  return KIND_ICON[kind]
+}
+
 /** The strip/menu glyph for a tab kind. A built-in reads `KIND_ICON`; an
  *  app-contributed kind resolves its manifest lucide icon NAME through the
  *  app-facing icon set, falling back to a generic panel glyph. */
@@ -386,6 +395,24 @@ interface SidePanelProps {
    *  must listen here rather than read `tabsCtl.activeId`, which is the STORED
    *  focus and is deliberately left untouched by a withdrawal. */
   onActiveTabChange?: (id: string | null) => void
+  /** Suppress the panel's OWN tab strip (the `side-panel-strip` row). A host
+   *  that drives the same `tabsCtl` from a page-level tab bar (the Crew Members
+   *  page) renders the strip itself, so the panel would otherwise show two tab
+   *  rows. The body — leading-tab bodies, pinned/dynamic tab bodies, the
+   *  launcher — renders unchanged. The panel chrome (close / dock) lives in the
+   *  strip, so a host that hides it must provide its own close affordance. */
+  hideStrip?: boolean
+  /** When set, LEADING-tab bodies are centered in a `mx-auto` column capped at
+   *  this CSS width (a reading measure, like the chat transcript's
+   *  `--mc-content-width`). A host whose panel fills a wide content column (the
+   *  Crew Members page) passes it so Notes / Work log / Dashboard do not stretch
+   *  edge to edge. Unset ⇒ bodies fill the full width as before. */
+  bodyMaxWidth?: string
+  /** A host that renders its OWN tab bar (Crew Members) and hides this panel's
+   *  strip (`hideStrip`) must still close tabs through the DIRTY GUARD, not the
+   *  raw `tabsCtl.closeTab`. SidePanel publishes its guarded `handleCloseTab`
+   *  into this ref on mount; the host's bar calls `closeTabRef.current?.(id)`. */
+  closeTabRef?: React.MutableRefObject<((id: string) => void) | null>
   /** Is the whole panel mounted-but-invisible? A live app or browser tab keeps
    *  the subtree mounted through a close (its iframe / WebContentsView cannot
    *  survive a remount), and the find pane hides it while owning the dock — so
@@ -489,7 +516,7 @@ export default function SidePanel({
   pins, pinsLoading, onJumpToPin, onUnpin,
   slotTitle, chatMode,
   expanded, fillWidth, canDockBottom = true,
-  leadingTabs, extraReserveW = 0, hiddenViews, onActiveTabChange,
+  leadingTabs, extraReserveW = 0, hiddenViews, onActiveTabChange, hideStrip = false, bodyMaxWidth, closeTabRef,
 }: SidePanelProps) {
   const { tabs, activeId: storedActiveId, openView, openPanelTab, openTerminal, setActive, closeTab, patchTab, setOrder, syncPinned } = tabsCtl
   // A permanent panel has no close control and answers Escape with nothing —
@@ -656,14 +683,34 @@ export default function SidePanel({
   // rendered by the always-mounted BottomTerminalPanel root — this tab is
   // already gone by then.
   const deleteTerminalSession = useDeleteTerminalSession()
+  // Guarded-close registry: a document body (FileTabBody) publishes its
+  // `requestClose` here so a tab-strip / page-bar chip close confirms an unsaved
+  // buffer instead of dropping it. Keyed by tab id; cleared on the body unmount.
+  const guardedCloses = useRef<Map<string, () => void>>(new Map())
+  const registerGuardedClose = useCallback((id: string, requestClose: (() => void) | null) => {
+    if (requestClose) guardedCloses.current.set(id, requestClose)
+    else guardedCloses.current.delete(id)
+  }, [])
   const handleCloseTab = useCallback((id: string) => {
     const t = tabs.find(x => x.id === id)
     if (t?.kind === 'terminal' && t.sessionId) {
       deleteTerminalSession.mutate(t.sessionId)
       disposeTerminalSession(t.sessionId)
     }
+    // A document body with a live editor routes through its dirty guard: the
+    // guard confirms, then its own onClose removes the tab. Only the mounted
+    // (active) document registers a guard, which is the only one holding an
+    // unsaved buffer; every other tab closes directly.
+    const guarded = guardedCloses.current.get(id)
+    if (guarded) { guarded(); return }
     closeTab(id)
   }, [tabs, closeTab, deleteTerminalSession])
+  // Publish the guarded close to a host that drives tabs from its own bar.
+  useEffect(() => {
+    if (!closeTabRef) return
+    closeTabRef.current = handleCloseTab
+    return () => { if (closeTabRef.current === handleCloseTab) closeTabRef.current = null }
+  }, [closeTabRef, handleCloseTab])
   // Move a terminal tab OUT of this chat into the app-wide bottom panel. Unlike
   // handleCloseTab this must NOT dispose the session — the PTY + xterm live in
   // Diff view preferences — persisted; 'mc-diff-split' is shared with the
@@ -955,17 +1002,22 @@ export default function SidePanel({
     <div
       ref={rootRef}
       data-testid="side-panel-root"
-      className={`shrink-0 flex flex-col bg-bg overflow-hidden relative ${isBottom ? 'min-w-0 w-full border-t border-border' : 'min-h-0 mt-0 mb-2 border-l border-t border-b border-border rounded-l-xl'}`}
+      className={`${hideStrip ? 'flex-1 min-w-0 w-full' : 'shrink-0'} flex flex-col bg-bg overflow-hidden relative ${isBottom ? 'min-w-0 w-full border-t border-border' : hideStrip ? 'min-h-0' : 'min-h-0 mt-0 mb-2 border-l border-t border-b border-border rounded-l-xl'}`}
       style={isBottom
         ? { height: effectiveHeight, maxHeight: '85vh', width: '100%', ...dimTransition }
-        : { width: effectiveWidth, maxWidth: '100vw', ...dimTransition }}
+        : hideStrip
+          /* Host drives tabs from its own bar and the panel fills that host's
+             content column: take the full width, no self-managed px width and
+             no left resize handle. */
+          ? { width: '100%', ...dimTransition }
+          : { width: effectiveWidth, maxWidth: '100vw', ...dimTransition }}
     >
       {isBottom ? (
         /* Top-edge resize handle — drag up/down to size the bottom dock. */
         <div role="separator" aria-orientation="horizontal" aria-label={i18nT('pages.chat.sidePanel.resize_panel')} className="absolute left-0 right-0 top-0 h-[6px] cursor-row-resize z-30 group/drag" style={{ touchAction: 'none' }} {...panelResizeV}>
           <div className="absolute left-0 right-0 top-0 h-[2px] transition-colors duration-200 bg-transparent group-hover/drag:bg-accent resize-accent" />
         </div>
-      ) : fillWidth == null ? (
+      ) : (fillWidth == null && !hideStrip) ? (
         /* Left-edge resize handle */
         <div role="separator" aria-orientation="vertical" aria-label={i18nT('pages.chat.sidePanel.resize_panel')} className="absolute left-0 top-0 bottom-0 w-[6px] cursor-col-resize z-30 group/drag" style={{ touchAction: 'none' }} {...panelResize}>
           <div className="absolute left-0 top-0 bottom-0 w-[2px] transition-colors duration-200 bg-transparent group-hover/drag:bg-accent resize-accent" />
@@ -991,6 +1043,7 @@ export default function SidePanel({
           frameless Linux paint their caption controls — the panel chrome below
           would sit under them, covered and unclickable. Bottom-docked the strip
           is nowhere near that corner, so it takes no reserve. */}
+      {!hideStrip && (
       <div className={`side-panel-strip flex items-end gap-1.5 shrink-0 px-2 pt-2 pb-0 min-h-10 rounded-tl-xl bg-bg-elevated border-b border-border${isBottom ? '' : ' focus-caption-reserve'}`}>
         {/* Pinned views (Changes / Files / Artifacts): always present, fixed at
             the front, non-closable, not draggable, compact. The group's 8px gap
@@ -1182,6 +1235,7 @@ export default function SidePanel({
         )}
         </div>
       </div>
+      )}
 
       {/* Body — render every doc/terminal tab mounted (hidden when inactive) so
           xterm sessions and editor scroll state survive tab switches; category
@@ -1193,7 +1247,14 @@ export default function SidePanel({
             visited dashboard so tab switches preserve its drafts and iframe. */}
         {leadingTabs?.filter(lt => lt.id === activeId || lt.keepMounted).map(lt => (
           <div key={lt.id} className="absolute inset-0 overflow-y-auto" hidden={lt.id !== activeId} data-testid="side-panel-leading-body" data-leading-id={lt.id}>
-            {lt.render()}
+            {/* The reading-measure wrapper is ALWAYS present — capped when
+               `bodyMaxWidth` is set (center the body like the chat transcript's
+               `--mc-content-width`), full-width otherwise. Rendering it
+               unconditionally keeps `render()`'s tree DEPTH stable, so a host
+               that toggles `bodyMaxWidth` (the Members page across its
+               docking-boundary resize) does not remount the body and reset an
+               in-flight form. The body keeps its own inner padding. */}
+            <div className="mx-auto w-full h-full min-h-0" style={bodyMaxWidth ? { maxWidth: bodyMaxWidth } : undefined}>{lt.render()}</div>
           </div>
         ))}
         {visibleTabs.length === 0 && !leadingTabs?.length && (
@@ -1336,7 +1397,14 @@ export default function SidePanel({
                 // editor answer Escape and Cmd+S.
                 tab={t} active={isActive && !panelHidden}
                 slot={slot}
-                onClose={() => handleCloseTab(t.id)}
+                // RAW close: this is the body's own guarded-exit callback (the
+                // dirty guard has already confirmed by the time it fires), and
+                // also what a folder / non-document body calls directly. The
+                // tab-strip / page-bar chip close goes through `handleCloseTab`,
+                // which runs the guard first — routing this through it too would
+                // re-enter the guard in a loop.
+                onClose={() => closeTab(t.id)}
+                onRegisterClose={registerGuardedClose}
                 onContentChange={(c) => patchTab(t.id, { content: c })}
                 onDiskContent={(c, binary, partial) => patchTab(t.id, { content: c, savedContent: c, ...(binary === undefined ? {} : { binary }), ...(partial === undefined ? {} : { partial }) })}
                 onDiffModeChange={(diffMode) => patchTab(t.id, { diffMode })}
@@ -1488,7 +1556,7 @@ function McpAppTabBody({ tab, slot }: { tab: PanelTab; slot: string }) {
  * and file-open host it stays mounted through tree-read failures so its notice,
  * toggle, and Refresh escape hatch remain reachable.
  */
-function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange, onDiskContent, onDiffModeChange, onFileSave, onFileOpen, onAddToContext, onClose, onSubmitComments, connected = true, onRevealConsumed }: {
+function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange, onDiskContent, onDiffModeChange, onFileSave, onFileOpen, onAddToContext, onClose, onRegisterClose, onSubmitComments, connected = true, onRevealConsumed }: {
   tab: PanelTab
   /** Is this the visible tab? Background file tabs stay mounted, so the panel
    *  needs this to keep its Cmd+F handler off a document the user cannot see. */
@@ -1507,6 +1575,11 @@ function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange
   /** Right-click "Add to context" on a rail row. */
   onAddToContext?: (absPath: string, kind: 'file' | 'dir') => void
   onClose: () => void
+  /** Publish this file body's GUARDED close (`MarkdownPanel.requestClose`, which
+   *  confirms before discarding a dirty buffer) up to the parent, so a tab-strip
+   *  or page-bar close chip routes through the same confirmation instead of the
+   *  raw `closeTab`. Registers on mount, clears (null) on unmount. */
+  onRegisterClose?: (id: string, requestClose: (() => void) | null) => void
   onSubmitComments?: (m: string) => void | boolean | Promise<void | boolean>
   connected?: boolean
   onRevealConsumed: () => void
@@ -1516,6 +1589,18 @@ function FileTabBody({ tab, active, projectDir, scrollMemoryKey, onContentChange
   // The rail re-targets this tab in place, so the panel's own dirty guard has to
   // approve the navigation the way it approves a close.
   const panelRef = useRef<MarkdownPanelHandle>(null)
+  // Publish the guarded close for this tab id so a chip/bar close confirms an
+  // unsaved buffer instead of dropping it (#15293 GPT-5.6 finding). Falls back
+  // to the raw close when no live editor handle is present (a stubbed body, or
+  // one not yet mounted), so the tab still closes.
+  useEffect(() => {
+    onRegisterClose?.(tab.id, () => {
+      const handle = panelRef.current
+      if (handle) handle.requestClose()
+      else onClose()
+    })
+    return () => onRegisterClose?.(tab.id, null)
+  }, [tab.id, onRegisterClose, onClose])
   return (
     <MarkdownPanel
       ref={panelRef}
@@ -1647,11 +1732,13 @@ function HydratingFileTab({ path, onDiskContent }: { path: string; onDiskContent
   return <div data-testid="file-tab-hydrating" className="h-full p-4"><ContentSkeleton rows={8} /></div>
 }
 
-function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDiskContent, onDiffModeChange, onRevealConsumed, onPathChange, onFileSave, onFileOpen, onAddToContext, onSubmitComments, connected = true, onTerminalSendToChat, diffLineNumbers, setDiffLineNumbers, diffSideBySide, setDiffSideBySide }: {
+function TabBody({ tab, active, slot, projectDir, onClose, onRegisterClose, onContentChange, onDiskContent, onDiffModeChange, onRevealConsumed, onPathChange, onFileSave, onFileOpen, onAddToContext, onSubmitComments, connected = true, onTerminalSendToChat, diffLineNumbers, setDiffLineNumbers, diffSideBySide, setDiffSideBySide }: {
   tab: PanelTab; active: boolean; slot: string
   /** The chat's project directory — the file-browser rail's tree root. */
   projectDir?: string
   onClose: () => void
+  /** Publish a document body's guarded close up to the parent (see FileTabBody). */
+  onRegisterClose?: (id: string, requestClose: (() => void) | null) => void
   onContentChange: (c: string) => void
   /** Disk-originated content (file watch / Refresh): restamps the tab's saved
    *  baseline alongside the buffer, so a re-open still treats the tab clean. */
@@ -1704,6 +1791,7 @@ function TabBody({ tab, active, slot, projectDir, onClose, onContentChange, onDi
         onFileOpen={onFileOpen}
         onAddToContext={onAddToContext}
         onClose={onClose}
+        onRegisterClose={onRegisterClose}
         onSubmitComments={onSubmitComments}
         connected={connected}
         onRevealConsumed={onRevealConsumed}

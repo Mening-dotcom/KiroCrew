@@ -117,7 +117,6 @@ describe('MembersPage Side Chat in the side panel (selection Ask)', () => {
 
   it('Ask opens the Side tab in the docked panel, bound to the MEMBER slot, and reports the Ask as done', async () => {
     await openThread()
-    await screen.findByTestId('member-notes')
     expect(tabLabels()).not.toContain('Side Chat')
 
     act(() => { fireEvent.click(screen.getByRole('button', { name: 'stub-ask' })) })
@@ -131,7 +130,6 @@ describe('MembersPage Side Chat in the side panel (selection Ask)', () => {
 
   it('Side Chat is offered from the + menu too: its draft lives in the chat-core store, so the panel unmounting the body loses nothing', async () => {
     await openThread()
-    await screen.findByTestId('member-notes')
     fireEvent.pointerDown(
       screen.getByRole('button', { name: 'Open side panel tab' }),
       { button: 0, ctrlKey: false, pointerType: 'mouse' },
@@ -171,7 +169,7 @@ describe('MembersPage Side Chat in the side panel (selection Ask)', () => {
     await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-fixer'))
     // fixer's own strip: no Side tab carried across from oncall.
     await waitFor(() => expect(tabLabels()).not.toContain('Side Chat'))
-    expect(screen.queryByTestId('side-chat-stub')).toBeNull()
+    await waitFor(() => expect(screen.queryByTestId('side-chat-stub')).toBeNull())
 
     // Back to oncall: the Side tab is still on ITS strip.
     fireEvent.click(screen.getByText('oncall'))
@@ -201,12 +199,13 @@ describe('MembersPage Side Chat in the side panel (selection Ask)', () => {
     // The collision surfaces as its own notice; no pane, so no Ask …
     await screen.findByTestId('member-thread-collision')
     expect(screen.queryByTestId('chat-pane-stub')).toBeNull()
-    // … and the strip is the slot-free bucket: only the Notes / Work log / Dashboard /
-    // Schedules chips, no Side Chat on the roster's unconfirmed `member-other`
-    // key. Schedules is in that bucket because it keys on the crewmate's NAME,
-    // not on a confirmed slot — the schedules a crewmate owns are readable
-    // whether or not its thread opened.
-    await waitFor(() => expect(tabLabels()).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules']))
-    expect(screen.queryByTestId('side-chat-stub')).toBeNull()
+    // … and the strip is the slot-free bucket: the Chat / Notes / Work log /
+    // Dashboard / Schedules tabs, but no Side Chat on the roster's unconfirmed
+    // `member-other` key. Schedules is in that bucket because it keys on the
+    // crewmate's NAME, not on a confirmed slot — the schedules a crewmate owns
+    // are readable whether or not its thread opened. (A prior member's Side body
+    // may linger mounted-hidden, which is continuity, not an offer.)
+    await waitFor(() => expect(tabLabels()).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules']))
+    await waitFor(() => expect(screen.queryByTestId('side-chat-stub')).toBeNull())
   })
 })

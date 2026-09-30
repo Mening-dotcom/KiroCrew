@@ -11,7 +11,6 @@ import { markSlotUnread, sseConnected, sseDisconnected, sseSlots } from '../../s
 import { MEMBERS_ROSTER_QUERY_KEY, memberBriefingQueryKey, memberThreadQueryKey } from '../../api/membersQuery'
 import { __resetPaneDraftsForTests, readPaneDraft, writePaneDraft } from '../../utils/chatPaneDrafts'
 import { getViewedThreadSlot, _resetViewedThreadForTests } from '../../lib/viewedThread'
-import { SIDE_PANEL_WIDTH_KEY, sidePanelDimKey } from '../chat/sidePanelWidth'
 import { bindSlotReadSender, emitSlotRead, _resetSlotReadRelayForTest } from '../../lib/slotReadRelay'
 import {
   __resetErrorJournalForTests,
@@ -184,7 +183,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
 
 import { api } from '../../api/client'
 import NewCrewmateDialog from './NewCrewmateDialog'
-import MembersPage, { CREW_DASHBOARD_TAB_ID, CREW_NOTES_TAB_ID, CREW_PANEL_TAB_IDS, CREW_WORK_LOG_TAB_ID, MEMBERS_UNCONFIRMED_WITHHELD_VIEWS, MEMBERS_UNFED_VIEWS, MEMBERS_WITHHELD_VIEWS, panelSitsBeside, resolveDefaultMember } from './MembersPage'
+import MembersPage, { CREW_CHAT_TAB_ID, CREW_DASHBOARD_TAB_ID, CREW_NOTES_TAB_ID, CREW_PANEL_BODY_TAB_IDS, CREW_PANEL_TAB_IDS, CREW_WORK_LOG_TAB_ID, MEMBERS_UNCONFIRMED_WITHHELD_VIEWS, MEMBERS_UNFED_VIEWS, MEMBERS_WITHHELD_VIEWS, panelSitsBeside, resolveDefaultMember } from './MembersPage'
 import { __resetPanelTabs, VIEW_DATA_SOURCE } from '../../hooks/usePanelTabs'
 
 /** The page's own memory key (mirrors the constant in MembersPage.tsx). */
@@ -270,10 +269,15 @@ function echoThread(slug: string) {
  */
 const PANE_READY = { timeout: 5000 }
 
-/* The panel opens on Notes; the blocks these cases assert on live in the
- * Work log tab. Click its chip and return the body. */
+/* The page now opens on the CHAT tab (the thread), and the panel bodies live
+ * behind the page-level tab bar. Click a tab there by its stable id. */
+async function selectMembersTab(id: string) {
+  fireEvent.click(await screen.findByTestId(`members-tab-${id}`, PANE_READY))
+}
+/* The blocks these cases assert on live in the Work log tab. Click its tab and
+ * return the body. */
 async function openWorkLog() {
-  fireEvent.click(await screen.findByTestId('side-panel-leading-tab-crew-work-log', PANE_READY))
+  await selectMembersTab(CREW_WORK_LOG_TAB_ID)
   return screen.findByTestId('member-work-log', PANE_READY)
 }
 
@@ -896,25 +900,35 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     expect(api.members).toHaveBeenCalledTimes(1)
   })
 
-  it('docks the chat SidePanel beside the thread on a wide window, and its strip can hide it', async () => {
+  it('on a wide window each tab fills the content column: a body tab replaces the thread, Chat brings it back', async () => {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
-    expect(await screen.findByTestId('member-notes')).toBeInTheDocument()
-    // Docked and open, the gesture splits across the two halves exactly as the
-    // chat page splits it: the header shows no opener because the panel's own
-    // strip carries the close control.
+    // Opens on Chat: the thread fills the content column.
+    expect(await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)).toHaveTextContent('member-oncall')
+    // Desktop drives tabs from the page bar, so there is no header opener and
+    // the panel carries no docked close / resize control of its own.
     expect(screen.queryByTestId('member-panel-toggle')).toBeNull()
-    const close = screen.getByRole('button', { name: /close panel/i })
-    // The strip is the SidePanel's: its own resize splitter (the same shared
-    // handle the chat page drags) pins that the page mounted the real
-    // component rather than a lookalike. Named precisely: the roster's own
-    // grip ("Resize member list") is a second resize separator on the page.
-    expect(screen.getByRole('separator', { name: /resize panel/i })).toBeInTheDocument()
-    // Closing hides the docked column and hands the gesture back to the
-    // header, so the panel is reachable again.
-    fireEvent.click(close)
-    await waitFor(() => expect(screen.queryByTestId('member-notes')).toBeNull())
-    expect(screen.getByTestId('member-panel-toggle')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /close panel/i })).toBeNull()
+    expect(screen.queryByRole('separator', { name: /resize panel/i })).toBeNull()
+    // Selecting Notes replaces the thread with the panel body (each tab fills
+    // the same area). The thread SECTION is hidden (Tailwind `hidden`) while its
+    // draft stays mounted; the panel body is present.
+    await selectMembersTab(CREW_NOTES_TAB_ID)
+    expect(await screen.findByTestId('member-notes')).toBeInTheDocument()
+    // The status header now lives at the TOP of the content column, ABOVE the
+    // tab bar, permanently — so it is NOT inside the swapping thread section any
+    // more and stays visible on this non-Chat tab. Locate the thread section via
+    // the chat-pane stub it still holds (the DM draft stays mounted while
+    // hidden), not via the header.
+    expect(screen.getByTestId('member-thread-header')).toBeInTheDocument()
+    const threadSection = screen.getByTestId('chat-pane-stub').closest('section')!
+    await waitFor(() => expect(threadSection.className).toMatch(/\bhidden\b/))
+    // Chat brings the thread back (its section no longer hidden). The header was
+    // never hidden across the switch — it is permanent on top.
+    await selectMembersTab(CREW_CHAT_TAB_ID)
+    await waitFor(() => expect(threadSection.className).not.toMatch(/\bhidden\b/))
+    expect(screen.getByTestId('member-thread-header')).toBeInTheDocument()
+    expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
   })
 
   it('the side-panel chord is inert on the empty pane, so it cannot hide the panel of the next member opened', async () => {
@@ -934,55 +948,60 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     })
     await act(async () => { await utils.queryClient.invalidateQueries({ queryKey: MEMBERS_ROSTER_QUERY_KEY }) })
     fireEvent.click(await rosterRow('oncall'))
-    expect(await screen.findByTestId('member-notes')).toBeInTheDocument()
+    expect(await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)).toHaveTextContent('member-oncall')
   })
 
-  it('Notes is the FIRST tab, selected by default, and has no close control', async () => {
+  it('Chat is the FIRST tab, selected by default; the crewmate tabs follow with no close control', async () => {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
-    await screen.findByTestId('member-notes')
+    // The page opens on Chat (the thread), so the chat pane is what shows.
+    await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)
     const tabs = screen.getAllByRole('tab')
-    // Ahead of the pinned Changes / Artifacts / Files block, not merely present.
-    expect(tabs[0]).toBe(screen.getByTestId('side-panel-leading-tab-crew-notes'))
+    // Chat leads the page tab bar and is selected by default.
+    expect(tabs[0]).toBe(screen.getByTestId(`members-tab-${CREW_CHAT_TAB_ID}`))
     expect(tabs[0]).toHaveAttribute('aria-selected', 'true')
-    expect(tabs[0]).toHaveAccessibleName(/notes/i)
-    // Structure, not label: no nested button means no close (or transfer) control.
-    expect(tabs[0].querySelectorAll('button')).toHaveLength(0)
-    // The chat page's own Summary (session summary) is a different tab and
-    // must not be what the strip opened on — the ids are distinct by contract.
+    expect(tabs[0]).toHaveAccessibleName(/chat/i)
+    // Head tabs are non-closable: no nested button (close / transfer) on any.
+    for (const tab of tabs) expect(tab.querySelectorAll('button')).toHaveLength(0)
+    // Chat is the first tab id by contract, and none of them is the chat page's
+    // session-summary view.
     expect(CREW_PANEL_TAB_IDS).not.toContain('summary')
-    expect(CREW_PANEL_TAB_IDS[0]).toBe(CREW_NOTES_TAB_ID)
+    expect(CREW_PANEL_TAB_IDS[0]).toBe(CREW_CHAT_TAB_ID)
   })
 
-  it('the three crewmate tabs come first, in order, all LABELLED: Notes, Work log, Dashboard', async () => {
+  it('the four page tabs come first, in order, all LABELLED: Chat, Notes, Work log, Dashboard', async () => {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
-    await screen.findByTestId('member-notes')
+    await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs[0]).toBe(screen.getByTestId(`side-panel-leading-tab-${CREW_NOTES_TAB_ID}`))
-    expect(tabs[1]).toBe(screen.getByTestId(`side-panel-leading-tab-${CREW_WORK_LOG_TAB_ID}`))
-    expect(tabs[2]).toBe(screen.getByTestId(`side-panel-leading-tab-${CREW_DASHBOARD_TAB_ID}`))
-    // Labelled even while inactive — three icon-only chips would be unlabelled
-    // navigation. The pinned views behind them stay icon-only when inactive.
-    expect(tabs[1]).toHaveTextContent('Work log')
-    expect(tabs[2]).toHaveTextContent('Dashboard')
-    expect(tabs[0]).toHaveTextContent('Notes')
+    expect(tabs[0]).toBe(screen.getByTestId(`members-tab-${CREW_CHAT_TAB_ID}`))
+    expect(tabs[1]).toBe(screen.getByTestId(`members-tab-${CREW_NOTES_TAB_ID}`))
+    expect(tabs[2]).toBe(screen.getByTestId(`members-tab-${CREW_WORK_LOG_TAB_ID}`))
+    expect(tabs[3]).toBe(screen.getByTestId(`members-tab-${CREW_DASHBOARD_TAB_ID}`))
+    // Labelled even while inactive — icon-only navigation would be unlabelled.
+    expect(tabs[0]).toHaveTextContent('Chat')
+    expect(tabs[1]).toHaveTextContent('Notes')
+    expect(tabs[2]).toHaveTextContent('Work log')
+    expect(tabs[3]).toHaveTextContent('Dashboard')
   })
 
   it('selecting another tab swaps the body; Notes comes back on its chip', async () => {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
-    // The pinned Artifacts view is always on the strip (SidePanel contract).
-    fireEvent.click(screen.getByRole('tab', { name: 'Artifacts' }))
+    // Switching to the Dashboard tab swaps the body away from Notes.
+    await selectMembersTab(CREW_DASHBOARD_TAB_ID)
     await waitFor(() => expect(screen.queryByTestId('member-notes')).toBeNull())
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-notes'))
+    // Notes comes back on its own tab.
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     expect(await screen.findByTestId('member-notes')).toBeInTheDocument()
   })
 
   it('the Work log tab hosts the counters, driving sessions, patrol and activity; the Dashboard tab hosts the published webview', async () => {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
     // Not on Notes: the work-log blocks are not merely hidden, they are absent.
     expect(screen.queryByTestId('member-stats')).toBeNull()
@@ -992,7 +1011,7 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     expect(within(workLog).getByText('Sessions it\'s driving')).toBeInTheDocument()
     expect(within(workLog).getByText('Auto patrol')).toBeInTheDocument()
     expect(within(workLog).getByText('Recent activity')).toBeInTheDocument()
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-dashboard'))
+    fireEvent.click(screen.getByTestId('members-tab-crew-dashboard'))
     const dashboard = await screen.findByTestId('member-dashboard')
     expect(await within(dashboard).findByTestId('crew-webview-empty')).toHaveTextContent(
       'This crewmate has not published a view yet.',
@@ -1005,15 +1024,23 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
       row({ bound: true, slot_key: 'member-oncall', memory_store: 'beta-own', memory_version: 2, memory_owner: 'beta' }),
     ])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
-    for (const id of CREW_PANEL_TAB_IDS) {
-      fireEvent.click(screen.getByTestId(`side-panel-leading-tab-${id}`))
+    // The page tab bar drives the tabs; each body is a SidePanel leading body.
+    // Iterate the panel body tabs (Notes / Work log / Dashboard / Schedules) —
+    // Chat is the thread column, not a panel body.
+    for (const id of CREW_PANEL_BODY_TAB_IDS) {
+      fireEvent.click(screen.getByTestId(`members-tab-${id}`))
       // The body for THIS tab, by its `data-leading-id`, not "the" leading body: a
       // visited Crew Dashboard is kept mounted-and-hidden, so once the loop passes it
       // there is more than one leading body in the tree and a singular query throws.
-      const bodies = await screen.findAllByTestId('side-panel-leading-body')
-      const body = bodies.find((b) => b.getAttribute('data-leading-id') === id)
-      expect(body, `no leading body for ${id}`).toBeDefined()
+      // `waitFor` because the bar routes a tab switch through the draft guard, which
+      // resolves a microtask later, so the body for `id` appears asynchronously.
+      let body: HTMLElement | undefined
+      await waitFor(() => {
+        body = screen.getAllByTestId('side-panel-leading-body').find((b) => b.getAttribute('data-leading-id') === id)
+        expect(body, `no leading body for ${id}`).toBeDefined()
+      })
       expect(body).not.toHaveTextContent(/memory store/i)
       expect(body).not.toHaveTextContent(/private memory/i)
       expect(body).not.toHaveTextContent(/configured memory store is unavailable/i)
@@ -1026,9 +1053,10 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
     fireEvent.click(await screen.findByRole('button', { name: 'Open task dashboard' }))
-    expect(screen.getByTestId('side-panel-leading-tab-crew-dashboard')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('members-tab-crew-dashboard')).toHaveAttribute('aria-selected', 'true')
     // The session Dashboard shares the label, so assert the crew tab is the ONLY one.
     expect(screen.getAllByRole('tab', { name: /Dashboard/ })).toHaveLength(1)
+    expect(screen.queryByRole('tab', { name: /Dynamic Dashboard/ })).not.toBeInTheDocument()
     const dashboard = await screen.findByTestId('member-dashboard')
     expect(await within(dashboard).findByTestId('crew-webview-empty')).toBeVisible()
     expect(within(dashboard).getByTestId('command-center-panel')).toBeVisible()
@@ -1050,10 +1078,10 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     fireEvent.click(within(dashboard).getByRole('radio', { name: /Questions/ }))
     fireEvent.click(await within(dashboard).findByText('Core release'))
     expect(within(dashboard).getByRole('button', { name: 'Send answer' })).toBeEnabled()
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-notes'))
+    fireEvent.click(screen.getByTestId('members-tab-crew-notes'))
     expect(dashboard).toBeInTheDocument()
     expect(dashboard).not.toBeVisible()
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-dashboard'))
+    fireEvent.click(screen.getByTestId('members-tab-crew-dashboard'))
     expect(screen.getByTestId('command-center-panel')).toBe(dashboard)
     fireEvent(window, new Event('toggle-activity-panel'))
     expect(dashboard).toBeInTheDocument()
@@ -1064,6 +1092,7 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
   it('the + menu offers the chat panel\'s per-chat Terminal on a member DM (a member thread is a chat slot)', async () => {
     const { store } = await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
     // The WS slots frame has delivered the member slot's record (its project
     // is the shell's cwd) — the condition Terminal waits for.
@@ -1100,15 +1129,15 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     expect(MEMBERS_UNCONFIRMED_WITHHELD_VIEWS).toEqual(expect.arrayContaining([...MEMBERS_WITHHELD_VIEWS]))
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
-    // Leading block: Notes, Work log, Dashboard, Schedules; pinned: Artifacts, Files — and NOT Changes.
+    // The page tab bar: the head tabs (Chat, Notes, Work log, Dashboard,
+    // Schedules), then the pinned Files/Artifacts chips (slot-bound, shown once
+    // the thread is confirmed). Changes is unfed here, so it never appears.
     expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual([
-      'Notes', 'Work log', 'Dashboard', 'Schedules', 'Artifacts', 'Files',
+      'Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules', 'Artifacts', 'Files',
     ])
-    fireEvent.pointerDown(
-      screen.getByRole('button', { name: 'Open side panel tab' }),
-      { button: 0, ctrlKey: false, pointerType: 'mouse' },
-    )
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Open side panel tab' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
     const menu = await screen.findByRole('menu')
     for (const name of ['Pins', 'Issues', 'Links', 'Summary']) {
       expect(within(menu).queryByRole('menuitem', { name })).toBeNull()
@@ -1122,6 +1151,7 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     // the record is present; the other slot-bound views are already offered.
     const { store } = await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
     expect(await screen.findByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
     fireEvent.pointerDown(
@@ -1154,6 +1184,7 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     // the frame arrives — even when it is byte-identical.
     const { store } = await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes')
     act(() => {
       store.dispatch(sseSlots([{ key: 'member-oncall', mode: 'member', running: false, messages: 0, project: '/srv/old' }] as never))
@@ -1200,17 +1231,21 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
-    await screen.findByRole('tab', { name: 'Artifacts' })
+    // Confirmed: the pinned Artifacts chip is present (a slot-bound view).
+    await screen.findByTestId('members-tab-artifacts')
     ;(api.memberThread as ReturnType<typeof vi.fn>).mockReturnValueOnce(pending)
     fireEvent.click(await rosterRow('oncall'))
-    // In flight: thread still renders the cached key, panel is summary-only.
+    // In flight: the thread renders the cached key; the head tabs (Chat, Notes,
+    // Work log, Dashboard, Schedules) show, but the slot-bound Artifacts chip is
+    // withheld (the panel is unbound until the POST answers).
     await waitFor(() =>
-      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules']),
+      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules']),
     )
     expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
-    // Confirmed: the slot-bound views return.
+    await waitFor(() => expect(screen.queryByTestId('members-tab-artifacts')).toBeNull())
+    // Confirmed: the slot-bound view returns.
     act(() => { resolveRepost({ slot_key: 'member-oncall', slug: 'oncall', member: 'oncall', created: false }) })
-    await screen.findByRole('tab', { name: 'Artifacts' })
+    await screen.findByTestId('members-tab-artifacts')
   })
 
   it('a thread re-POST withholds the Browser view but never re-keys its body: the native view stays mounted on the same slot', async () => {
@@ -1226,7 +1261,7 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
-    await screen.findByRole('tab', { name: 'Artifacts' })
+    // Confirmed: slot-bound views are offered; open Browser from the + menu.
     fireEvent.pointerDown(
       screen.getByRole('button', { name: 'Open side panel tab' }),
       { button: 0, ctrlKey: false, pointerType: 'mouse' },
@@ -1235,18 +1270,19 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Browser' }))
     const body = await screen.findByTestId('web-preview-stub')
     expect(body).toHaveAttribute('data-session-key', 'member-oncall')
-    // Re-open with the POST hanging: the Browser CHIP is withheld…
+    // Re-open with the POST hanging: the Browser CHIP is withheld (the bar is
+    // back to the four head tabs)…
     ;(api.memberThread as ReturnType<typeof vi.fn>).mockReturnValueOnce(pending)
     fireEvent.click(await rosterRow('oncall'))
     await waitFor(() =>
-      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules']),
+      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules']),
     )
     // …while its BODY is the same mounted element, on the same key — not
     // unmounted, not re-keyed to the empty slot.
     expect(screen.getByTestId('web-preview-stub')).toBe(body)
     expect(body).toHaveAttribute('data-session-key', 'member-oncall')
     act(() => { resolveRepost({ slot_key: 'member-oncall', slug: 'oncall', member: 'oncall', created: false }) })
-    await screen.findByRole('tab', { name: 'Browser' })
+    await screen.findByTestId('members-tab-browser')
     expect(screen.getByTestId('web-preview-stub')).toBe(body)
     expect(body).toHaveAttribute('data-session-key', 'member-oncall')
   })
@@ -1259,17 +1295,18 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     const pending = new Promise((resolve) => { resolveRepost = resolve })
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
-    await screen.findByTestId('member-notes')
-    fireEvent.click(screen.getByRole('tab', { name: 'Artifacts' }))
-    await waitFor(() => expect(screen.getByRole('tab', { name: 'Artifacts' })).toHaveAttribute('aria-selected', 'true'))
+    expect(await screen.findByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
+    // Focus the pinned Artifacts chip.
+    fireEvent.click(await screen.findByTestId('members-tab-artifacts'))
+    await waitFor(() => expect(screen.getByTestId('members-tab-artifacts')).toHaveAttribute('aria-selected', 'true'))
     ;(api.memberThread as ReturnType<typeof vi.fn>).mockReturnValueOnce(pending)
     fireEvent.click(await rosterRow('oncall'))
-    // In flight: summary shown as the fallback (and its body loads).
-    expect(await screen.findByTestId('member-notes')).toBeInTheDocument()
+    // In flight: the Artifacts chip is withheld (the stored focus must not be
+    // rewritten by the fallback).
+    await waitFor(() => expect(screen.queryByTestId('members-tab-artifacts')).toBeNull())
     act(() => { resolveRepost({ slot_key: 'member-oncall', slug: 'oncall', member: 'oncall', created: false }) })
     // Confirmed: the stored focus is back on Artifacts, untouched by the fallback.
-    await waitFor(() => expect(screen.getByRole('tab', { name: 'Artifacts' })).toHaveAttribute('aria-selected', 'true'))
-    expect(screen.queryByTestId('member-notes')).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('members-tab-artifacts')).toHaveAttribute('aria-selected', 'true'))
   })
 
   it('a STALE success cannot rebind a key the latest refusal unbound: only the newest POST writes', async () => {
@@ -1291,13 +1328,13 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('member-thread-error')).toHaveTextContent(/Couldn't reconnect/i)
     await waitFor(() =>
-      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules']),
+      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules']),
     )
     act(() => { resolveFirst({ slot_key: 'member-oncall', slug: 'oncall', member: 'oncall', created: false }) })
     // Still unbound after the stale answer: the refusal stands, no slot-bound views.
     await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
     expect(screen.getByTestId('member-thread-error')).toHaveTextContent(/Couldn't reconnect/i)
-    expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules'])
+    expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules'])
     expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
   })
 
@@ -1312,8 +1349,9 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     localStorage.setItem(LAST_MEMBER_KEY, 'oncall')
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })], 'kirocrew', { thread: new Error('409') })
     await screen.findByText(/Could not open this crewmate's chat/i)
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     expect(await screen.findByTestId('member-notes')).toBeInTheDocument()
-    expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules'])
+    expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules'])
     fireEvent.pointerDown(
       screen.getByRole('button', { name: 'Open side panel tab' }),
       { button: 0, ctrlKey: false, pointerType: 'mouse' },
@@ -1337,49 +1375,35 @@ describe('MembersPage side panel (Notes / Work log / Dashboard / Schedules) and 
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
-    expect(screen.getByRole('tab', { name: 'Artifacts' })).toBeInTheDocument()
+    expect(await screen.findByTestId('members-tab-artifacts')).toBeInTheDocument()
     ;(api.memberThread as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('409'))
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('member-thread-error')).toHaveTextContent(/Couldn't reconnect/i)
     await waitFor(() =>
-      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules']),
+      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules']),
     )
     expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
   })
 
-  it('a resize after a refused re-open leaves the size of the session that now owns the cached key alone', async () => {
-    // The refusal keeps `member-oncall` as the panel's identity, so live bodies
-    // are not re-keyed, but that key now belongs to a session that is not this
-    // member's. Its remembered width must survive a drag here: the page hands
-    // the panel only the CONFIRMED key to save under, so the drag goes to the
-    // shared default.
-    const ownedKey = sidePanelDimKey(SIDE_PANEL_WIDTH_KEY, 'member-oncall')
+  it('a refused re-open on a wide window leaves the panel unbound and carries no per-panel resize to persist', async () => {
+    // Desktop (Option 1): the panel fills the content column and has no resize
+    // handle of its own, so the old "a drag must not persist a width under the
+    // foreign refused key" concern is moot — there is no width to persist. What
+    // remains true is that a refused re-open leaves the panel unbound (no
+    // slot-bound chips) while the cached thread stays up under the notice.
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
+    // Bound first: the pinned Artifacts chip is present.
+    await screen.findByTestId('members-tab-artifacts')
     ;(api.memberThread as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('409'))
     fireEvent.click(await rosterRow('oncall'))
     expect(await screen.findByTestId('member-thread-error')).toHaveTextContent(/Couldn't reconnect/i)
-    await waitFor(() =>
-      // Every slot-bound view is withheld while the thread is unconfirmed, so
-      // only the host's own leading tabs remain -- Schedules among them: it
-      // reads the crewmate's jobs by `member_id`, not through the slot.
-      expect(screen.getAllByRole('tab').map((t) => t.getAttribute('aria-label'))).toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules']),
-    )
-    localStorage.setItem(ownedKey, '500')
-    localStorage.removeItem(SIDE_PANEL_WIDTH_KEY)
-
-    const grip = screen.getByRole('separator', { name: /resize panel/i })
-    act(() => {
-      fireEvent.pointerDown(grip, { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 1000, clientY: 300 })
-      fireEvent.pointerMove(grip, { pointerId: 1, pointerType: 'mouse', clientX: 1020, clientY: 300 })
-    })
-    act(() => {
-      fireEvent.pointerUp(grip, { pointerId: 1, pointerType: 'mouse', clientX: 1020, clientY: 300 })
-    })
-
-    expect(localStorage.getItem(ownedKey)).toBe('500')
-    expect(localStorage.getItem(SIDE_PANEL_WIDTH_KEY)).not.toBeNull()
+    // Unbound: the slot-bound chip is withheld, and there is no panel resize
+    // separator on desktop (the roster's own grip is a different one).
+    await waitFor(() => expect(screen.queryByTestId('members-tab-artifacts')).toBeNull())
+    expect(screen.queryByRole('separator', { name: /resize panel/i })).toBeNull()
+    expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall')
   })
 
   it('an overlay opened on a narrow window does not lie in wait: docking resets it, so re-narrowing finds it closed', async () => {
@@ -2332,6 +2356,7 @@ describe('MembersPage Notes tab (the crewmate\'s own notes)', () => {
   async function openNotes() {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     return screen.findByTestId('member-notes', PANE_READY)
   }
 
@@ -2424,7 +2449,7 @@ describe('MembersPage Notes tab (the crewmate\'s own notes)', () => {
     // Leaving and returning re-issues the read (`enabled` flips); the second
     // answer is a failure, but the first answer is still what the user saw.
     await openWorkLog()
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-notes'))
+    fireEvent.click(screen.getByTestId('members-tab-crew-notes'))
     const again = await screen.findByTestId('member-notes', PANE_READY)
     const notice = await within(again).findByTestId('member-notes-refresh-error')
     expect(notice).toHaveAttribute('role', 'alert')
@@ -2436,6 +2461,7 @@ describe('MembersPage Notes tab (the crewmate\'s own notes)', () => {
   it('the read is gated on the tab being on screen: nothing is fetched while the Work log is showing', async () => {
     await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
     fireEvent.click(await rosterRow('oncall'))
+    await selectMembersTab(CREW_NOTES_TAB_ID)
     await screen.findByTestId('member-notes', PANE_READY)
     await waitFor(() => expect(api.memberBriefing).toHaveBeenCalledTimes(1))
     await openWorkLog()
@@ -3142,7 +3168,7 @@ describe('MembersPage member edit entry (issue #9425)', () => {
     // still not an avatar control of its own.
     await renderPage([row({ bound: true, slot_key: 'member-oncall', avatar: {} })])
     fireEvent.click(await rosterRow('oncall'))
-    await screen.findByTestId('member-notes')
+    await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)
     expect(screen.queryByTestId('member-avatar-button')).toBeNull()
     expect(screen.queryByTestId('avatar-edit-scrim')).toBeNull()
     expect(screen.queryByTestId('avatar-edit-badge')).toBeNull()

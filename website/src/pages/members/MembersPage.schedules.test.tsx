@@ -106,7 +106,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
 
 import { api } from '../../api/client'
 import MembersPage, { CREW_SCHEDULES_TAB_ID } from './MembersPage'
-import { wakesCrew } from '../../components/crew/wakesCrew'
+import { wakesCrew, crewWakeQueryKey } from '../../components/crew/wakesCrew'
 
 /** Wide enough to dock the panel beside the thread — see `panelSitsBeside`. */
 const WIDE_WINDOW = 1440
@@ -144,7 +144,7 @@ async function openCrewmate(name = 'oncall', alsoRoster: string[] = []) {
   )
   fireEvent.click(await screen.findByText(name))
   await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent(`member-${name}`))
-  await screen.findByTestId('member-notes')
+  await screen.findByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`)
 }
 
 /** A second dirty surface that refuses every navigation, rendered as a SIBLING after the
@@ -174,10 +174,12 @@ async function openCrewmateWithVeto(name = 'oncall') {
   )
   fireEvent.click(await screen.findByText(name))
   await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent(`member-${name}`))
-  await screen.findByTestId('member-notes')
+  await screen.findByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`)
 }
 
-const chip = () => screen.getByTestId(`side-panel-leading-tab-${CREW_SCHEDULES_TAB_ID}`)
+const chip = () =>
+  screen.queryByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`) // desktop page tab bar
+  ?? screen.getByTestId(`side-panel-leading-tab-${CREW_SCHEDULES_TAB_ID}`) // narrow overlay strip
 
 /** Stands in for an app-shell navigation surface (sidebar, palette, Back): asks the
  *  page's registered leave guards and records the answer. Its own copy rather than an
@@ -211,14 +213,17 @@ beforeEach(() => {
 })
 
 describe('MembersPage Schedules chip', () => {
-  it('sits last in the leading block, after Notes / Work log / Dashboard', async () => {
+  it('sits last in the head block, after Chat / Notes / Work log / Dashboard', async () => {
     await openCrewmate()
     await waitFor(() => expect(chip()).toBeInTheDocument())
-    // The leading block alone: the pinned views (Artifacts, Files) follow it and
-    // belong to the panel, not to the crewmate.
-    const leading = screen.getByTestId('side-panel-leading-tabs')
-    expect(within(leading).getAllByRole('tab').map((t) => t.getAttribute('aria-label')))
-      .toEqual(['Notes', 'Work log', 'Dashboard', 'Schedules'])
+    // The page tab bar: the head tabs (Chat, Notes, Work log, Dashboard,
+    // Schedules) lead; the pinned views (Artifacts, Files) follow them and
+    // belong to the panel, not to the crewmate. Assert Schedules is the last of
+    // the head block by dropping the pinned tail.
+    const bar = screen.getByTestId('members-tab-bar')
+    const labels = within(bar).getAllByRole('tab').map((t) => t.getAttribute('aria-label'))
+    const head = labels.slice(0, 5)
+    expect(head).toEqual(['Chat', 'Notes', 'Work log', 'Dashboard', 'Schedules'])
   })
 
   it('matches a private schedule on the crewmate\'s IMMUTABLE id, not its display name', async () => {
@@ -250,7 +255,7 @@ describe('MembersPage Schedules chip', () => {
     )
     fireEvent.click(await screen.findByText('Radar One'))
     await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-radar-one'))
-    await screen.findByTestId('member-notes')
+    await screen.findByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`)
     await waitFor(() => expect(screen.getByTestId('member-schedules-count')).toHaveTextContent('1/2'))
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
@@ -291,7 +296,7 @@ describe('MembersPage Schedules chip', () => {
     fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Read the board.' } })
 
     // Dirty, not yet saving: leaving asks, and answering no keeps the draft.
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-notes'))
+    fireEvent.click(screen.getByTestId('members-tab-crew-notes'))
     const ask = await screen.findByRole('dialog')
     // Scoped to the dialog: the section's own "Cancel new schedule" toggle is on screen
     // at the same time and matches the same name.
@@ -302,7 +307,7 @@ describe('MembersPage Schedules chip', () => {
     // Saving: the switch is refused with no prompt at all.
     fireEvent.click(within(body).getByTestId('crew-wake-create-submit'))
     await waitFor(() => expect(api.createCron).toHaveBeenCalled())
-    fireEvent.click(screen.getByTestId('side-panel-leading-tab-crew-notes'))
+    fireEvent.click(screen.getByTestId('members-tab-crew-notes'))
     await new Promise(r => setTimeout(r, 120))
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.getByTestId('member-schedules')).toBeInTheDocument()
@@ -340,10 +345,21 @@ describe('MembersPage Schedules chip', () => {
   })
 
   it('asks before the side-panel chord hides a draft', async () => {
-    // Hiding the panel unmounts the tab body exactly as closing it from the strip does.
-    // The header opener is hidden while the docked panel is open (the panel's own close
-    // control owns that gesture there), so the chord is the other way to hide it.
-    await openCrewmate()
+    // Below the docking boundary the panel is an OVERLAY the chord opens and hides;
+    // hiding it unmounts the tab body exactly as closing it from the strip does, so it
+    // asks the same question. (On desktop the merged Option-1 tab bar has no
+    // panel-hide chord — you leave Schedules by switching tabs, guarded there.)
+    Object.defineProperty(window, 'innerWidth', { value: 900, configurable: true, writable: true })
+    ;(api.members as ReturnType<typeof vi.fn>).mockResolvedValue({
+      members: [row()], default_agent: 'kirocrew',
+    })
+    ;(api.memberThread as ReturnType<typeof vi.fn>).mockImplementation((slug: string) =>
+      Promise.resolve({ slot_key: `member-${slug}`, slug, member: slug, created: false }),
+    )
+    renderWithProviders(<MembersPage />)
+    fireEvent.click(await screen.findByText('oncall'))
+    await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall'))
+    fireEvent.click(await screen.findByTestId('member-panel-toggle'))
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
     await within(body).findByTestId('crew-wake-section')
@@ -561,7 +577,7 @@ describe('MembersPage Schedules chip', () => {
     )
     fireEvent.click(await screen.findByText('radar'))
     await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-radar'))
-    await screen.findByTestId('member-notes')
+    await screen.findByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`)
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
     await within(body).findByTestId('crew-wake-section')
@@ -605,7 +621,7 @@ describe('MembersPage Schedules chip', () => {
     )
     fireEvent.click(await screen.findByText('Radar One'))
     await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-radar-one'))
-    await screen.findByTestId('member-notes')
+    await screen.findByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`)
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
     await within(body).findByTestId('crew-wake-section')
@@ -642,7 +658,7 @@ describe('MembersPage Schedules chip', () => {
     renderWithProviders(<MembersPage />)
     fireEvent.click(await screen.findByText('Radar One'))
     await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-radar-one'))
-    await screen.findByTestId('member-notes')
+    await screen.findByTestId(`members-tab-${CREW_SCHEDULES_TAB_ID}`)
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
     await within(body).findByTestId('crew-wake-section')
@@ -799,10 +815,21 @@ describe('MembersPage Schedules chip', () => {
   })
 
   it('asks before the panel\'s own close control discards a draft', async () => {
-    // Closing the panel destroys the tab body exactly as switching chips does, so it
-    // asks the same question. Without the guard this was the one way out that dropped
-    // typed work silently.
-    await openCrewmate()
+    // Below the docking boundary the overlay carries its own close control; closing it
+    // destroys the tab body exactly as switching chips does, so it asks the same
+    // question. (On desktop the merged tab bar fills the column and has no such
+    // control — the guard rides the tab switch there.)
+    Object.defineProperty(window, 'innerWidth', { value: 900, configurable: true, writable: true })
+    ;(api.members as ReturnType<typeof vi.fn>).mockResolvedValue({
+      members: [row()], default_agent: 'kirocrew',
+    })
+    ;(api.memberThread as ReturnType<typeof vi.fn>).mockImplementation((slug: string) =>
+      Promise.resolve({ slot_key: `member-${slug}`, slug, member: slug, created: false }),
+    )
+    renderWithProviders(<MembersPage />)
+    fireEvent.click(await screen.findByText('oncall'))
+    await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall'))
+    fireEvent.click(await screen.findByTestId('member-panel-toggle'))
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
     await within(body).findByTestId('crew-wake-section')
@@ -835,7 +862,7 @@ describe('MembersPage Schedules chip', () => {
     fireEvent.click(await screen.findByText('oncall'))
     await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall'))
     fireEvent.click(await screen.findByTestId('member-panel-toggle'))
-    await screen.findByTestId('member-notes')
+    await waitFor(() => expect(chip()).toBeInTheDocument())
     fireEvent.click(chip())
     const body = await screen.findByTestId('member-schedules')
     await within(body).findByTestId('crew-wake-section')
@@ -912,14 +939,21 @@ describe('MembersPage Schedules chip', () => {
     // check for absent data alone let the chip go on stating a count that was read
     // before the failure -- the same false claim as "0 schedules" on a failed request,
     // one keystroke later.
-    await openCrewmate()
+    ;(api.members as ReturnType<typeof vi.fn>).mockResolvedValue({
+      members: [row()], default_agent: 'kirocrew',
+    })
+    ;(api.memberThread as ReturnType<typeof vi.fn>).mockImplementation((slug: string) =>
+      Promise.resolve({ slot_key: `member-${slug}`, slug, member: slug, created: false }),
+    )
+    const { queryClient } = renderWithProviders(<MembersPage />)
+    fireEvent.click(await screen.findByText('oncall'))
     await waitFor(() => expect(screen.getByTestId('member-schedules-count')).toHaveTextContent('1/2'))
 
-    // The count query is gated on the panel being visible, so hiding and reshowing it
-    // is a real gesture that refetches. This time the read fails.
+    // The count query is always enabled while a crewmate is open (the badge lives on
+    // the page tab bar, on screen for every open crewmate). Invalidating its key is
+    // the real refetch — this time the read fails.
     vi.mocked(api.crons).mockRejectedValue(new Error('boom'))
-    act(() => { window.dispatchEvent(new Event('toggle-activity-panel')) })
-    act(() => { window.dispatchEvent(new Event('toggle-activity-panel')) })
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: crewWakeQueryKey('oncall') }) })
 
     await waitFor(() => expect(screen.queryByTestId('member-schedules-count')).toBeNull())
     // The chip itself stays: the failure is about the list, not the surface.
