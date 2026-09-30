@@ -94,7 +94,7 @@ async def adopt_main_chat(
                 raise sc.CardRejected("the home's welcome chat is still working", "turn_running")
 
         _idle()
-        await close_slot(state, previous, previous_key, pre_pop_check=_idle)
+        await close_slot(state, previous, str(previous_key), pre_pop_check=_idle)
     await asyncio.to_thread(
         first_run.update_state, lambda data: data.pop("arrival_previous_slot", None)
     )

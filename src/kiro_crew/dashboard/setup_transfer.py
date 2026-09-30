@@ -85,7 +85,7 @@ def validate(raw: Any) -> dict[str, Any]:
     for raw_card in raw_cards:
         if not isinstance(raw_card, dict):
             raise ValueError("invalid setup receipt")
-        cid, kind = raw_card.get("id"), raw_card.get("kind")
+        cid, kind = str(raw_card.get("id") or ""), raw_card.get("kind")
         if not sc.valid_card_id(cid) or cid in ids or kind not in sc.CARD_KINDS:
             raise ValueError("invalid setup receipt identity")
         if not isinstance(raw_card.get("payload"), dict):
