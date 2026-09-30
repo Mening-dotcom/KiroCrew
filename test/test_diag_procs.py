@@ -1167,13 +1167,19 @@ def test_a_read_refused_as_too_soon_does_not_restart_the_window(tmp_path: Path) 
     table.add(CHAT, GATEWAY, cmdline=CHAT_ARGV, env=dict(MARKER), utime=0, runq_ns=0)
 
     baseline = procs.RateBaseline()
-    table.scan_rated(baseline)
+    # Every scan here pins the same reading, so the hand-aged window is the whole
+    # window and the figures below do not drift with runner speed. Without it the
+    # recovered scan stamps a live clock, and the real wall time a slow or shared
+    # runner spends between the scans is added to the gap the rate divides by --
+    # the Windows flake #13718 pinned the other rate tests to end. See
+    # ``pinned_clock``.
+    table.scan_rated(baseline, monotonic=SCAN_MONOTONIC)
     _age_baseline(baseline, 0.8)
     stored = baseline._prev
     assert stored is not None
     pinned = stored.monotonic
 
-    refused = table.scan_rated(baseline)
+    refused = table.scan_rated(baseline, monotonic=SCAN_MONOTONIC)
     assert refused.nodes[CHAT].cpu_pct is None, "0.8s apart is under the floor"
     assert baseline._prev is not None
     assert baseline._prev.monotonic == pinned, "the refused read replaced the baseline"
@@ -1190,20 +1196,15 @@ def test_a_read_refused_as_too_soon_does_not_restart_the_window(tmp_path: Path) 
         utime=table.clk_tck * 7 // 10,
         runq_ns=140_000_000,
     )
-    recovered = table.scan_rated(baseline)
+    recovered = table.scan_rated(baseline, monotonic=SCAN_MONOTONIC)
 
-    # A BAND, not a point. Both ageings have to stay under the 1s floor for the
-    # discrimination above to mean anything, which caps the elapsed window under
-    # 2s, so the runner's own microseconds are never negligible here -- 34 ms of
-    # it moved this figure 1.2 points. The ceiling is the real invariant: the
-    # window is at least the 1.4s aged, so 0.7 CPU-seconds cannot read above 50%.
-    # The exact arithmetic is pinned by the 10s-window test instead, where
-    # overhead is a rounding error.
+    # With the clock pinned the window is exactly the 1.4s aged, on every runner:
+    # 0.7 CPU-seconds over 1.4s is 50%, and 0.14s of run-queue wait is 10%. Both
+    # sit at the top of their band, which is float arithmetic on the pinned base
+    # (1.4s is `now - (stored - 0.8 - 0.6)`, so the subtraction lands 1.4 to a
+    # few ulps and 0.7 / window can read 50.000000000013). Slack, not a point --
+    # the lower edges guard against the window collapsing to the refused gap.
     assert recovered.nodes[CHAT].cpu_pct is not None, "the window should have recovered"
-    # The ceiling itself is float arithmetic on a large monotonic base: the
-    # 1.4s window is `now - (stored - 0.8 - 0.6)`, and when `now` is the same
-    # coarse-clock tick as `stored` the difference is 1.4 to a few ulps, so
-    # 0.7 / window can read 50.000000000005 on Windows. Slack, not a point.
     assert 20.0 < recovered.nodes[CHAT].cpu_pct <= 50.0 + _FLOAT_SLACK
     assert recovered.nodes[CHAT].runq_wait_pct is not None
     assert 4.0 < recovered.nodes[CHAT].runq_wait_pct <= 10.0 + _FLOAT_SLACK

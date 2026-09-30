@@ -429,7 +429,7 @@ def test_one_items_action_never_appears_on_another_items_card(monkeypatch) -> No
 
 
 def test_the_unsaid_sentinel_never_reaches_the_rendered_data(monkeypatch) -> None:
-    """``panel_payload`` ran: the island carries ``null``, never ``__unsaid__``.
+    """``panel_payload`` ran: the island carries ``null``, never the sentinel.
 
     The sentinel exists so the provider cannot forget to answer; it is not a value any
     reader should see. Scanning the serialized JSON rather than a few fields, because
@@ -441,7 +441,9 @@ def test_the_unsaid_sentinel_never_reaches_the_rendered_data(monkeypatch) -> Non
 
     data = _read(record, monkeypatch)["board"]
 
-    assert UNSAID not in json.dumps(data)
+    # No form of the enum sentinel -- its repr or its value string -- may reach the JSON.
+    serialized = json.dumps(data)
+    assert repr(UNSAID) not in serialized and str(UNSAID.value) not in serialized
     # And the absence is a real one: this publisher supplied only a lede, so every
     # per-card judgment is unsaid. A payload with no nulls at all would mean the
     # conversion never ran rather than that nothing needed converting.

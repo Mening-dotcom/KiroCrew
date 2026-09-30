@@ -352,7 +352,12 @@ def test_every_sentinel_becomes_null_in_the_payload() -> None:
     payload = panel_payload(_build(_view([_item("it_0")])))
     assert payload["lede"] is None
     assert payload["columns"][0]["cards"][0]["of"] is None
-    assert UNSAID not in repr(payload), "a sentinel survived into the island payload"
+    # The sentinel is an enum member, so no form of it -- its repr or its value -- may
+    # survive into the island payload; `_strip_unsaid` turns every one into ``None``.
+    text = repr(payload)
+    assert (
+        repr(UNSAID) not in text and str(UNSAID.value) not in text
+    ), "a sentinel survived into the island payload"
 
 
 def test_the_payload_carries_the_contract_version() -> None:

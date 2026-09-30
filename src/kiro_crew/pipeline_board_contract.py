@@ -36,8 +36,9 @@ carry it forever.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Final, Literal, TypedDict, cast
+from typing import Any, Final, TypedDict, cast
 
+from kiro_crew.dashboard_templates import UNSAID, Unsaid, gate_action
 from kiro_crew.work_vocab import (
     WORK_ITEM_STATES,
     WORK_VERDICTS,
@@ -48,12 +49,19 @@ from kiro_crew.work_vocab import (
 # --------------------------------------------------------------------------
 # the sentinel
 # --------------------------------------------------------------------------
-
-Unsaid = Literal["__unsaid__"]
-"""The type of "nobody can supply this". A required field, never an absent key."""
-
-UNSAID: Final[Unsaid] = "__unsaid__"
-"""Write this, explicitly. It cannot arrive from a lookup that returned nothing."""
+#
+# :class:`Unsaid` and :data:`UNSAID` are the ``dashboard_templates`` package's, not this
+# module's own. Every template that reads a fold shares one sentinel and one set of
+# publisher gates -- a gate is the piece hardened in response to an incident, and a copy
+# per template means a hardening reaches only the templates written afterwards, which is
+# the failure mode the package exists for. Re-exported here so a reader of this contract,
+# and this module's ``__all__``, still find the names beside the type that uses them.
+#
+# The package's sentinel is an ENUM, not the string literal this module once carried. A
+# ``Literal["__unsaid__"]`` is forgeable: a fold value or a publisher's sentence that
+# happens to be that text is indistinguishable from the gap, so it could be rewritten to
+# "not said" or printed onto a status page as a system marker. No writer can produce an
+# enum member, so the gap and real content can never be confused.
 
 
 # --------------------------------------------------------------------------
@@ -382,17 +390,18 @@ BOARD_VERDICT_NAMES: Final[tuple[str, ...]] = WORK_VERDICTS
 
 
 def _gate_action(text: str) -> str | Unsaid:
-    """An action sentence, or :data:`UNSAID`.
+    """An action sentence, or :data:`UNSAID`. Delegates to the package's one gate.
 
     A bare token is refused because the live board rendered ``Raymond`` and
-    ``chat-2176`` on the line that must say what to DO. A name is not an action, and
-    the cheapest thing that separates them is whether the value reads as a phrase at
-    all: an action has a space in it and a verb's worth of length.
+    ``chat-2176`` on the line that must say what to DO. A name is not an action, and the
+    thing separating them is whether the value reads as a phrase at all.
+
+    The judgment gate is :func:`kiro_crew.dashboard_templates.gate_action`; this wrapper
+    only carries the raw string in, since a published ``you`` is a plain ``str`` from the
+    validated judgment rather than a ``str | Unsaid``. Keeping one gate means a hardening
+    to it reaches this board too, instead of drifting from the copy it used to hold.
     """
-    value = text.strip()
-    if len(value) < 8 or " " not in value:
-        return UNSAID
-    return value
+    return gate_action(text)
 
 
 def _gate_fraction(text: str) -> str | Unsaid:
@@ -579,15 +588,16 @@ def panel_payload(panel: PipelineBoardPanel) -> dict[str, Any]:
     """*panel* as the JSON the data island carries: every :data:`UNSAID` becomes null.
 
     ONE exit, because the template's ``classify`` already distinguishes three states
-    and ``null`` is the one it renders as "not said". Leaving the sentinel in would
-    print ``__unsaid__`` on the page -- wrong, but visibly wrong, which is why this
-    conversion failing is not a silent zero.
+    and ``null`` is the one it renders as "not said". :func:`_strip_unsaid` turns every
+    sentinel into that ``null`` first; an enum member left in its place is not JSON at
+    all, so a skipped conversion fails loudly at serialization rather than standing in
+    as a silent zero on the page.
     """
     return cast("dict[str, Any]", _strip_unsaid(panel))
 
 
 def _strip_unsaid(value: Any) -> Any:
-    if value == UNSAID:
+    if isinstance(value, Unsaid):
         return None
     if isinstance(value, dict):
         return {k: _strip_unsaid(v) for k, v in value.items()}
