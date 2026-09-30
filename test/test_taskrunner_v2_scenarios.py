@@ -76,7 +76,9 @@ def _mock_sessions() -> MagicMock:
     s.record_failure = AsyncMock()
     s.check_context_usage = MagicMock()
 
-    async def _open_task_session(_parent_key, session_key, *, agent=None, cwd=None, approval_policy=""):
+    async def _open_task_session(
+        _parent_key, session_key, *, agent=None, cwd=None, approval_policy=""
+    ):
         return await s.get_or_create(session_key, agent=agent, cwd=cwd)
 
     s.open_task_session = _open_task_session
@@ -1442,6 +1444,7 @@ class TestScenarioReviewRetryNoSecondReview:
             work_dir,
             on_notify,
             session_key="",
+            **kwargs,
         ):
             s.status = StepStatus.PASSED
             return True
@@ -1880,6 +1883,7 @@ class TestScenarioGitCommitNoChanges:
             work_dir,
             on_notify,
             session_key="",
+            **kwargs,
         ):
             nonlocal exec_count
             exec_count += 1
