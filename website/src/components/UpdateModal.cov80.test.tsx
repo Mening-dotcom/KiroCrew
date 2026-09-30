@@ -13,17 +13,22 @@ type UpdateState = {
 
 const install = vi.fn<() => Promise<unknown>>()
 
-/**
- * React Query flushes cache notifications on a microtask, so seeding
- * ['update-state'] only reaches the component after an async act() tick --
- * a synchronous assertion right after setQueryData always sees no dialog.
+/** Seed the cache, then await the visible state an initial payload promises.
+ * React Query can publish after act's microtask flush; awaiting the dialog at
+ * this shared boundary keeps every open-path assertion off that scheduler race.
  */
 async function mount(initial?: UpdateState) {
   const rendered = renderWithProviders(<UpdateModal />)
   const push = async (next: UpdateState) => {
     await act(async () => { rendered.queryClient.setQueryData(['update-state'], next) })
   }
-  if (initial) await push(initial)
+  if (initial) {
+    await push(initial)
+    if (initial.state === 'downloaded') await screen.findByRole('dialog')
+    if (initial.state === 'installing' || (initial.state === 'error' && initial.phase === 'install')) {
+      await screen.findByRole('alert')
+    }
+  }
   return { ...rendered, push }
 }
 
@@ -64,9 +69,17 @@ describe('UpdateModal', () => {
     expect(dialog()?.textContent).not.toMatch(/installation progress/i)
   })
 
+  it('places the dialog and its backdrop on the app modal layer', async () => {
+    await mount(downloaded)
+    const panel = await screen.findByRole('dialog')
+    // Pin the layer shared by ordinary app modals, above the sidebar morph.
+    expect(panel.parentElement).toHaveClass('fixed', 'inset-0', 'z-[100]')
+    expect(panel.parentElement).not.toHaveClass('z-50')
+  })
+
   it('omits the notes paragraph when the notes are blank', async () => {
     await mount({ ...downloaded, notes: '   ' })
-    expect(dialog()).toBeInTheDocument()
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
     expect(screen.queryByText(/zzq/)).not.toBeInTheDocument()
   })
 

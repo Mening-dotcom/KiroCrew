@@ -70,7 +70,7 @@ describe('scroll shell: the scroller element contract', () => {
 
   it('keeps the stable theming hook class', () => {
     // website/docs/theming-contract.md: third-party themes select on it.
-    expect(scroller()).toContain('className="chat-container"')
+    expect(scroller()).toContain('className="chat-container scrollbar-overlay"')
   })
 
   it('owns the flexible column: flex 1 is what lets the transcript fill and shrink', () => {

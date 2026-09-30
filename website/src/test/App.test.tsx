@@ -1,10 +1,10 @@
-import { afterAll, describe, it, expect, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { MOBILE_BREAKPOINT } from '../hooks/useIsMobile'
 import { join } from 'node:path'
-import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react'
+import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react'
 import { renderWithProviders, createTestStore } from './helpers'
-import App, { NavBadge } from '../App'
+import App, { NavBadge, NavItem } from '../App'
 import { sseConnected, sseDisconnected, markSlotUnread } from '../store/dashboardSlice'
 import { openActivityPanel, sseSubagentQueued } from '../store/chatSlice'
 import { SHORTCUTS_ENABLED_KEY } from '../hooks/useKeyboardShortcuts'
@@ -13,6 +13,7 @@ import { ApiError } from '../api/client'
 import { safeSetItem } from '../utils/safeStorage'
 import { FEATURE_REQUEST_PROMPT_FALLBACK } from '../prompts/featureRequest'
 import { consumeChatHandoff } from '../utils/errorReport'
+import { useRailWidth, __resetRailWidth } from '../hooks/useRailWidth'
 
 /** A failure `POST /api/chat/slots/{slot}/agent` really can return today. */
 const REAL_FAILURE = 'invalid agent name'
@@ -765,6 +766,107 @@ describe('App routing', () => {
     }
   })
 
+  describe('collapsed nav hover intent', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame'] })
+    })
+    afterEach(() => {
+      cleanup()
+      vi.useRealTimers()
+      vi.restoreAllMocks()
+    })
+    const item = (collapsed = true, touch = false) => <nav>
+      <NavItem path="/settings" label="Settings" icon={<span data-testid="source-icon" />}
+        active={false} collapsed={collapsed} touch={touch} />
+    </nav>
+    const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms) })
+
+    it('waits 100ms and places a text-only label against the icon, not the rail padding', () => {
+      const { container } = renderWithProviders(item())
+      const row = screen.getByRole('button', { name: 'Settings' })
+      vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 120, 58, 42))
+      vi.spyOn(row.querySelector('.nav-icon-frame')!, 'getBoundingClientRect').mockReturnValue(new DOMRect(19, 123, 36, 36))
+      vi.spyOn(container.querySelector('nav')!, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 42, 74, 800))
+      fireEvent.mouseEnter(row)
+      advance(99)
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+      advance(1)
+      const tip = screen.getByRole('tooltip')
+      expect(tip).toHaveTextContent('Settings')
+      expect(tip).toHaveStyle({ left: '55px', top: '120px', height: '42px' })
+      expect(tip.parentElement).toBe(document.body)
+      expect(within(tip).queryByTestId('source-icon')).toBeNull()
+      advance(16)
+      expect(tip).toHaveClass('opacity-100')
+      fireEvent.mouseLeave(row)
+      advance(150)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+    })
+
+    it('cancels a brief pass and gives a new hover its full delay', () => {
+      renderWithProviders(item())
+      const row = screen.getByRole('button', { name: 'Settings' })
+      fireEvent.mouseEnter(row)
+      advance(50)
+      fireEvent.mouseLeave(row)
+      advance(200)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+      fireEvent.mouseEnter(row)
+      advance(99)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+      advance(1)
+      expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    })
+
+    it('reveals on focus immediately and Escape cancels a pending hover', () => {
+      renderWithProviders(item())
+      const row = screen.getByRole('button', { name: 'Settings' })
+      fireEvent.mouseEnter(row)
+      fireEvent.focus(row)
+      expect(screen.getByRole('tooltip')).toBeInTheDocument()
+      fireEvent.keyDown(row, { key: 'Escape' })
+      advance(600)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+    })
+
+    it('cancels a pending hover when activated', () => {
+      renderWithProviders(item())
+      const row = screen.getByRole('button', { name: 'Settings' })
+      fireEvent.mouseEnter(row)
+      advance(50)
+      fireEvent.click(row)
+      advance(600)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+    })
+
+    it.each([50, 120])('clears pending or visible labels on expansion at %ims', elapsed => {
+      const { rerender } = renderWithProviders(item())
+      fireEvent.mouseEnter(screen.getByRole('button', { name: 'Settings' }))
+      advance(elapsed)
+      rerender(item(false))
+      advance(600)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+    })
+
+    it('does not open a desktop tooltip on a captioned touch tile', () => {
+      renderWithProviders(item(true, true))
+      const row = screen.getByRole('button', { name: 'Settings' })
+      fireEvent.mouseEnter(row)
+      fireEvent.focus(row)
+      advance(600)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+      expect(within(row).getByText('Settings')).toBeInTheDocument()
+    })
+
+    it('cancels the pending timer when the row unmounts', () => {
+      const { unmount } = renderWithProviders(item())
+      fireEvent.mouseEnter(screen.getByRole('button', { name: 'Settings' }))
+      unmount()
+      advance(600)
+      expect(screen.queryByRole('tooltip')).toBeNull()
+    })
+  })
+
   it('shows a portaled hover label for a collapsed (icon-only) nav item', async () => {
     // Covers useNavTip: in collapsed mode nav rows hide their text label and
     // instead show it via a portal to <body> on hover (so the rail's vertical
@@ -901,6 +1003,27 @@ describe('App routing', () => {
     expect(activity.getAttribute('title')).not.toMatch(/\d/)
   })
 
+  it.each([
+    { collapsed: true, touch: false, iconAnchored: true },
+    { collapsed: false, touch: false, iconAnchored: false },
+    { collapsed: true, touch: true, iconAnchored: false },
+  ])('anchors badges correctly for collapsed=$collapsed touch=$touch', ({ collapsed, touch, iconAnchored }) => {
+    const { container } = renderWithProviders(<NavItem
+      path="/settings" label="Settings" icon={<span />} active={false}
+      collapsed={collapsed} touch={touch}
+      badge={<span role="status" aria-label="Update available" className="absolute top-1 right-1" />}
+    />)
+    const frame = container.querySelector('.nav-icon-frame')!
+    const icon = frame.querySelector('.app-icon-nav')!
+    const badge = screen.getByRole('status', { name: 'Update available' })
+    expect(frame).toHaveClass('relative')
+    expect(frame.contains(badge)).toBe(iconAnchored)
+    expect(badge.parentElement).toBe(iconAnchored ? frame : container.querySelector('.nav-item'))
+    // The dot stays outside the inactive icon's opacity; its own colour is intact.
+    expect(icon).toHaveClass('opacity-70')
+    expect(icon.contains(badge)).toBe(false)
+  })
+
   it('surfaces the collapsed hover label on keyboard focus and is Enter-activatable', async () => {
     // Keyboard-only users (no pointer) must still be able to identify icon-only
     // rows: the label appears on focus, not just mouseenter. The row is also a
@@ -964,16 +1087,28 @@ describe('App routing', () => {
     localStorage.removeItem('mc-apps-expanded')
   })
 
-  it('renders Kiro Crew branding', () => {
-    localStorage.removeItem('mc-nav') // expanded sidebar shows the brand text
+  it('heads the desktop rail with the current crew identity instead of the brand', () => {
+    localStorage.removeItem('mc-nav')
     renderWithProviders(<App />, { route: '/chat' })
-    // Brand (logo + name) moved from the top bar into the sidebar menu row.
-    // The wordmark renders as two colored segments ('Kiro ' + 'Crew').
-    expect(screen.getAllByText('Crew').length).toBeGreaterThan(0)
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+    // The rail's header row names the crew on screen. Local uses the product
+    // artwork; remote identities use the tinted ghost mark.
+    const identity = within(nav).getByRole('button', { name: 'Local — Switch crew' })
+    expect(identity).toHaveTextContent('Local')
+    const mark = within(identity).getByTestId('crew-identity-mark')
+    expect(within(mark).getByTestId('local-crew-icon')).toHaveAttribute('src', '/logo.png')
+    expect(mark).not.toHaveAttribute('style')
+    // The old brand row (wordmark + its collapse/expand buttons) is gone on
+    // desktop: the grabber is the rail's only collapse affordance.
+    expect(within(nav).queryByText('Crew')).toBeNull()
+    expect(within(nav).queryByRole('button', { name: 'Collapse sidebar' })).toBeNull()
+    expect(within(nav).queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
+    expect(within(nav).getByRole('separator', { name: 'Main navigation' })).toHaveAttribute('aria-controls', 'dashboard-navigation')
+    expect(nav).toHaveAttribute('id', 'dashboard-navigation')
     localStorage.removeItem('mc-nav')
   })
 
-  it('uses installed theme branding in the left rail and browser favicon', async () => {
+  it('uses installed theme branding for the browser favicon while the desktop rail shows crew identity', async () => {
     const { api } = await import('../api/client')
     localStorage.removeItem('mc-nav')
     localStorage.setItem('mc-color-theme', 'custom-pearce')
@@ -999,19 +1134,20 @@ describe('App routing', () => {
 
     const view = renderWithProviders(<App />, { route: '/chat' })
     try {
+      await waitFor(() => {
+        const favicon = document.getElementById('mc-theme-favicon') as HTMLLinkElement | null
+        expect(favicon).not.toBeNull()
+        expect(favicon).toHaveAttribute(
+          'href',
+          '/api/theme/pearce/assets/branding/favicon.svg',
+        )
+      })
+      // Deliberate: the desktop rail header is the crew identity, not the theme
+      // brand, so an installed theme's bot name and logo do not replace it.
       const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-      const brand = within(nav).getByRole('button', { name: 'Collapse sidebar' })
-      await waitFor(() => expect(brand).toHaveTextContent('KIRO CREW'))
-      expect(brand.querySelector('img')).toHaveAttribute(
-        'src',
-        '/api/theme/pearce/assets/branding/logo.svg',
-      )
-      const favicon = document.getElementById('mc-theme-favicon') as HTMLLinkElement | null
-      expect(favicon).not.toBeNull()
-      expect(favicon).toHaveAttribute(
-        'href',
-        '/api/theme/pearce/assets/branding/favicon.svg',
-      )
+      expect(within(nav).getByRole('button', { name: 'Local — Switch crew' })).toHaveTextContent('Local')
+      expect(within(nav).queryByText('KIRO CREW')).toBeNull()
+      expect(nav.querySelector('img[src="/api/theme/pearce/assets/branding/logo.svg"]')).toBeNull()
     } finally {
       view.unmount()
       document.getElementById('mc-theme-favicon')?.remove()
@@ -1299,12 +1435,85 @@ describe('App routing', () => {
       transition: 'grid-template-columns 150ms cubic-bezier(0.2, 0, 0, 1)',
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }))
+    fireEvent.keyDown(screen.getByRole('separator', { name: 'Main navigation' }), { key: 'Home' })
     expect(shell).toHaveStyle({
       gridTemplateColumns: '74px minmax(0,1fr) auto',
       transition: 'grid-template-columns 150ms cubic-bezier(0.2, 0, 0, 1)',
     })
     localStorage.removeItem('mc-nav')
+  })
+
+  it('tracks a grabber drag live in the shell and publishes the live track to useRailWidth', () => {
+    localStorage.removeItem('mc-nav')
+    localStorage.removeItem('mc-nav-width')
+    __resetRailWidth()
+    // A consumer outside the shell (ChatPage's activity panel gate) reads the
+    // published track; it must follow the dragged width, not only 74/236.
+    function RailProbe() {
+      return <output data-testid="rail-probe">{useRailWidth()}</output>
+    }
+    renderWithProviders(<><App /><RailProbe /></>, { route: '/chat' })
+    const shell = screen.getByTestId('dashboard-shell')
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+    const grabber = within(nav).getByRole('separator', { name: 'Main navigation' })
+    const probe = screen.getByTestId('rail-probe')
+    const pt = (x: number) => ({ clientX: x, clientY: 0, pointerId: 1, button: 0, pointerType: 'mouse' })
+    try {
+      expect(grabber).toHaveClass('right-0', 'w-3')
+      expect(grabber).not.toHaveClass('-right-1')
+      expect(probe).toHaveTextContent('236')
+
+      fireEvent.pointerDown(grabber, pt(236))
+      fireEvent.pointerMove(grabber, pt(200))
+      // The pointer owns geometry mid-drag: no eased transition lagging it.
+      expect(shell).toHaveStyle({ gridTemplateColumns: '200px minmax(0,1fr) auto', transition: 'none' })
+      expect(nav).toHaveAttribute('data-dragging', 'true')
+      expect(nav).toHaveAttribute('data-compact', 'false')
+      expect(probe).toHaveTextContent('200')
+
+      // Through the intermediate range below the label minimum: compact, live.
+      fireEvent.pointerMove(grabber, pt(150))
+      expect(shell).toHaveStyle({ gridTemplateColumns: '150px minmax(0,1fr) auto' })
+      expect(nav).toHaveAttribute('data-compact', 'true')
+      expect(probe).toHaveTextContent('150')
+
+      // Released above the snap line: rests expanded at the label minimum.
+      fireEvent.pointerUp(grabber, pt(150))
+      expect(shell).toHaveStyle({
+        gridTemplateColumns: '176px minmax(0,1fr) auto',
+        transition: 'grid-template-columns 150ms cubic-bezier(0.2, 0, 0, 1)',
+      })
+      expect(nav).not.toHaveAttribute('data-dragging')
+      expect(nav).toHaveAttribute('data-compact', 'false')
+      expect(probe).toHaveTextContent('176')
+      expect(localStorage.getItem('mc-nav-width')).toBe('176')
+      // Resizing within the expanded range never touches the collapse flag.
+      expect(localStorage.getItem('mc-nav')).toBeNull()
+    } finally {
+      localStorage.removeItem('mc-nav')
+      localStorage.removeItem('mc-nav-width')
+      __resetRailWidth()
+    }
+  })
+
+  it('restores a stored navigation width and keeps it across a collapse round trip', () => {
+    localStorage.removeItem('mc-nav')
+    localStorage.setItem('mc-nav-width', '280')
+    renderWithProviders(<App />, { route: '/chat' })
+    const shell = screen.getByTestId('dashboard-shell')
+    const grabber = screen.getByRole('separator', { name: 'Main navigation' })
+    try {
+      expect(shell).toHaveStyle({ gridTemplateColumns: '280px minmax(0,1fr) auto' })
+      fireEvent.keyDown(grabber, { key: 'Home' })
+      expect(shell).toHaveStyle({ gridTemplateColumns: '74px minmax(0,1fr) auto' })
+      // Collapsing never banks the strip width as the expanded choice.
+      expect(localStorage.getItem('mc-nav-width')).toBe('280')
+      fireEvent.keyDown(grabber, { key: 'Enter' })
+      expect(shell).toHaveStyle({ gridTemplateColumns: '280px minmax(0,1fr) auto' })
+    } finally {
+      localStorage.removeItem('mc-nav')
+      localStorage.removeItem('mc-nav-width')
+    }
   })
 
   // ── Shell entrance animation is one-shot ──────────────────────────────────
@@ -1370,65 +1579,130 @@ describe('App routing', () => {
     }
   })
 
-  it('hosts the collapse control in the nav menu row and hides the Main group heading', () => {
+  it('hosts the collapse control on the navigation grabber and hides the Main group heading', () => {
     localStorage.removeItem('mc-nav')
     renderWithProviders(<App />, { route: '/chat' })
 
     const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    // Brand (logo + name) now lives in the rail's menu row, replacing the old
-    // hamburger; the collapse control is an arrow-left-to-line button.
-    expect(within(nav).getByText('Crew')).toBeInTheDocument()
-    const collapse = within(nav).getByRole('button', { name: 'Collapse sidebar' })
+    // The right-edge grabber (a focusable window-splitter separator) is the
+    // rail's only collapse affordance; no toggle button survives in the rail.
+    const grabber = within(nav).getByRole('separator', { name: 'Main navigation' })
     expect(within(nav).queryByRole('button', { name: 'Toggle sidebar' })).not.toBeInTheDocument()
-    expect(within(nav).queryByText('Main')).not.toBeInTheDocument()
-
-    fireEvent.click(collapse)
-    // Collapsed: the brand shrinks to a clickable logo that expands the rail;
-    // the collapse control unmounts.
-    expect(within(nav).getByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument()
     expect(within(nav).queryByRole('button', { name: 'Collapse sidebar' })).not.toBeInTheDocument()
+    expect(within(nav).queryByText('Main')).not.toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'false')
+
+    fireEvent.keyDown(grabber, { key: 'Home' })
+    expect(nav).toHaveAttribute('data-compact', 'true')
+    expect(grabber).toHaveAttribute('data-collapsed', 'true')
+    expect(grabber).toHaveAttribute('aria-valuenow', '74')
+    expect(within(nav).queryByRole('button', { name: 'Expand sidebar' })).not.toBeInTheDocument()
     expect(localStorage.getItem('mc-nav')).toBe('1')
+
+    fireEvent.keyDown(grabber, { key: 'Enter' })
+    expect(nav).toHaveAttribute('data-compact', 'false')
+    expect(grabber).toHaveAttribute('aria-valuenow', '236')
+    expect(localStorage.getItem('mc-nav')).toBe('0')
     localStorage.removeItem('mc-nav')
   })
 
-  it('lets the brand toggle expand the rail while preview expand mode is active', () => {
+  it('keeps the navigation, its grabber and keyboard focus the same nodes across collapse', () => {
     localStorage.removeItem('mc-nav')
     renderWithProviders(<App />, { route: '/chat' })
     const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+    const grabber = within(nav).getByRole('separator', { name: 'Main navigation' })
+    const identity = within(nav).getByRole('button', { name: 'Local — Switch crew' })
+    const settings = within(nav).getByText('Settings').closest('a, button')
+    act(() => { grabber.focus() })
+    expect(document.activeElement).toBe(grabber)
+
+    // A persistent element that changes form stays one element: collapsing
+    // must not remount the rail, its grabber, its header identity or its rows,
+    // or keyboard focus would fall to <body> mid-operation.
+    fireEvent.keyDown(grabber, { key: 'Home' })
+    expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBe(nav)
+    expect(within(nav).getByRole('separator', { name: 'Main navigation' })).toBe(grabber)
+    expect(within(nav).getByRole('button', { name: 'Local — Switch crew' })).toBe(identity)
+    expect(document.activeElement).toBe(grabber)
+    // Collapsed: the crew name stays in the accessibility tree, only hidden visually.
+    expect(within(identity).getByText('Local')).toHaveClass('sr-only')
+
+    fireEvent.keyDown(grabber, { key: 'Enter' })
+    expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBe(nav)
+    expect(within(nav).getByRole('separator', { name: 'Main navigation' })).toBe(grabber)
+    expect(within(nav).getByText('Settings').closest('a, button')).toBe(settings)
+    expect(document.activeElement).toBe(grabber)
+    expect(within(identity).getByText('Local')).not.toHaveClass('sr-only')
+    localStorage.removeItem('mc-nav')
+  })
+
+  it('lets the grabber expand the rail while preview expand mode is active', () => {
+    localStorage.removeItem('mc-nav')
+    renderWithProviders(<App />, { route: '/chat' })
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+    const grabber = within(nav).getByRole('separator', { name: 'Main navigation' })
 
     // Entering the Web Preview's expand mode collapses the rail.
     act(() => {
       window.dispatchEvent(new CustomEvent('kirocrew-preview-expand', { detail: { expanded: true } }))
     })
-    expect(within(nav).getByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'true')
 
-    // The logo keeps its standard behavior inside expand mode: it expands.
-    fireEvent.click(within(nav).getByRole('button', { name: 'Expand sidebar' }))
-    expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
+    // The grabber keeps its standard behavior inside expand mode: a
+    // double-click expands.
+    fireEvent.doubleClick(grabber)
+    expect(nav).toHaveAttribute('data-compact', 'false')
 
     // Leaving expand mode must not undo that explicit choice.
     act(() => {
       window.dispatchEvent(new CustomEvent('kirocrew-preview-expand', { detail: { expanded: false } }))
     })
-    expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'false')
     localStorage.removeItem('mc-nav')
+  })
+
+  it('treats a grabber drag during preview expand mode as the user choice too', () => {
+    localStorage.removeItem('mc-nav')
+    renderWithProviders(<App />, { route: '/chat' })
+    const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+    const grabber = within(nav).getByRole('separator', { name: 'Main navigation' })
+    const pt = (x: number) => ({ clientX: x, clientY: 0, pointerId: 1, button: 0, pointerType: 'mouse' })
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('kirocrew-preview-expand', { detail: { expanded: true } }))
+    })
+    expect(nav).toHaveAttribute('data-compact', 'true')
+    // Drag out of the strip to an expanded width.
+    fireEvent.pointerDown(grabber, pt(74))
+    fireEvent.pointerMove(grabber, pt(254))
+    fireEvent.pointerUp(grabber, pt(254))
+    expect(nav).toHaveAttribute('data-compact', 'false')
+    expect(grabber).toHaveAttribute('aria-valuenow', '254')
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('kirocrew-preview-expand', { detail: { expanded: false } }))
+    })
+    expect(nav).toHaveAttribute('data-compact', 'false')
+    expect(grabber).toHaveAttribute('aria-valuenow', '254')
+    localStorage.removeItem('mc-nav')
+    localStorage.removeItem('mc-nav-width')
   })
 
   it('restores the pre-expand rail state when preview expand mode ends untouched', () => {
     localStorage.removeItem('mc-nav') // start expanded
     renderWithProviders(<App />, { route: '/chat' })
     const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'false')
 
     act(() => {
       window.dispatchEvent(new CustomEvent('kirocrew-preview-expand', { detail: { expanded: true } }))
     })
-    expect(within(nav).getByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'true')
 
     act(() => {
       window.dispatchEvent(new CustomEvent('kirocrew-preview-expand', { detail: { expanded: false } }))
     })
-    expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'false')
     // The auto-collapse is transient: it never writes the persisted preference.
     expect(localStorage.getItem('mc-nav')).toBeNull()
   })
@@ -1439,7 +1713,7 @@ describe('App routing', () => {
     const nav = screen.getByRole('navigation', { name: 'Main navigation' })
     const contact = within(nav).getByText('Star us')
     expect(contact).toBeVisible()
-    fireEvent.click(within(nav).getByRole('button', { name: 'Collapse sidebar' }))
+    fireEvent.keyDown(within(nav).getByRole('separator', { name: 'Main navigation' }), { key: 'Home' })
     // The row folds away (max-h-0 + opacity-0 + inert) instead of unmounting.
     const wrapper = contact.closest('[class*="max-h-0"]')
     expect(wrapper).not.toBeNull()
@@ -1457,11 +1731,36 @@ describe('App routing', () => {
     expect(screen.getByRole('button', { name: 'Request a Feature' })).toBeInTheDocument()
 
     const nav = screen.getByRole('navigation', { name: 'Main navigation' })
-    fireEvent.click(within(nav).getByRole('button', { name: 'Expand sidebar' }))
-    expect(within(nav).getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument()
+    expect(nav).toHaveAttribute('data-compact', 'true')
+    fireEvent.doubleClick(within(nav).getByRole('separator', { name: 'Main navigation' }))
+    expect(nav).toHaveAttribute('data-compact', 'false')
     expect(screen.getByRole('button', { name: 'Request a Feature' })).toBeInTheDocument()
     expect(localStorage.getItem('mc-nav')).toBe('0')
     localStorage.removeItem('mc-nav')
+  })
+
+  it('offers the crew chooser in the navigation, not the desktop top bar', async () => {
+    const { api } = await import('../api/client')
+    vi.mocked(api.listInstances).mockResolvedValue({
+      instances: [{
+        id: 'cd-1', name: 'Cloud One', ssh_host: 'cd-1-alias', remote_port: 7777, local_port: 7778,
+        ttl: '20h', remote_bin: '', was_connected: true,
+        status: { instance_id: 'cd-1', state: 'connected', local_port: 7778, remote_port: 7777 },
+      }],
+      warm_set_cap: 5,
+    } as never)
+    try {
+      renderWithProviders(<App />, { route: '/chat' })
+      const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+      const chooser = await within(nav).findByTestId('navigation-crew-switcher')
+      expect(chooser).toHaveAccessibleName(/^Local — Switch crew/)
+      // Exactly one crew switcher on the desktop shell: the navigation one.
+      const switchers = screen.getAllByRole('button', { name: /Switch crew/i })
+      expect(switchers).toEqual([chooser])
+      expect(document.querySelector('.instance-tab-bar-inline')).toBeNull()
+    } finally {
+      vi.mocked(api.listInstances).mockResolvedValue({ instances: [], warm_set_cap: 5 } as never)
+    }
   })
 
   it('keeps feature-request instructions hidden from the persisted user message', async () => {
@@ -1546,22 +1845,27 @@ describe('mobile nav drawer insets', () => {
     return cls.split(/\s+/)
   }
 
-  it('insets all four sides equally', () => {
-    // The drawer is `fixed` to the VIEWPORT, not placed in the grid row below
-    // the topbar the way the desktop rail is, so it owns its own top offset.
-    // Without it the card's rounded top edge sits flat against the screen while
-    // the other three sides float — see the reported defect.
+  it('sits flush against the safe-area edges, like the chat drawer rail', () => {
+    // The drawer now carries the same 72px rail the chat page's drawer shows,
+    // so it shares that drawer's flush geometry: anchored to the safe-area
+    // edges with NO floating-card margin (a margin here would offset the rail
+    // from where the chat drawer puts it, and break the travel = width math
+    // mobilePanels.compositor.test.ts pins).
     const classes = mobileDrawerClasses()
-    expect(classes).toContain('mx-2')
-    expect(classes).toContain('mt-2')
-    expect(classes).toContain('mb-2')
-    expect(classes).not.toContain('mt-0')
+    for (const anchor of ['top-safe', 'left-safe', 'bottom-safe']) expect(classes).toContain(anchor)
+    for (const c of classes) expect(c, `unexpected static margin ${c}`).not.toMatch(/^-?m[xytblr]?-/)
+    // Its only vertical offsets come from the visual viewport, so the rail
+    // follows iOS's viewport pan and stays above the on-screen keyboard.
+    const src = readFileSync(join(__dirname, '..', 'App.tsx'), 'utf8')
+    const drawer = src.slice(src.indexOf('key="mobile-nav-drawer"'), src.indexOf('key="mobile-nav-drawer"') + 600)
+    expect(drawer).toContain('marginTop: mobileViewport.offsetTop, marginBottom: mobileKeyboardInset')
+    expect(src).toMatch(/const mobileKeyboardInset = Math\.max\(0, window\.innerHeight - mobileViewport\.offsetTop - mobileViewport\.height\)/)
   })
 
-  it('spans the viewport height so both margins resolve', () => {
-    // An anchor on BOTH ends plus a margin on each resolves the height to
-    // viewport-16px. Dropping either anchor would make the margins inert (auto
-    // height) and re-open the flush-top defect from the other direction.
+  it('spans the viewport height so the rail fills it', () => {
+    // An anchor on BOTH ends resolves the height to the safe-area viewport, so
+    // the rail's scroll region and pinned Search have a definite box. Dropping
+    // either anchor would give the drawer auto height and collapse the rail.
     //
     // The safe-area variants satisfy this the same way the plain ones do: they
     // set top/bottom to env(safe-area-inset-*), a definite length that is 0 on

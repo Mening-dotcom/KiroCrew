@@ -92,6 +92,7 @@ export const DURABLE_PREF_KEYS: readonly string[] = [
   'mc-reading-width',
   // Navigation and shell layout the user arranged by hand.
   'mc-nav',
+  'mc-nav-width',
   // Interface paradigm (chat | cli) -- hooks/useUIMode.tsx. Its provider
   // persists the current mode on MOUNT, so on a warm origin this key is always
   // present locally; the reconcile pass below is what keeps that mount-written

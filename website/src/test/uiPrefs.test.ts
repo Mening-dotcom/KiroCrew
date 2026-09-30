@@ -9,6 +9,7 @@ import {
   reconcileNewDurableKeys,
   __resetUiPrefsSyncForTests,
 } from '../lib/uiPrefs'
+import { NAV_WIDTH_STORAGE_KEY } from '../hooks/useNavigationResize'
 
 const SYNCED_KEYS_KEY = 'mc-ui-prefs-synced'
 const ROSTER_ENTRY = 'mc:ui-prefs:roster'
@@ -124,6 +125,15 @@ describe('uiPrefs', () => {
         expect(DURABLE_PREF_KEYS).toContain(key)
       }
     })
+
+    it('backs up the hand-set navigation width beside its collapse flag', () => {
+      // The rail's expanded width is arranged by hand exactly like `mc-nav`;
+      // backing up only the flag would restore a collapsed/expanded state at
+      // the default width on a fresh origin.
+      expect(NAV_WIDTH_STORAGE_KEY).toBe('mc-nav-width')
+      expect(DURABLE_PREF_KEYS).toContain('mc-nav')
+      expect(DURABLE_PREF_KEYS).toContain(NAV_WIDTH_STORAGE_KEY)
+    })
   })
 
   describe('needsHydrate', () => {
@@ -210,6 +220,13 @@ describe('uiPrefs', () => {
       mockFetch(() => okJson({ prefs: { 'mc-crews-view': 'HOST' } }))
       await hydrateUiPrefs()
       expect(localStorage.getItem('mc-crews-view')).toBe('MINE')
+    })
+
+    it('restores the navigation width onto a fresh origin', async () => {
+      mockFetch(() => okJson({ prefs: { 'mc-nav': '0', 'mc-nav-width': '268' } }))
+      await hydrateUiPrefs()
+      expect(localStorage.getItem('mc-nav')).toBe('0')
+      expect(localStorage.getItem('mc-nav-width')).toBe('268')
     })
 
     it('after a FAILED restore, a key the profile ALREADY held stays local -- including a later change', async () => {

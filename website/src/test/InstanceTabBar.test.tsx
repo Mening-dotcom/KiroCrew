@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useLocation } from 'react-router-dom'
 import { renderWithProviders, createTestStore } from './helpers'
 import InstanceTabBar, {
   setCrewPins,
@@ -9,6 +10,7 @@ import InstanceTabBar, {
   clippedChipIds,
 } from '../components/InstanceTabBar'
 import type { InstanceView, SsoStatus } from '../api/client'
+import { crewIdentityTint } from '../components/CrewIdentityMark'
 
 vi.mock('../api/client', () => {
   class ApiError extends Error {
@@ -419,6 +421,7 @@ describe('InstanceTabBar', () => {
     expect(container.querySelector('.tb-crew-active-chip')).toBeNull()
     // Both pinned destinations are in the row, in their configured order.
     expect(row.textContent).toMatch(/Local/)
+    expectLocalCrewIcon(within(row).getByRole('button', { name: /Local/i }), 16)
     expect(row.textContent).toMatch(/Cloud One/)
     // ...and the active crew is highlighted where it sits, not moved.
     expect(within(row).getByRole('button', { name: /Cloud One/i })).toHaveAttribute('aria-current', 'true')
@@ -443,22 +446,18 @@ describe('InstanceTabBar', () => {
     expect(lead.textContent).toMatch(/Cloud One/)
   })
 
-  it('toggles stable order from the dropdown, persists it, and keeps the menu open', async () => {
+  it.each([false, true])('omits ordering controls without changing saved order (%s)', async stableOrder => {
+    setStableOrder(stableOrder)
     vi.mocked(api.listInstances).mockResolvedValue(listResp([conn()]))
-    const store = createTestStore({
-      instances: { warm: { 'cd-1': { port: 7778, token: 't' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
-    })
     const u = userEvent.setup()
-    renderWithProviders(<InstanceTabBar />, { store })
+    renderWithProviders(<InstanceTabBar />)
 
-    await u.click(await screen.findByRole('button', { name: /Switch crew/i }))
-    const toggle = await screen.findByTestId('crew-stable-order-toggle')
-    expect(toggle).toHaveAttribute('aria-checked', 'false')
-    await u.click(toggle)
-    // Persisted, and the menu stayed open so the checkmark flip is visible and a
-    // second adjustment needs no reopen.
-    await waitFor(() => expect(localStorage.getItem('mc-crew-switcher-stable-order')).toBe('1'))
-    expect(await screen.findByTestId('crew-stable-order-toggle')).toHaveAttribute('aria-checked', 'true')
+    const local = await openSwitcher(u, /^Local$/)
+    expect(local).toHaveTextContent(/^Local$/)
+    expect(screen.queryByText('Local dashboard')).toBeNull()
+    expect(screen.queryByRole('menuitemcheckbox', { name: 'Keep tab order fixed' })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: 'Add remote crew' })).toBeInTheDocument()
+    expect(localStorage.getItem('mc-crew-switcher-stable-order')).toBe(stableOrder ? '1' : '0')
   })
 
   it('breaks and clamps an unbreakable list error so it cannot paint over the notice\'s own Ask-the-agent control', async () => {
@@ -478,6 +477,268 @@ describe('InstanceTabBar', () => {
     expect(msg.className).not.toMatch(/break-all/)
   })
 
+})
+
+function RouteProbe() {
+  const { pathname, search } = useLocation()
+  return <output data-testid="switcher-route">{pathname}{search}</output>
+}
+
+function expectLocalCrewIcon(root: HTMLElement, size: number) {
+  const icon = within(root).getByTestId('local-crew-icon')
+  expect(icon.tagName).toBe('IMG')
+  expect(icon).toHaveAttribute('src', '/logo.png')
+  expect(icon).toHaveAttribute('alt', '')
+  expect(icon).toHaveAttribute('aria-hidden', 'true')
+  expect(icon).toHaveAttribute('width', String(size))
+  expect(icon).toHaveAttribute('height', String(size))
+  expect(within(root).queryByTestId('kiro-ghost-mark')).toBeNull()
+}
+
+describe('InstanceTabBar navigation variant', () => {
+  const nav = (collapsed = false) => <InstanceTabBar variant="navigation" collapsed={collapsed} />
+
+  it('keeps Local selectable and offers the first remote when no crews exist', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([]))
+    const u = userEvent.setup()
+    renderWithProviders(<>{nav()}<RouteProbe /></>)
+    await waitFor(() => expect(api.listInstances).toHaveBeenCalled())
+    const identity = await screen.findByRole('button', { name: 'Local — Switch crew' })
+    expect(identity).toHaveTextContent('Local')
+    expectLocalCrewIcon(identity, 36)
+    await u.click(identity)
+    const local = await screen.findByRole('menuitemradio', { name: /Local/ })
+    expect(local).toHaveAttribute('aria-checked', 'true')
+    expectLocalCrewIcon(local, 16)
+    await u.click(screen.getByRole('menuitem', { name: 'Add remote crew' }))
+    expect(screen.getByTestId('switcher-route')).toHaveTextContent('/settings/instances?highlight=key%3Aremote-crew-add')
+    expect(api.connectInstance).not.toHaveBeenCalled()
+  })
+
+  it('offers setup when crews are gated off without trying to connect', async () => {
+    const { ApiError } = await import('../api/client')
+    vi.mocked(api.listInstances).mockRejectedValue(new ApiError(403, 'forbidden'))
+    const u = userEvent.setup()
+    renderWithProviders(<>{nav()}<RouteProbe /></>)
+    await waitFor(() => expect(api.listInstances).toHaveBeenCalled())
+    await u.click(await screen.findByRole('button', { name: 'Local — Switch crew' }))
+    await u.click(screen.getByRole('menuitem', { name: 'Add remote crew' }))
+    expect(screen.getByTestId('switcher-route')).toHaveTextContent('/settings/instances?highlight=key%3Aremote-crew-add')
+    expect(screen.queryByTestId('instance-tab-bar-list-error')).toBeNull()
+    expect(api.connectInstance).not.toHaveBeenCalled()
+  })
+
+  it('keeps the collapsed Local name for assistive tech and still opens its menu', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([]))
+    const u = userEvent.setup()
+    renderWithProviders(nav(true))
+    const identity = await screen.findByRole('button', { name: 'Local — Switch crew' })
+    expect(within(identity).getByText('Local')).toHaveClass('sr-only')
+    expectLocalCrewIcon(identity, 36)
+    await u.click(identity)
+    expect(await screen.findByRole('menuitem', { name: 'Add remote crew' })).toBeInTheDocument()
+  })
+
+  it.each([false, true])('uses an understated keyboard cue without an outer outline (collapsed=%s)', async collapsed => {
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([]))
+    const u = userEvent.setup()
+    renderWithProviders(nav(collapsed))
+    const chooser = await screen.findByRole('button', { name: 'Local — Switch crew' })
+    expect(chooser).toHaveClass('outline-none', 'data-[keyboard-focus=true]:focus-visible:bg-bg-hover')
+    expect(chooser.className).not.toContain('shadow')
+    expect(chooser).not.toHaveClass('focus-ring', 'focus-visible:bg-bg-hover')
+    expect(chooser).not.toHaveAttribute('data-keyboard-focus')
+    await u.tab()
+    expect(chooser).toHaveFocus()
+    expect(chooser).toHaveAttribute('data-keyboard-focus', 'true')
+    await u.keyboard('{Enter}')
+    expect(await screen.findByRole('menuitem', { name: 'Add remote crew' })).toBeInTheDocument()
+    await u.keyboard('{Escape}')
+    expect(chooser).toHaveFocus()
+  })
+
+  it.each([false, true])('clears keyboard paint on pointer selection without losing focus (collapsed=%s)', async collapsed => {
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([]))
+    const u = userEvent.setup()
+    renderWithProviders(nav(collapsed))
+    const chooser = await screen.findByRole('button', { name: 'Local — Switch crew' })
+    await u.tab()
+    expect(chooser).toHaveAttribute('data-keyboard-focus', 'true')
+    await u.click(chooser)
+    await u.click(await screen.findByRole('menuitemradio', { name: /Local/ }))
+    await waitFor(() => expect(chooser).toHaveFocus())
+    expect(chooser).not.toHaveAttribute('data-keyboard-focus')
+    await u.tab()
+    await u.tab({ shift: true })
+    expect(chooser).toHaveFocus()
+    expect(chooser).toHaveAttribute('data-keyboard-focus', 'true')
+  })
+
+  it('names and tints the active crew on the chooser, and switches to Local from its menu', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([conn()]))
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 't' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
+    })
+    const u = userEvent.setup()
+    const { container } = renderWithProviders(nav(), { store })
+
+    const chooser = await screen.findByRole('button', { name: /^Cloud One — Switch crew/ })
+    expect(chooser).toHaveAccessibleName(/^Cloud One — Switch crew/)
+    expect(chooser).toHaveTextContent('Cloud One')
+    expect(within(chooser).getByTestId('crew-identity-mark').style.color).toBe(crewIdentityTint('cd-1'))
+    // The chooser itself is the active crew: no second leading active chip.
+    expect(container.querySelector('.tb-crew-active-chip')).toBeNull()
+
+    await u.click(chooser)
+    await u.click(await screen.findByRole('menuitemradio', { name: /Local/i }))
+    await waitFor(() => expect(store.getState().instances.activeId).toBeNull())
+    // The trigger keeps its identity while showing Local's product icon.
+    expect(screen.getByTestId('navigation-crew-switcher')).toBe(chooser)
+    await waitFor(() => expect(chooser).toHaveAccessibleName(/^Local — Switch crew/))
+    expectLocalCrewIcon(chooser, 36)
+  })
+
+  it('hides the crew name and chevron when collapsed but keeps the accessible name', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([conn()]))
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 't' } }, activeId: 'cd-1', mru: ['cd-1'], unread: {} },
+    })
+    renderWithProviders(nav(true), { store })
+    const chooser = await screen.findByRole('button', { name: /^Cloud One — Switch crew/ })
+    expect(within(chooser).getByText('Cloud One')).toHaveClass('sr-only')
+    expect(chooser).toHaveAccessibleName(/^Cloud One — Switch crew/)
+  })
+
+  it('reconnects a warm-but-down crew chosen from the navigation menu', async () => {
+    const down = conn({
+      status: { instance_id: 'cd-1', state: 'error', error: 'ssh unreachable', remote_port: 7777 },
+      was_connected: true,
+    })
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([down]))
+    vi.mocked(api.connectInstance).mockResolvedValue({ instance_id: 'cd-1', state: 'connected', local_port: 7778, token: 'fresh' })
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 'stale' } }, activeId: null, mru: ['cd-1'], unread: {} },
+    })
+    const u = userEvent.setup()
+    renderWithProviders(nav(), { store })
+
+    await u.click(await openSwitcher(u, /Cloud One/i))
+    expect(store.getState().instances.activeId).toBe('cd-1')
+    await waitFor(() => expect(api.connectInstance).toHaveBeenCalledWith('cd-1'))
+    await waitFor(() => expect(store.getState().instances.warm['cd-1']).toEqual({ port: 7778, token: 'fresh' }))
+  })
+
+  it('carries unread for hidden crews on the navigation chooser', async () => {
+    const other = conn({ id: 'cd-2', name: 'Cloud Two', ssh_host: 'cd-2-alias', remote_port: 7779 })
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([conn(), other]))
+    const store = createTestStore({
+      instances: {
+        warm: { 'cd-1': { port: 7778, token: 't' } },
+        activeId: 'cd-1',
+        mru: ['cd-1'],
+        unread: { 'cd-1': 4, 'cd-2': 3 },
+      },
+    })
+    const u = userEvent.setup()
+    renderWithProviders(nav(), { store })
+
+    const chooser = await screen.findByTestId('navigation-crew-switcher')
+    await waitFor(() => expect(chooser).toHaveAccessibleName(/3 unread elsewhere/i))
+    await u.click(chooser)
+    expect(await screen.findByLabelText('3 unread')).toBeInTheDocument()
+  })
+
+  it('keeps chained crews as a tree in the navigation menu', async () => {
+    const hop = conn({ id: 'cd-2', name: 'Inner', ssh_host: 'inner-alias', remote_port: 7779, via_instance_id: 'cd-1' })
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([conn(), hop]))
+    const u = userEvent.setup()
+    renderWithProviders(nav())
+
+    const row = await openSwitcher(u, /Inner/i)
+    // The chain connector glyph and the "via" subtitle survive the move.
+    expect(row.textContent).toContain('\u2514')
+    expect(row.textContent).toContain('Cloud One › inner-alias')
+  })
+
+  it('still offers pinned crew chips that switch in one click', async () => {
+    setCrewPins(['cd-1'])
+    vi.mocked(api.listInstances).mockResolvedValue(listResp([conn()]))
+    const store = createTestStore({
+      instances: { warm: { 'cd-1': { port: 7778, token: 't' } }, activeId: null, mru: ['cd-1'], unread: {} },
+    })
+    const u = userEvent.setup()
+    renderWithProviders(nav(), { store })
+
+    const row = await screen.findByTestId('crew-chip-row')
+    await u.click(within(row).getByRole('button', { name: /Cloud One/i }))
+    expect(store.getState().instances.activeId).toBe('cd-1')
+    await new Promise(r => setTimeout(r, 0))
+    expect(api.connectInstance).not.toHaveBeenCalled()
+  })
+
+  it('renders the parent-relayed model when embedded and relays the choice up', async () => {
+    vi.mocked(isEmbeddedPane).mockReturnValue(true)
+    const posted: unknown[] = []
+    Object.defineProperty(window, 'parent', {
+      value: { postMessage: (m: unknown) => { posted.push(m) } },
+      configurable: true,
+    })
+    try {
+      const store = createTestStore({
+        instances: {
+          warm: {},
+          activeId: null,
+          mru: [],
+          unread: {},
+          host: {
+            tabs: [{ id: 'cd-1', name: 'Relayed One', sshHost: 'relay-alias', state: 'connected', unread: 0 }],
+            activeId: 'cd-1',
+            self: null,
+            macInset: false,
+            winInset: false,
+            focusMode: null,
+            electron: false,
+            pinnedCrews: [],
+            stableOrder: null,
+          } as never,
+        },
+      })
+      const u = userEvent.setup()
+      renderWithProviders(nav(), { store })
+
+      const chooser = await screen.findByTestId('navigation-crew-switcher')
+      expect(chooser).toHaveAccessibleName(/^Relayed One — Switch crew/)
+      // The pane derives the parent's tint from the same stable id.
+      expect(within(chooser).getByTestId('crew-identity-mark').style.color).toBe(crewIdentityTint('cd-1'))
+      expect(api.listInstances).not.toHaveBeenCalled()
+
+      await u.click(chooser)
+      const local = await screen.findByRole('menuitemradio', { name: /Local/i })
+      expectLocalCrewIcon(local, 16)
+      await u.click(local)
+      expect(posted).toContainEqual({ type: 'mc-switch-instance', v: 1, id: null })
+    } finally {
+      Object.defineProperty(window, 'parent', { value: window, configurable: true })
+    }
+  })
+})
+
+describe('crewIdentityTint', () => {
+  it('gives Local its own token', () => {
+    expect(crewIdentityTint(null)).toBe('var(--aim)')
+  })
+
+  it('derives a remote tint from the stable id alone, never its position', () => {
+    const ids = ['cd-1', 'cd-2', 'clouddeskARM', 'x', 'a-very-long-remote-crew-identifier']
+    const first = ids.map(crewIdentityTint)
+    // Same id, same tint, however the list is reordered or trimmed.
+    expect([...ids].reverse().map(crewIdentityTint)).toEqual([...first].reverse())
+    expect(crewIdentityTint('cd-2')).toBe(first[1])
+    for (const tint of first) {
+      expect(tint).toMatch(/^var\(--(ok|info|warn|clarify|danger)\)$/)
+      expect(tint).not.toBe('var(--aim)')
+    }
+  })
 })
 
 describe('resolvePinnedPref', () => {

@@ -130,7 +130,7 @@ export function AddInstanceForm({ onAdded }: { onAdded: () => void }) {
     : ''
 
   return (
-    <Card>
+    <Card data-setting-key="remote-crew-add">
       <div className="flex items-center gap-2 mb-3 text-text font-medium">
         <Plus className="lucide-inline" /> {i18nT('pages.settings.instancesPanel.add_instance')}
       </div>

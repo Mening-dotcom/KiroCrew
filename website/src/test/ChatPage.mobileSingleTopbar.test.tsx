@@ -215,7 +215,12 @@ describe('ChatPage on the phone: its share of the single top bar', () => {
     const rail = within(drawer).getByTestId('rail-stub')
     const pane = within(drawer).getByTestId('sidebar-stub')
     expect(rail.compareDocumentPosition(pane) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(railSpy).toHaveBeenCalledWith(expect.objectContaining({ onActivate: expect.any(Function) }))
+    // The drawer pushed a duplicate history entry when it opened, so its rail
+    // rows must REPLACE it (Back then lands on the chat, not a second copy).
+    // The shell's rail-only drawer on other routes pushes nothing and leaves
+    // `replace` unset (App.mobileNavEveryRoute.test.tsx).
+    expect(railSpy).toHaveBeenCalledWith(expect.objectContaining({ onActivate: expect.any(Function), replace: true }))
+    for (const [opts] of railSpy.mock.calls) expect(opts.replace).toBe(true)
   })
 
   it('shows the sessions pane alone when the shell hands over no rail', async () => {

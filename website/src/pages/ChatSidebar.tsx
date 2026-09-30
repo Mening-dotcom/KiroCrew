@@ -1745,7 +1745,9 @@ interface SessionRowProps {
    *  component that re-renders, so without this the memo boundary would
    *  swallow the re-render and displaced rows would snap into place instead
    *  of animating. Rows above the change keep their stamp and still bail out;
-   *  so do rows past the window, which snap by design. */
+   *  so do rows past the window, which snap by design. Also keys
+   *  layoutDependency: an unchanged order must not project an ancestor's
+   *  horizontal resize as an independent row movement. */
   orderStamp: number
   /** True only inside the first SIDEBAR_DISPLACEMENT_WINDOW paint positions;
    *  false outside that window, under prefers-reduced-motion, or in staticRows.
@@ -1970,7 +1972,7 @@ function compareLocalPinnedThenSort(
  *  is subscribed to HERE, slot-scoped, so a background event re-renders only
  *  the row it belongs to. */
 const SessionRow = memo(function SessionRow({
-  slot: s, showDivider, scope, navScope, holdContainer, conductor, isActive, connected, isOut, isPinned, isUnread, isRunning,
+  slot: s, orderStamp, showDivider, scope, navScope, holdContainer, conductor, isActive, connected, isOut, isPinned, isUnread, isRunning,
   recent, recentTintCount, subagentCount, subagentApprovalCount, digitBadge,
   isRenaming, renamingHere, renameValue, revealFlash, dragInFlight, activeDraggedKey, activeDraggedPinnedIndex, pinnedOrderIndex, pinnedReorderEnabled, onPinnedKeyboardReorder, rowAnimEnabled,
   defaultAgent, mode, isMobile, colorMode, installedAgents, tagById, paletteColors, boost, boostFor,
@@ -2702,6 +2704,9 @@ const SessionRow = memo(function SessionRow({
       >
         {({ setNodeRef: setPinnedDropRef, isOver: isPinnedDropOver }) => (
       <motion.div ref={setPinnedDropRef} layout={rowAnimEnabled ? 'position' : false} layoutId={rowAnimEnabled ? `slot-${layoutScope}-${rowIdentity}` : undefined}
+        // Project row reordering, not travel of the column that contains it.
+        // Measuring on every shell resize makes rows spring behind the pointer.
+        layoutDependency={orderStamp}
         data-slot-key={s.key}
         {...(conductor ? {
           // On the OUTERMOST row element, which is the card plus its divider. Same

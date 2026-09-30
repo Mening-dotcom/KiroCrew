@@ -11,9 +11,11 @@
  *    the readout capsule;
  *  - the shell hands the chat page its main-navigation RAIL through
  *    `MobileNavRailContext`, built from the same registry the desktop rail
- *    uses (the Chat row is the active one, Settings is there, Search is pinned);
- *  - every other phone page keeps the logo -> nav drawer, loses the search
- *    square and the capsule, and still has THREE in-flow header children, so
+ *    uses (the Chat row is the active one, Settings is there, the current-crew
+ *    chooser and Search are pinned around one scroll region);
+ *  - every other phone page keeps the panel icon -> nav drawer (the same rail,
+ *    see App.mobileNavEveryRoute.test.tsx), loses the search square and the
+ *    capsule, and still has THREE in-flow header children, so
  *    the actions group cannot be auto-placed into the `auto` centre track.
  *
  * The ChatPage stub stands in for the real page's consumer side (covered in
@@ -141,38 +143,44 @@ describe('phone chat page: one top bar', () => {
     expect(within(rail).getByRole('button', { name: 'Settings' })).not.toHaveClass('nav-active')
     // Search moved here from the bar, same label, same command palette.
     expect(within(rail).getByTestId('mobile-nav-rail-search')).toHaveAccessibleName('Search sessions, files, and commands')
-    // The brand mark is a control (home = chat root), not an inert picture in
-    // the position every other app puts a tappable logo.
-    expect(within(rail).getByTestId('mobile-nav-rail-home')).toHaveAccessibleName()
+    // The current-crew chooser replaces the old Home brand mark at the top: it
+    // names the crew on screen and is the switcher (the header's inline one is
+    // gone on the phone).
+    expect(within(rail).queryByTestId('mobile-nav-rail-home')).toBeNull()
+    const chooser = await within(rail).findByTestId('navigation-crew-switcher')
+    expect(chooser).toHaveAccessibleName('Local — Switch crew')
+    expect(header().querySelector('.instance-tab-bar-inline')).toBeNull()
     // Every tile carries a visible caption (a finger cannot summon the desktop
     // rail's hover tip); the long label gets its short form, the name stays full.
     const caps = within(rail).getByRole('button', { name: 'Agent Capabilities' })
     expect(caps).toHaveTextContent('Capabilities')
     expect(caps).not.toHaveTextContent('Agent Capabilities')
     expect(within(rail).getByRole('button', { name: 'Settings' })).toHaveTextContent('Settings')
-    // The rail is the last row-set before Search; nothing in it is a text label
-    // (icon-only, 56px wide), so every row must be named.
+    // Every control in the rail must be named (icon tiles, chooser, Search).
     for (const row of within(rail).getAllByRole('button')) expect(row).toHaveAccessibleName()
-    // Only the Apps list scrolls (its own frame, like the desktop rail); the
-    // brand mark above and Capabilities / Settings / Search below stay pinned,
-    // so 14 installed apps cannot push Settings off the bottom of the screen.
+    // ONE scroll region holds every destination (Library, apps, Capabilities,
+    // Settings) so a short screen or an open keyboard never strands Settings
+    // below the fold; the crew chooser above and Search below stay pinned.
     expect(rail).toHaveClass('overflow-hidden')
     expect(rail).not.toHaveClass('overflow-y-auto')
+    const scroll = within(rail).getByTestId('mobile-nav-rail-scroll')
+    expect(scroll).toHaveClass('overflow-y-auto', 'flex-1', 'min-h-0')
     const apps = within(rail).getByTestId('mobile-nav-rail-apps')
-    expect(apps).toHaveClass('overflow-y-auto', 'flex-1', 'min-h-0')
-    expect(apps).not.toContainElement(within(rail).getByTestId('mobile-nav-rail-home'))
-    expect(apps).not.toContainElement(within(rail).getByTestId('mobile-nav-rail-search'))
-    expect(apps).not.toContainElement(within(rail).getByRole('button', { name: 'Settings' }))
-    expect(apps).not.toContainElement(caps)
+    expect(scroll).toContainElement(apps)
+    expect(scroll).toContainElement(within(rail).getByRole('button', { name: 'Settings' }))
+    expect(scroll).toContainElement(caps)
+    expect(scroll).toContainElement(within(rail).getByRole('button', { name: 'Library' }))
+    expect(scroll).not.toContainElement(chooser)
+    expect(scroll).not.toContainElement(within(rail).getByTestId('mobile-nav-rail-search'))
   })
 
-  it('keeps the logo -> nav drawer on other phone pages and still has three in-flow header cells', async () => {
+  it('keeps the panel icon -> nav drawer on other phone pages and still has three in-flow header cells', async () => {
     localStorage.setItem('mc-onboarded', '1')
     renderWithProviders(<App />, { route: '/settings' })
     await screen.findByTestId('settings-page')
     const h = header()
     expect(h).not.toHaveClass('topbar-single')
-    expect(within(h).getByRole('button', { name: 'Open menu' })).toBeInTheDocument()
+    expect(within(h).getByRole('button', { name: 'Open menu' })).toHaveClass('w-10', 'h-10')
     expect(within(h).queryByTestId('mobile-topbar-slot')).toBeNull()
     expect(within(h).queryByRole('button', { name: 'Search sessions, files, and commands' })).toBeNull()
     expect(h.querySelector('.tb-capsule')).toBeNull()
@@ -184,7 +192,7 @@ describe('phone chat page: one top bar', () => {
     expect(flow[0]).toHaveClass('tb-left')
     expect(flow[1]).toHaveAttribute('data-testid', 'topbar-centre-spacer')
     expect(flow[2]).toHaveClass('tb-right')
-    // No rail off the chat route.
+    // No rail while the drawer is closed (it mounts the shared rail on open).
     expect(screen.queryByTestId('mobile-nav-rail')).toBeNull()
   })
 
@@ -261,8 +269,10 @@ describe('phone chat page: one top bar', () => {
       const { unmount } = renderWithProviders(<App />, { route: '/chat' })
       const rail = await screen.findByTestId('mobile-nav-rail')
       const tile = await within(rail).findByRole('button', { name: 'Kiro Account' })
-      // Between Capabilities and Settings, pinned with them (not in the Apps scroller).
+      // Between Capabilities and Settings: outside the installed-apps group,
+      // inside the one scroll region every destination shares.
       expect(within(rail).getByTestId('mobile-nav-rail-apps')).not.toContainElement(tile)
+      expect(within(rail).getByTestId('mobile-nav-rail-scroll')).toContainElement(tile)
       expect(tile).toHaveAttribute('aria-pressed', 'false')
       fireEvent.click(tile)
       expect(await screen.findByRole('dialog', { name: 'Kiro Account' })).toBeInTheDocument()

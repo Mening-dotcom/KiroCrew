@@ -11,7 +11,7 @@
  * screenshot and reclaims nothing.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { screen, fireEvent, act } from '@testing-library/react'
+import { screen, fireEvent, act, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -522,9 +522,9 @@ describe('focus mode — shell layout', () => {
     }
   })
 
-  it('honours the collapse preference and toggles it from the collapse control', async () => {
-    // The overlay rail is as wide as the docked rail would be, and the brand row's
-    // collapse control flips the preference exactly as it does outside focus mode.
+  it('honours the collapse preference and toggles it from the navigation grabber', async () => {
+    // The overlay rail is as wide as the docked rail would be, and the rail's
+    // grabber flips the preference exactly as it does outside focus mode.
     localStorage.setItem('mc-nav', '1')
     renderWithProviders(<App />, { route: '/chat' })
     const toggle = await screen.findByTestId('focus-mode-toggle')
@@ -534,22 +534,24 @@ describe('focus mode — shell layout', () => {
     expect(shell.style.gridTemplateColumns).toMatch(/^74px /)
 
     await act(async () => { fireEvent.click(toggle) })
-    // Collapsed overlay: 74px track minus the rail's 16px of margin.
-    expect(rail.style.width).toBe('58px')
+    // Collapsed overlay: the full 74px strip — the rail no longer carries a
+    // card margin to subtract.
+    expect(rail.style.width).toBe('74px')
 
     vi.useFakeTimers()
     try {
       fireEvent.mouseEnter(screen.getByTestId('focus-peek-rail'))
       act(() => { vi.advanceTimersByTime(150) })
       expect(rail.style.transform).toBe('translateX(0)')
-      act(() => { fireEvent.click(screen.getByLabelText('Expand sidebar')) })
+      const grabber = within(rail).getByRole('separator', { name: 'Main navigation' })
+      act(() => { fireEvent.keyDown(grabber, { key: 'Enter' }) })
       // Expanded, still shown, and the preference written.
-      expect(rail.style.width).toBe('220px')
+      expect(rail.style.width).toBe('236px')
       expect(rail.style.transform).toBe('translateX(0)')
       expect(localStorage.getItem('mc-nav')).toBe('0')
 
-      act(() => { fireEvent.click(screen.getByLabelText('Collapse sidebar')) })
-      expect(rail.style.width).toBe('58px')
+      act(() => { fireEvent.keyDown(grabber, { key: 'Home' }) })
+      expect(rail.style.width).toBe('74px')
       expect(localStorage.getItem('mc-nav')).toBe('1')
     } finally {
       vi.useRealTimers()

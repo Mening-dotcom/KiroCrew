@@ -268,7 +268,7 @@ the shell's, and the chat page fills it:
 
 | cell | who renders it | what is in it |
 |---|---|---|
-| leading (`auto`) | `App.tsx` | the crew switcher (when a remote crew exists) and downstream widgets (while they exist); usually empty. Not the update pill: beside a remote crew's chip + dropdown it was a third action, so on this page a pending update is the first item of the overflow menu (`UpdatePill variant="menu-item"`, same lifecycle label) |
+| leading (`auto`) | `App.tsx` | downstream widgets while they exist; otherwise empty. Crew switching lives in the drawer's current-crew control. A pending update is the first item of the overflow menu (`UpdatePill variant="menu-item"`, same lifecycle label) |
 | centre (`minmax(0,1fr)`) | `ChatPage.tsx`, by `createPortal` into `#mobile-topbar-slot` | sessions toggle, then ONE control that is the session title with the menu chevron flush after it (`ChatHeaderMenu` `triggerLabel`); Rename and Auto-title are items of that menu (`SessionActionsMenu` `onRename` / `onAutoTitle`), and Rename swaps in the shared title editor. That menu leaves out its pop-out / focus-popped-out rows here (`omitPopout`): the trailing ⋯ menu is the phone's window menu and carries them, and the same row in two adjacent menus read as two different actions. Nothing else: the inline row's Autopilot InfoTip and `InboundLinkChip` would each be a third control, so the mode is read from the session menu's Autopilot row and a two-way link's actions from its Linked surfaces section |
 | trailing (`auto`, `.tb-trail`) | `App.tsx`, plus a portal into `#mobile-topbar-trail-slot` | exactly two: the bell, then the page's overflow menu (update when pending, pop out or focus the popped-out window, activity panel, split view). The update row reads `<status> — Open update settings`: a menu row is read as an action, and the row only navigates to Settings › About, so it names that outcome instead of implying a download or restart. The update row is a lazy chunk inside its own `ErrorBoundary`, so a chunk that fails to load costs the row, not the page (a rejection would otherwise reach the route boundary); the fallback is an inline `ErrorNotice` plus its `ErrorNoticeMenuItem` hand-off (`errors-use-error-notice`), never `null`, because this menu is the update's only phone home and a silent gap would hide the failure |
 
@@ -317,31 +317,32 @@ reading); on any other harness only for a reading the desktop segment would show
 `kiroAccountEntry = kiroCreditSurface || (reading !== null && !pillHidden)`, the
 segment's own derivation minus the warming `null`, where the desktop's spinner would
 become a nav row blinking in and out. Same test file pins both states.
-Off the chat route the phone header keeps the logo -> nav drawer
-and the bell, and renders an empty centre spacer so the header still has three
-in-flow children -- with two, the actions group would be auto-placed into the `auto`
-centre track and collapse.
+Off the chat route the phone header opens the same captioned rail with a
+panel-icon button, rather than an old branded text drawer. It keeps the bell
+and an empty centre spacer so all three header tracks remain occupied. Crew
+switching lives in the rail on every phone route, not in a duplicate header chip.
 
-**The chat page's ONE drawer carries the main navigation.** Its sessions
-`OverlayDrawer` (unchanged width, slide, scrim, keyboard inset and Back handling)
-now holds a 72px icon rail on the left -- the shell's, rendered by `App.tsx` and
-handed down through `MobileNavRailContext` -- beside the sessions pane. The rail is
-built from the same registry as the desktop rail (`advertisedNavItems`,
-`sortedAppGroup`, the Bottom group) through the same `NavItem`, with `touch` for a
-64x56 `rounded-xl` tile carrying a 10px caption under the glyph (a finger cannot summon
-the desktop rail's hover tip), a full-opacity muted glyph (the desktop rail's 70% dimming
-measured 3.4:1 on these flat tiles) and the desktop rail's selected paint, on a
-`bg-bg-accent` surface that reads apart from the `bg-bg-elevated` pane. The brand mark on
-top is the "home" control (chat root; a cold reader tapped it expecting that), named `Home`
-(`nav.home`) for what it does rather than for the brand it shows; Search is pinned at
-its foot, captioned `Search all` (`nav.search_short`) because it sits one pane away from the
-sessions pane's "Search sessions..." field and a reader could not tell the two apart. Because the drawer minted a duplicate history entry on open
-(`pushDrawerEntry`), rows behave in two ways: the row for the page the user is on
-only closes the drawer, and a row that leaves the page navigates with `replace`
-so Back returns to the chat rather than to a second copy of it. The shell's nav
-drawer has no trigger on this route and its header swipe is gated off
-(`useDrawerSwipe(shellRef, { enabled: isMobile && !isChat })`); the chat
-container already claims its own swipe via `data-owns-swipe`.
+**Every phone route shares one navigation rail.** App builds it from the actual
+navigation registry and passes it through `MobileNavRailContext` to chat, which
+keeps the real Sessions pane beside it. Other tabs host the same 72px rail alone
+in the shell's drawer. The shell drawer is flush to the safe-area edge and tracks
+the visual viewport when the keyboard is open; its slide, scrim, swipe and Escape
+paths remain intact. No navigation rail occupies page width while closed.
+
+Each destination has a 64px-wide touch target at least 56px tall and an 11px
+caption that wraps without clipping; longer names grow the tile vertically.
+Selection paint stays confined to its 36px icon tile. The current crew chooser replaces the brand
+Home mark; Sessions remains the chat destination. Crew identity and Search are
+pinned while all destinations scroll together, including Library and enabled
+Developer, Terminal and phone-connection entries, so shorter screens cannot lose
+Settings or an installed app. Search opens the existing command palette.
+
+The hosting drawer explicitly selects history behavior: chat passes `replace`
+for the duplicate entry its `pushDrawerEntry` created; the shell drawer has no
+such entry and pushes ordinary route changes. An active row closes its drawer.
+Chat retains the single title bar and owns its left/right gestures, so the
+shell's swipe stays disabled there. Shared mobile chrome adds the same top
+border and modest corners on every page without the desktop's right gutter.
 
 ## A horizontal drag on mobile belongs to the nav drawer unless a page claims it
 

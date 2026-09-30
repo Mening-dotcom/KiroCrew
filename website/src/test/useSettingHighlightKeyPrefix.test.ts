@@ -57,6 +57,29 @@ function wrapper(initialEntries: string[]) {
 }
 
 describe('useSettingHighlight key: prefix', () => {
+  it('waits for the add-crew form to mount after its feature query', async () => {
+    vi.useFakeTimers()
+    const form = document.createElement('div')
+    form.setAttribute('data-setting-key', 'remote-crew-add')
+    const hook = renderHook(() => {
+      useSettingHighlight()
+      return useLocation().search
+    }, { wrapper: wrapper(['/settings/instances?highlight=key:remote-crew-add']) })
+    try {
+      act(() => { vi.advanceTimersByTime(100) })
+      expect(hook.result.current).toContain('highlight=key:remote-crew-add')
+      await act(async () => { document.body.appendChild(form) })
+      expect(form.scrollIntoView).toHaveBeenCalledWith({ block: 'center', behavior: 'smooth' })
+      expect(form.style.outlineOffset).toBe('4px')
+      expect(hook.result.current).not.toContain('highlight=')
+    } finally {
+      hook.unmount()
+      form.remove()
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   it('resolves key:configKey via data-setting-key attribute directly (no label round-trip)', async () => {
     vi.useFakeTimers()
 

@@ -2,21 +2,28 @@
  * Test: the crew switcher is reachable at phone widths.
  *
  * The switcher used to be gated out below 768px entirely, which left a phone
- * with no route to another crew at all (the command palette could still switch,
- * but nothing said so). It renders at every width now; what keeps it fitting is
- * the identity group's collapse ladder in index.css, asserted by
- * topbarMenuButtonNarrow.test.ts. This test pins the part CSS cannot: that the
- * component is MOUNTED on mobile, with its dropdown trigger — the control the
- * ladder protects — present.
+ * with no route to another crew at all. On the phone it is now the current-crew
+ * chooser at the top of the shared navigation rail (every route; see
+ * App.mobileNavEveryRoute.test.tsx), and the header's duplicate inline
+ * switcher is removed. This pins that the chooser is MOUNTED on mobile, is the
+ * only switcher, and its menu reaches the remote crew and Add remote crew.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { renderWithProviders } from './helpers'
 import type { RootState } from '../store'
 import App from '../App'
+import { useMobileNavRail } from '../components/MobileNavRailContext'
 
 vi.mock('../hooks/useIsMobile', () => ({ useIsMobile: () => true }))
-vi.mock('../pages/ChatPage', () => ({ default: () => <div data-testid="chat-page">ChatPage</div> }))
+// Renders the rail it is handed, as the real page's sessions drawer does.
+vi.mock('../pages/ChatPage', () => ({
+  default: function ChatPageStub() {
+    const rail = useMobileNavRail()
+    return <div data-testid="chat-page">{rail?.({ onActivate: () => {}, replace: true })}</div>
+  },
+}))
 vi.mock('../pages/SystemPage', () => ({ default: () => null }))
 vi.mock('../pages/ProjectsPage', () => ({ default: () => null }))
 vi.mock('../pages/LogsPage', () => ({ default: () => null }))
@@ -89,15 +96,30 @@ describe('crew switcher at phone widths', () => {
     dashboard: { connected: true, status: { platform: 'linux' }, slots: [], approvalMode: 'normal' } as unknown as RootState['dashboard'],
   }
 
-  it('mounts the inline switcher and its dropdown trigger on mobile', async () => {
+  it('mounts the current-crew chooser in the rail, not inline in the header', async () => {
     renderWithProviders(<App />, { route: '/chat', preloadedState: state })
-    // The trailing dropdown is the affordance that must survive: it lists every
-    // crew, including the one on screen, so it alone is a complete switcher.
-    expect(await screen.findByLabelText('Switch crew')).toBeTruthy()
-    // On the phone chat page the switcher sits in the single bar's leading
-    // cell; the nav-drawer logo is not on this route (the chat drawer's rail
-    // is the navigation), and the chat page's title slot must still be there.
+    // The chooser at the top of the navigation rail is the phone's switcher: it
+    // names the crew on screen and its menu lists every crew, so it alone is a
+    // complete switcher.
+    const rail = await screen.findByTestId('mobile-nav-rail')
+    const chooser = await within(rail).findByTestId('navigation-crew-switcher')
+    expect(chooser).toHaveAccessibleName(/^Local — Switch crew/)
+    // The header's duplicate inline switcher is gone, so there is exactly one.
+    const header = document.querySelector('header.topbar') as HTMLElement
+    expect(header.querySelector('.instance-tab-bar-inline')).toBeNull()
+    expect(screen.getAllByLabelText(/Switch crew/)).toEqual([chooser])
+    // The nav-drawer toggle is not on this route (the chat drawer's rail is the
+    // navigation), and the chat page's title slot must still be there.
     expect(screen.queryByLabelText('Open menu')).toBeNull()
     expect(screen.getByTestId('mobile-topbar-slot')).toBeTruthy()
+  })
+
+  it('lists the remembered remote crew and the Add action from the chooser', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<App />, { route: '/chat', preloadedState: state })
+    const chooser = await screen.findByTestId('navigation-crew-switcher')
+    await user.click(chooser)
+    expect(await screen.findByRole('menuitemradio', { name: /devbox/ })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Add remote crew' })).toBeInTheDocument()
   })
 })

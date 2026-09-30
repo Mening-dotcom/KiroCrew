@@ -565,7 +565,7 @@ export default function SidePanelLayout({ title, tabs, defaultTab, rememberKey, 
           {footer && <div className="shrink-0 pt-3 px-2.5">{footer}</div>}
         </nav>}
 
-      <div className={`flex-1 min-w-0 min-h-0 flex flex-col ${fixed ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <div className={`flex-1 min-w-0 min-h-0 flex flex-col scrollbar-overlay workspace-scroll ${fixed ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {isMobile && !subDrilled && <NavBackBar label={title} onBack={backToRoot} />}
         {!subDrilled && <div data-testid={isMobile ? 'mobile-detail-header' : 'side-panel-header'} className={`flex items-end justify-between gap-4 shrink-0 ${isMobile ? 'px-4 pb-2' : 'px-6 pt-2 pb-3'}`}>
           <div>

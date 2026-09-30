@@ -900,12 +900,12 @@ html:lang(ko) {
   color-scheme:dark;
 }
 [data-theme="tokyonight-light"]{
-  --bg:#d5d6db;--bg-accent:#cbccd1;--bg-elevated:#ffffff;--bg-hover:#c4c5ca;
+  --bg:#ffffff;--bg-accent:#f2f5fa;--bg-elevated:#ffffff;--bg-hover:#e9eef6;
   --card:#ffffff;--card-fg:#343b58;--card-hl:rgba(0,0,0,.03);
-  --panel:#d5d6db;--panel-strong:#cbccd1;
-  --chrome:rgba(213,214,219,.95);
-  --text:#565a6e;--text-strong:#343b58;--muted:#595c63;--muted-fg:#000;--muted-strong:#8389a0;
-  --border:#c4c5ca;--border-strong:#b4b5ba;--border-hover:#9a9ba0;
+  --panel:#f7f8fb;--panel-strong:#eef1f6;
+  --chrome:#eef1f6;
+  --text:#444e65;--text-strong:#28334d;--muted:#626b7d;--muted-fg:#000;--muted-strong:#4c586e;
+  --border:#dce2ec;--border-strong:#c7d0df;--border-hover:#9aa9c0;
   --accent:#1d60d4;--accent-fg:#fff;--accent-hover:#4090f0;--accent-subtle:rgba(46,125,233,.12);
   --accent-glow:rgba(46,125,233,.15);--ring:#2e7de9;
   --ok:#587539;--ok-fg:#fff;--ok-subtle:rgba(88,117,57,.1);
@@ -1899,6 +1899,14 @@ file-tree-container{
 .scrollbar-overlay::-webkit-scrollbar-thumb{background:transparent;border-radius:9999px;transition:background .2s}
 .scrollbar-overlay:hover::-webkit-scrollbar-thumb{background:var(--muted)}
 .scrollbar-overlay:hover::-webkit-scrollbar-thumb:hover{background:var(--text)}
+/* Transcript scrollbars stay discoverable without painting a permanent rail.
+   Keyboard focus reveals the same thumb as hover; coarse pointers use the
+   overlay utility's persistent cue. Track ends clear the workspace corners. */
+.chat-container.scrollbar-overlay:focus-within{scrollbar-color:var(--muted) transparent}
+.chat-container.scrollbar-overlay:focus-within::-webkit-scrollbar-thumb{background:var(--muted)}
+.chat-container.scrollbar-overlay:focus-within::-webkit-scrollbar-thumb:hover{background:var(--text)}
+.chat-container.scrollbar-overlay::-webkit-scrollbar-track{margin-block:8px}
+
 /* Thinner reveal for the side-panel nav rail: 5px rather than the overlay utility's 6px, so the hover/touch hint reads as a hint, not a bar. Colour is unchanged (--muted, the accessibility-floor token), only the width narrows. */
 .scrollbar-overlay-thin::-webkit-scrollbar{width:5px}
 /* On touch the overlay utility would stay perpetually transparent: a finger never
@@ -3321,3 +3329,48 @@ html[data-font-family="opendyslexic"] .nav-item {
      to read at a glance. 0.4 was chosen by eye on the dogfood build. */
   --pane-dim-opacity: 0.4;
 }
+
+/* Grabber shell: one continuous top/left chrome surface, with the real page
+   inset to its right. Mobile drawers and focus overlays keep their own frame. */
+.grabber-shell{background:var(--chrome);color:var(--text)}
+.grabber-shell > header.topbar-glass{background:var(--chrome);color:var(--text);box-shadow:none}
+.grabber-shell > .dashboard-surface{border-top:1px solid var(--border);border-left:1px solid var(--border);border-right:1px solid var(--border);border-radius:8px 8px 0 0;margin-right:6px;overflow:hidden;background:var(--bg);color:var(--text)}
+.grabber-shell .dashboard-navigation{background:var(--chrome);color:var(--text)}
+.dashboard-navigation .nav-item{height:42px;padding:3px 11px;gap:10px;flex-shrink:0}
+.dashboard-navigation .nav-item > .nav-icon-frame > .app-icon-nav{width:36px;height:36px;border-radius:8px}
+.dashboard-navigation .nav-item > .nav-icon-frame > .app-icon-nav > svg{width:20px;height:20px}
+/* Selection belongs to the icon tile, never a rail-wide saturated slab. The
+   shell selector intentionally outranks each theme's generic .nav-active. */
+.dashboard-navigation .nav-item.nav-active{background:transparent;color:var(--text);filter:none}
+.dashboard-navigation .nav-item.nav-active > .nav-icon-frame > .app-icon-nav{background:var(--accent-subtle);color:var(--accent)}
+.dashboard-navigation .nav-item:hover{background:transparent}
+/* Hover answers immediately on the compact tile, independently of the label
+   delay. A neutral inset edge remains visible in low-contrast light palettes;
+   selected tiles keep their accent fill. Neither cue changes geometry. */
+.dashboard-navigation .nav-item:hover > .nav-icon-frame > .app-icon-nav{opacity:1;box-shadow:inset 0 0 0 1px var(--border-strong)}
+.dashboard-navigation .nav-item:not(.nav-active):hover > .nav-icon-frame > .app-icon-nav{background:var(--bg-hover)}
+.dashboard-navigation[data-compact="true"] .nav-item{justify-content:flex-start}
+.dashboard-navigation[data-compact="true"] .nav-section{overflow:hidden}
+.dashboard-navigation .nav-item > span:not(.app-icon-nav){min-width:0}
+/* During direct manipulation the pointer owns geometry; layout projection
+   would otherwise scale/offset rows against a changing ancestor. */
+.dashboard-navigation[data-dragging="true"] .nav-item{transform:none!important}
+.grabber-shell .session-list-drawer{padding-bottom:0}
+.grabber-shell .session-list-drawer .sidebar-inner{border-top:0;border-bottom:0;border-left:0;border-radius:0;box-shadow:none}
+@media(prefers-reduced-motion:reduce){
+  .grabber-shell{transition:none!important}
+}
+
+/* Phones keep all reading width: continuous chrome and one top divider, but
+   no desktop gutter or persistent rail. The same drawer rail serves every tab. */
+.mobile-chrome{background:var(--chrome);color:var(--text)}
+.mobile-chrome > header.topbar-glass{background:var(--chrome);color:var(--text);box-shadow:none}
+.mobile-chrome > .dashboard-surface{border-top:1px solid var(--border);border-radius:8px 8px 0 0;overflow:hidden;background:var(--bg);color:var(--text)}
+.mobile-navigation-rail .crew-navigation-switcher{margin-bottom:0}
+.mobile-navigation-rail .nav-item.nav-active{background:transparent;color:var(--text);filter:none}
+.mobile-navigation-rail .nav-item > .nav-icon-frame > .app-icon-nav{width:36px;height:36px;border-radius:8px}
+.mobile-navigation-rail .nav-item > .nav-icon-frame > .app-icon-nav > svg{width:20px;height:20px}
+.mobile-navigation-rail .nav-item.nav-active > .nav-icon-frame > .app-icon-nav{background:var(--accent-subtle);color:var(--accent)}
+.workspace-scroll:focus-within{scrollbar-color:var(--muted) transparent}
+.workspace-scroll:focus-within::-webkit-scrollbar-thumb{background:var(--muted)}
+.workspace-scroll::-webkit-scrollbar-track{margin-block:8px}

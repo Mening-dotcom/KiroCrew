@@ -12,8 +12,9 @@
  * Unread counts survive that collapse in two places, because a count hidden
  * behind a closed menu would be invisible: the trigger carries an AGGREGATE
  * badge for every crew that is not on screen, and each menu row carries its
- * own. The bar appears ONLY when at least one remote crew is connected or
- * remembered, so the common single-crew experience is unchanged. Everything
+ * own. The header bar appears only with a connected or remembered remote;
+ * the navigation variant always exposes the current identity and Add remote
+ * crew, including the single-crew experience. Everything
  * *below* the bar is the switchable "window" — the Local dashboard, or a remote
  * crew's embedded dashboard (see InstancesViewport). The bar intentionally
  * carries no product brand of its own; each pane shows its own brand, so
@@ -25,7 +26,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, Fragment, type CSSProperties } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Home, Loader2, ChevronDown, Pin, Check } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Loader2, ChevronDown, Pin, Plus } from 'lucide-react'
 import { api, ApiError, type InstanceView } from '../api/client'
 import { useAppSelector } from '../store'
 import { type WarmConn } from '../store/instancesSlice'
@@ -34,6 +36,9 @@ import { tokenTtlTotalSeconds } from '../lib/tokenTtl'
 import { hasDashboardPane } from '../utils/remoteCrew'
 import { useSelectInstance } from '../hooks/useSelectInstance'
 import ErrorNotice from './ErrorNotice'
+import CrewIdentityMark, { LocalCrewIcon } from './CrewIdentityMark'
+import { Btn } from './ui'
+import { settingsPath } from './settingsPath'
 import { errMessage } from '../utils/thunkError'
 import { safeSetItem } from '../utils/safeStorage'
 import {
@@ -533,7 +538,7 @@ function SwitcherRow({
           </span>
         ) : null}
         {isLocal ? (
-          <Home className="lucide-inline shrink-0" />
+          <LocalCrewIcon size={16} />
         ) : entry.connecting ? (
           <Loader2 className="lucide-inline shrink-0 animate-spin" />
         ) : (
@@ -614,7 +619,9 @@ function SwitcherRow({
 
 // Outer container classes per variant. Inline is h-full so its 24px trigger sits
 // vertically centered in the 42px header.
-function barCls(variant: 'strip' | 'inline'): string {
+type BarVariant = 'strip' | 'inline' | 'navigation'
+function barCls(variant: BarVariant): string {
+  if (variant === 'navigation') return 'crew-navigation-switcher min-w-0 mb-3'
   return variant === 'inline'
     ? 'instance-tab-bar-inline flex items-center h-full gap-1 min-w-0'
     : 'topbar-glass instance-tab-bar flex items-center gap-2 h-8 px-2 border-b border-border shrink-0 z-[46]'
@@ -632,9 +639,9 @@ function SwitcherMenu({
   pinned,
   onTogglePin,
   clippedPinned,
-  stableOrder,
-  onToggleStableOrder,
-  showStableOrderToggle,
+  onAddRemoteCrew,
+  navigation = false,
+  collapsed = false,
 }: {
   entries: SwitcherEntry[]
   activeId: string | null
@@ -642,11 +649,28 @@ function SwitcherMenu({
   pinned: Set<string>
   onTogglePin: (id: string) => void
   clippedPinned: Set<string>
-  stableOrder: boolean
-  onToggleStableOrder: () => void
-  showStableOrderToggle: boolean
+  onAddRemoteCrew: () => void
+  navigation?: boolean
+  collapsed?: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const [keyboardInput, setKeyboardInput] = useState(false)
+  useEffect(() => {
+    if (!navigation) return
+    // Radix can restore :focus-visible after a pointer selection. Keep that
+    // focus for navigation, but paint a focus cue only after keyboard input.
+    const onPointer = () => setKeyboardInput(false)
+    const onKey = (event: KeyboardEvent) => {
+      if (!['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) setKeyboardInput(true)
+    }
+    document.addEventListener('pointerdown', onPointer, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointer, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [navigation])
+  const active = entries.find(entry => entry.id === activeId) ?? entries[0]
   // Unread the user cannot see: everything that is neither the active pane nor a
   // chip currently on screen. A pinned crew whose chip got cut off counts, since
   // its badge went with it.
@@ -662,13 +686,21 @@ function SwitcherMenu({
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <button
+        <Btn
           type="button"
-          title={label}
-          aria-label={label}
-          className="relative flex items-center justify-center h-6 w-6 shrink-0 rounded-md border border-transparent text-muted transition-colors hover:bg-bg-hover hover:text-text focus-ring"
+          title={navigation && active ? `${active.title} — ${label}` : label}
+          aria-label={navigation && active ? `${active.name} — ${label}` : label}
+          data-testid={navigation ? 'navigation-crew-switcher' : undefined}
+          data-keyboard-focus={navigation && keyboardInput ? 'true' : undefined}
+          className={navigation
+            ? 'relative flex items-center justify-start w-full h-12 gap-2.5 px-[11px] min-w-0 border-0 text-text outline-none data-[keyboard-focus=true]:focus-visible:bg-bg-hover'
+            : 'relative flex items-center justify-center h-6 w-6 p-0 shrink-0 rounded-md border border-transparent text-muted transition-colors hover:bg-bg-hover hover:text-text focus-ring'}
         >
-          <ChevronDown className="lucide-inline shrink-0" />
+          {navigation && active ? <>
+            <CrewIdentityMark id={active.id} />
+            <span className={collapsed ? 'sr-only' : 'truncate min-w-0 text-[13px] font-semibold'}>{active.name}</span>
+            {!collapsed && <ChevronDown size={12} className="shrink-0 text-muted ml-auto" />}
+          </> : <ChevronDown className="lucide-inline shrink-0" />}
           {elsewhere > 0 ? (
             // Absolutely positioned so appearing cannot change the trigger's
             // width: the chip row is sized from the space this button leaves, so a
@@ -680,7 +712,7 @@ function SwitcherMenu({
               {badgeText(elsewhere)}
             </span>
           ) : null}
-        </button>
+        </Btn>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
@@ -703,38 +735,11 @@ function SwitcherMenu({
             </Fragment>
           ))}
         </DropdownMenuRadioGroup>
-        {/* A row-order preference, not a destination: it sits below the crew list
-            behind a separator so it never reads as one more crew to switch to.
-            `onSelect`'s preventDefault keeps the menu open — the user sees the
-            checkmark flip and can keep adjusting pins in the same session, the
-            same discipline the per-crew pin toggle uses. In an embedded pane the
-            toggle relays up to the parent (mc-set-stable-order), so it is shown
-            there too. */}
-        {showStableOrderToggle ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              role="menuitemcheckbox"
-              aria-checked={stableOrder}
-              data-testid="crew-stable-order-toggle"
-              className="gap-2 text-[13px]"
-              title={i18nT('components.instanceTabBar.keep_tab_order_fixed')}
-              aria-label={i18nT('components.instanceTabBar.keep_tab_order_fixed')}
-              onSelect={(e: Event) => {
-                e.preventDefault()
-                onToggleStableOrder()
-              }}
-            >
-              <Check
-                className={`lucide-inline shrink-0 ${stableOrder ? 'text-accent' : 'opacity-0'}`}
-                aria-hidden
-              />
-              <span className="flex-1 min-w-0">
-                {i18nT('components.instanceTabBar.keep_tab_order_fixed')}
-              </span>
-            </DropdownMenuItem>
-          </>
-        ) : null}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onAddRemoteCrew} className="gap-2 text-[13px]">
+          <Plus className="lucide-inline shrink-0" aria-hidden />
+          {i18nT('pages.settings.instancesPanel.add_remote_crew')}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -811,7 +816,7 @@ function SwitcherChip({
       }
     >
       {isLocal ? (
-        <Home className="lucide-inline shrink-0" />
+        <LocalCrewIcon size={16} />
       ) : entry.connecting ? (
         <Loader2 className="lucide-inline shrink-0 animate-spin" />
       ) : (
@@ -1047,8 +1052,9 @@ function Switcher({
   pinned: pinnedProp,
   onTogglePin: onTogglePinProp,
   stableOrder: stableOrderProp,
-  onToggleStableOrder: onToggleStableOrderProp,
   embedded = false,
+  navigation = false,
+  collapsed = false,
 }: {
   entries: SwitcherEntry[]
   activeId: string | null
@@ -1061,39 +1067,27 @@ function Switcher({
   /** Paired override: the embedded pane relays a toggle up to the parent (which
    *  owns the one shared preference) instead of writing its own store. */
   onTogglePin?: (id: string) => void
-  /** Override for the stable-order preference. Defaults to this realm's own
-   *  localStorage-backed store; callers that own the preference elsewhere pass
-   *  it explicitly. An embedded pane passes the value the host relayed, or
-   *  `null` when the host sent no opinion at all (an older parent predating the
-   *  relay, which has no `mc-set-stable-order` handler). `null` orders by the
-   *  pre-relay default and suppresses the toggle -- see `showStableOrderToggle`
-   *  below -- rather than exposing a control that could never take effect. */
+  /** Stored ordering remains parent-owned in embedded panes. A missing relayed
+   *  preference uses the default ordering rather than the pane's own store. */
   stableOrder?: boolean | null
-  /** Paired toggler for `stableOrder`. */
-  onToggleStableOrder?: () => void
-  /** True inside a remote pane's embedded switcher. The stable-order preference
-   *  is parent-owned and relayed through `mc-host-model` (`stableOrder`), and an
-   *  embedded toggle posts `mc-set-stable-order` back up, so the pane applies and
-   *  offers the same preference as the local bar. The flag only feeds the older-
-   *  host safety net in the resolution above; it no longer hides the toggle. */
+  /** True inside a remote pane: setup navigation stays in that dashboard. */
   embedded?: boolean
+  navigation?: boolean
+  collapsed?: boolean
 }) {
+  const navigate = useNavigate()
+  const addRemoteCrew = () => {
+    // The settings route belongs to this dashboard. A parent-owned recovery
+    // strip must reveal Local first; a healthy embedded pane stays on screen
+    // and configures its own connections (the existing chained-crew flow).
+    if (!embedded) onSelect(null)
+    navigate(settingsPath({ tab: 'instances', highlight: 'key:remote-crew-add' }))
+  }
   const [storePinned, storeTogglePin] = useCrewPins()
   const pinned = pinnedProp ?? storePinned
   const togglePin = onTogglePinProp ?? storeTogglePin
-  const [storeStableOrder, storeToggleStableOrder] = useCrewSwitcherStableOrder()
-  // The stable-order preference is parent-owned. An embedded pane receives it as
-  // a prop relayed through `mc-host-model` (and toggles it back up via
-  // `mc-set-stable-order`), so it no longer reads its own cross-origin store; a
-  // top-level bar falls back to this realm's localStorage-backed store.
-  //
-  // `null` from an embedded pane means the host predates the relay, so it has no
-  // handler for the toggle's message. Offering the control there would let the
-  // user click a checkbox that can never change state, so the pane both orders
-  // by the pre-relay default and hides the toggle in that one case.
-  const relayUnsupported = embedded && (stableOrderProp ?? null) === null
+  const [storeStableOrder] = useCrewSwitcherStableOrder()
   const stableOrder = (stableOrderProp ?? (embedded ? false : storeStableOrder)) === true
-  const toggleStableOrder = onToggleStableOrderProp ?? storeToggleStableOrder
   const [clippedPinned, setClippedPinned] = useState<Set<string>>(() => new Set())
   const active = entries.find(e => (e.id ?? null) === activeId) ?? entries[0]
   // Two orderings for the always-visible chips:
@@ -1117,8 +1111,8 @@ function Switcher({
   const activeIsChip = chips.some(e => (e.id ?? null) === activeId)
   const showLeadingActive = !stableOrder || !activeIsChip
   return (
-    <div className="flex items-center gap-1 min-w-0">
-      {showLeadingActive && active ? (
+    <div className={navigation ? 'flex flex-col min-w-0 w-full [&>button]:order-first' : 'flex items-center gap-1 min-w-0'}>
+      {!navigation && showLeadingActive && active ? (
         <SwitcherChip
           entry={active}
           active
@@ -1141,9 +1135,9 @@ function Switcher({
         pinned={pinned}
         onTogglePin={togglePin}
         clippedPinned={clippedPinned}
-        stableOrder={stableOrder}
-        onToggleStableOrder={toggleStableOrder}
-        showStableOrderToggle={!relayUnsupported}
+        onAddRemoteCrew={addRemoteCrew}
+        navigation={navigation}
+        collapsed={collapsed}
       />
     </div>
   )
@@ -1155,7 +1149,7 @@ function Switcher({
  * requests back up so the parent flips `activeId`. This is what collapses the
  * remote pane's two stacked bars into one consolidated header.
  */
-function EmbeddedInstanceTabBar({ variant }: { variant: 'strip' | 'inline' }) {
+function EmbeddedInstanceTabBar({ variant, collapsed }: { variant: BarVariant; collapsed: boolean }) {
   const host = useAppSelector(s => s.instances.host)
   const onSelect = useCallback((id: string | null) => {
     // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
@@ -1168,24 +1162,15 @@ function EmbeddedInstanceTabBar({ variant }: { variant: 'strip' | 'inline' }) {
     // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
     window.parent?.postMessage({ type: 'mc-set-crew-pin', v: 1, id }, '*')
   }, [])
-  // The stable-order preference also lives on the parent (one shared value across
-  // every pane). This pane cannot write the parent's store from its own iframe
-  // realm, so it relays the flipped value up and lets the parent re-broadcast the
-  // model back down. `null` = this host predates the relay, which the Switcher
-  // reads as "order by the default and do not offer the toggle at all".
   const hostStableOrder = host?.stableOrder ?? null
-  const onToggleStableOrder = useCallback(() => {
-    // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
-    window.parent?.postMessage({ type: 'mc-set-stable-order', v: 1, on: !hostStableOrder }, '*')
-  }, [hostStableOrder])
   const entries = useMemo<SwitcherEntry[]>(() => {
     if (!host) return []
     return [
       {
         id: null,
         name: i18nT('components.instanceTabBar.local'),
-        detail: i18nT('components.instanceTabBar.local_dashboard'),
-        title: i18nT('components.instanceTabBar.local_dashboard'),
+        detail: '',
+        title: i18nT('components.instanceTabBar.local'),
         unread: 0,
       },
       ...host.tabs.map(t => ({
@@ -1230,8 +1215,9 @@ function EmbeddedInstanceTabBar({ variant }: { variant: 'strip' | 'inline' }) {
         pinned={pinnedFromHost}
         onTogglePin={onTogglePin}
         stableOrder={hostStableOrder}
-        onToggleStableOrder={onToggleStableOrder}
         embedded
+        navigation={variant === 'navigation'}
+        collapsed={collapsed}
       />
     </div>
   )
@@ -1240,7 +1226,8 @@ function EmbeddedInstanceTabBar({ variant }: { variant: 'strip' | 'inline' }) {
 export default function InstanceTabBar({
   variant = 'strip',
   style,
-}: { variant?: 'strip' | 'inline'; style?: CSSProperties } = {}) {
+  collapsed = false,
+}: { variant?: BarVariant; style?: CSSProperties; collapsed?: boolean } = {}) {
   const activeId = useAppSelector(s => s.instances.activeId)
   const warm = useAppSelector(s => s.instances.warm)
   const unread = useAppSelector(s => s.instances.unread)
@@ -1275,8 +1262,8 @@ export default function InstanceTabBar({
       {
         id: null,
         name: i18nT('components.instanceTabBar.local'),
-        detail: i18nT('components.instanceTabBar.local_dashboard'),
-        title: i18nT('components.instanceTabBar.local_dashboard'),
+        detail: '',
+        title: i18nT('components.instanceTabBar.local'),
         unread: 0,
       },
       ...chainRows(tabInstances).map(({ inst, depth, parentName, reachable, brokenAt }) => {
@@ -1325,7 +1312,7 @@ export default function InstanceTabBar({
   // Embedded panes render the parent-relayed switcher. Hooks above
   // still run unconditionally (rules-of-hooks); the instances poll is disabled
   // when embedded, so this is cheap.
-  if (embedded) return <EmbeddedInstanceTabBar variant={variant} />
+  if (embedded) return <EmbeddedInstanceTabBar variant={variant} collapsed={collapsed} />
 
   // Single-crew experience is unchanged: no bar until a remote crew is
   // connected or remembered — unless the list itself could not be read, in
@@ -1334,7 +1321,9 @@ export default function InstanceTabBar({
   const listFailure = !disabled && instancesQuery.error
     ? (errMessage(instancesQuery.error) || i18nT('components.instanceTabBar.instances_load_failed'))
     : null
-  if (disabled || (tabInstances.length === 0 && !listFailure)) return null
+  // Compact header/recovery bars still hide in the single-crew case. The
+  // navigation identity always opens the menu so the first remote can be added.
+  if (variant !== 'navigation' && (disabled || (tabInstances.length === 0 && !listFailure))) return null
 
   // Right-aligned tunnel-status cluster: the ACTIVE remote pane's connection
   // state + countdown to the next token auto-refresh. On the Local tab there is
@@ -1380,8 +1369,8 @@ export default function InstanceTabBar({
       role="group"
       aria-label={i18nT('components.instanceTabBar.instances')}
     >
-      <div className={`flex items-center gap-1 min-w-0 ${variant === 'strip' ? 'flex-1' : ''}`}>
-        <Switcher entries={entries} activeId={activeId} onSelect={onSelect} />
+      <div className={`flex ${variant === 'navigation' ? 'flex-col items-stretch' : 'items-center'} gap-1 min-w-0 ${variant === 'strip' ? 'flex-1' : ''}`}>
+        <Switcher entries={disabled ? entries.slice(0, 1) : entries} activeId={disabled ? null : activeId} onSelect={onSelect} navigation={variant === 'navigation'} collapsed={collapsed} />
         {/* Only a 403 (feature gated) used to be interpreted; every other
             listInstances failure was dropped and the bar simply showed no
             crews. askAgent on: the bar holds no draft. */}

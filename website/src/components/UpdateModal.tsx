@@ -150,7 +150,9 @@ export default function UpdateModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-bg/80 backdrop-blur-xs flex items-center justify-center animate-rise"
+      // Keep the downloaded prompt on the same app modal layer as the
+      // installing overlay, above the navigation and Sessions drawer.
+      className="fixed inset-0 z-[100] bg-bg/80 backdrop-blur-xs flex items-center justify-center animate-rise"
       role="button"
       tabIndex={-1}
       aria-label={i18nT('components.updateModal.dismiss_update_dialog')}

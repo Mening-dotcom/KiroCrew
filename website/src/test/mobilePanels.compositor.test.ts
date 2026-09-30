@@ -6,8 +6,9 @@
  * reintroduces a bug the other half was built around.
  *
  *  LEFT (App.tsx mobile nav drawer):
- *   - the panel is a plain <nav> whose slide runs via animateDrawer — framer
- *     must not own a competing transform on it;
+ *   - the panel (a motion.div bound live to mobileNavX, holding the shared
+ *     rail) settles via animateDrawer — framer must not own a competing
+ *     `animate` transform on it;
  *   - NavItem drops `layout` on mobile: a projection node under a
  *     compositor-driven ancestor compounds a corrective offset (the ChatSidebar
  *     rows measured >4,000px of it);
@@ -33,7 +34,7 @@ const hook = readFileSync(resolve(__dirname, '../hooks/useDrawerSwipe.ts'), 'utf
 describe('mobile nav drawer (left) — compositor pairing', () => {
   const drawer = app.slice(app.indexOf('key="mobile-nav-drawer"'), app.indexOf('key="mobile-nav-drawer"') + 900)
 
-  it('slides a plain <nav>, not a framer-owned motion.nav', () => {
+  it('slides a panel framer does not animate (no motion.nav, no animate prop)', () => {
     expect(app.indexOf('key="mobile-nav-drawer"')).toBeGreaterThan(0)
     // The element framer animates is the element the compositor cannot have:
     // two writers to one transform is the judder the sessions drawer already
@@ -222,10 +223,13 @@ describe('the nav drawer travels its own width too', () => {
   // 240 against ~231 of real clearance, so it sat fully offscreen at 96% of the
   // slide and 211ms of a 450ms dismissal moved nothing.
 
-  it('derives the travel from the width and inset it actually has', () => {
-    expect(app).toMatch(/const MOBILE_NAV_WIDTH = \d+/)
-    expect(app).toMatch(/const MOBILE_NAV_INSET = \d+/)
-    expect(app).toMatch(/const mobileNavTravel = \(\) =>\s*MOBILE_NAV_WIDTH \+ MOBILE_NAV_INSET \+ \d+ \+ safeAreaLeft\(\)/)
+  it('derives the travel from the width it actually has, flush to the safe edge', () => {
+    // The drawer now holds the same 72px rail the chat drawer does and sits
+    // FLUSH against the safe-area edge (no floating-card inset), so the travel
+    // is width + slack + the live safe-area inset, with no inset term.
+    expect(app).toMatch(/const MOBILE_NAV_WIDTH = 72\b/)
+    expect(app).not.toMatch(/MOBILE_NAV_INSET/)
+    expect(app).toMatch(/const mobileNavTravel = \(\) =>\s*MOBILE_NAV_WIDTH \+ \d+ \+ safeAreaLeft\(\)/)
     // The rendered width comes from the same constant, so the two cannot drift.
     expect(app).toContain('style={{ width: MOBILE_NAV_WIDTH,')
     // Live, not a module constant: the safe-area inset is only knowable at
@@ -238,15 +242,16 @@ describe('the nav drawer travels its own width too', () => {
   })
 
   it('clears the screen with only a hair of slack', () => {
-    const num = (re: RegExp) => Number(re.exec(app)![1])
-    const width = num(/const MOBILE_NAV_WIDTH = (\d+)/)
-    const inset = num(/const MOBILE_NAV_INSET = (\d+)/)
-    const slack = num(/MOBILE_NAV_WIDTH \+ MOBILE_NAV_INSET \+ (\d+) \+ safeAreaLeft\(\)/)
-    // Enough to cover the 1px border and the shadow's spread…
+    const slack = Number(/MOBILE_NAV_WIDTH \+ (\d+) \+ safeAreaLeft\(\)/.exec(app)![1])
+    // Enough to cover the panel's `shadow-sm` blur (3px) so no shadow sliver is
+    // left on screen at rest-closed…
     expect(slack).toBeGreaterThan(0)
-    // …and not the 9px that made the tail invisible. Stated against the travel so
-    // it scales if the panel is ever resized.
-    expect(slack / (width + inset)).toBeLessThan(0.03)
+    // …and no more than that blur: every extra px is travel spent on an
+    // invisible panel (the old 9px tail). An absolute cap, not a ratio — on a
+    // 72px panel a ratio would either reject the shadow or admit the tail.
+    expect(slack).toBeLessThanOrEqual(3)
+    const drawer = app.slice(app.indexOf('key="mobile-nav-drawer"'), app.indexOf('key="mobile-nav-drawer"') + 900)
+    expect(drawer).toMatch(/className="[^"]*\bshadow-sm\b/)
   })
 })
 
@@ -258,8 +263,12 @@ describe('a panel with a gesture is bound LIVE to its offset', () => {  // The d
   // on release, when the settle took over. Correct while the tap was its only
   // mover; wrong the moment it gained a gesture.
   it('binds the nav panel and its scrim to the MotionValue, not a snapshot', () => {
-    expect(app).toMatch(/<motion\.nav[\s\S]{0,200}?style=\{\{ width: MOBILE_NAV_WIDTH, x: mobileNavX \}\}/)
-    expect(app).toMatch(/<motion\.div[\s\S]{0,200}?ref=\{mobileNavScrimRef\}[\s\S]{0,200}?style=\{\{ opacity: mobileNavScrim \}\}/)
+    // The panel is a motion.div wrapping the shared rail (itself the <nav>); the
+    // x binding sits beside the visual-viewport margins that keep it above the
+    // on-screen keyboard.
+    expect(app).toMatch(/key="mobile-nav-drawer"[\s\S]{0,200}?style=\{\{ width: MOBILE_NAV_WIDTH, x: mobileNavX[,}]/)
+    expect(app).toMatch(/<motion\.div\s+key="mobile-nav-drawer"/)
+    expect(app).toMatch(/<motion\.div[\s\S]{0,200}?ref=\{mobileNavScrimRef\}[\s\S]{0,200}?style=\{\{ opacity: mobileNavScrim[,}]/)
     // A render-time read of the value is the bug, on either element.
     expect(app).not.toContain('mobileNavX.get()}px')
     expect(app).not.toMatch(/ref=\{mobileNavScrimRef\}[\s\S]{0,200}?style=\{\{ opacity: 0 \}\}/)

@@ -138,6 +138,27 @@ describe('OverlayDrawer morph clip', () => {
     expect(unmeasured.container.querySelector('[data-initial-clip]:not([data-initial-clip=""])')).toBeNull()
   })
 
+  it('rests at the caller panelRadius, so a docked list joins the shell square', () => {
+    reduceMotion = false
+    const { container } = mount({ panelRadius: 0 })
+    const el = clipped(container)!
+    expect(el.getAttribute('data-animate-clip')).toBe('inset(0px 0px 0px 0px round 0px)')
+    // Only the RESTING corners change: the morph still converges on the
+    // button's own 6px corners, from the same rect.
+    expect(el.getAttribute('data-initial-clip')).toBe('inset(9px 224px 563px 8px round 6px)')
+    expect(el.getAttribute('data-exit-clip')).toBe('inset(9px 224px 563px 8px round 6px)')
+  })
+
+  it('keeps the 12px card corners when no panelRadius is passed', () => {
+    reduceMotion = false
+    const explicit = mount({ panelRadius: 12 })
+    const withDefault = clipped(explicit.container)!.getAttribute('data-animate-clip')
+    explicit.unmount()
+    const { container } = mount()
+    expect(clipped(container)!.getAttribute('data-animate-clip')).toBe(withDefault)
+    expect(withDefault).toBe('inset(0px 0px 0px 0px round 12px)')
+  })
+
   it('renders children in every mode', () => {
     for (const [reduce, morph] of [[false, true], [true, true], [false, false]] as const) {
       reduceMotion = reduce

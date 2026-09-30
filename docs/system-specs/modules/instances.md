@@ -62,7 +62,7 @@ SSH `-L` forward to each remote's loopback dashboard port, minting (for the `ssh
 and `ssm` methods; the `fargate` method mints nothing, §16) a short-lived
 dashboard token on the remote, and embedding the remote dashboard in an
 `<iframe>`. You switch panes from a dropdown (`InstanceTabBar`, plus
-Cmd/Ctrl+digit in the Electron shell); the hub keeps the most-recently-used set
+Cmd/Ctrl+digit in the Electron shell). On desktop the current crew's identity in the navigation rail opens that same dropdown even with no remote configured or with management disabled; the latter shows only Local plus the setup entry. The selected remote's configured name is shown in the trigger and its accessible label. The navigation trigger has no exterior focus outline or inset underline. Pointer and touch selections leave no highlight when focus returns from the menu: the background is hover-only for pointer use. A neutral background cue remains for actual keyboard navigation, tracked separately because the browser may mark Radix's pointer focus restoration as focus-visible. The Local entry displays only **Local**, with no subtitle; the menu contains crew destinations, pins, and **Add remote crew**, but no tab-order control. Saved ordering preferences and parent-relayed ordering still apply. Every switcher menu includes **Add remote crew**, which opens Settings → Remote Crew at the add-existing form (or the existing opt-in card when disabled), without enabling the feature, connecting, or provisioning. The deep link selects Your crews even if the mounted panel was showing cloud setup, and its known highlight anchor waits for the async form mount. In a healthy embedded dashboard the action configures that dashboard's connections, supporting the existing chained-crew flow; a parent-owned loading/error strip first reveals Local so its settings are visible. The top-header dropdown remains only on mobile and in the parent-owned loading/error recovery strip. The navigation grabber changes rail width independently of crew selection. Local uses the full-colour three-ghost Kiro Crew product icon (`/logo.png`) in the desktop and mobile navigation identity, switcher menu, and pinned chip; remote identities keep their ghost mark and derive a supplemental tint from their stable id, so reordering, deleting or renaming another crew cannot change it, and an embedded pane computes the same tint without another host-model field. A finite palette can repeat; names and state words, never colour alone, identify a crew. Pins, chain ordering, unread aggregation and reconnect semantics are shared with the existing switcher. The hub keeps the most-recently-used set
 "warm" (tunnel + iframe live) and lazily reconnects the rest. The switcher is a
 menu rather than a row of chips by DEFAULT because the number of configured crews
 is unbounded: the closed trigger costs constant width, and unread counts stay
@@ -73,8 +73,9 @@ destinations they actually use — see [Pinned crew chips](#pinned-crew-chips).
 
 **Key properties**
 
-- **Opt-in.** Nothing changes until `instances.enabled=true`, and the flag is
-  read at gateway startup, so it also needs a restart.
+- **Opt-in.** Connecting and managing remotes requires `instances.enabled=true`;
+  the navigation switcher exposes the setup entry while the feature is off.
+  The flag is read at gateway startup, so enabling it also needs a restart.
 - **Owner-only.** The control plane is never reachable via Slack and requires an
   authenticated dashboard session.
 - **Loopback-only.** Tunnels forward `127.0.0.1:<local>` to remote

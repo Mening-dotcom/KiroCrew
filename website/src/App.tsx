@@ -28,10 +28,13 @@ import { useTheme } from './hooks/useTheme'
 import { useBranding } from './hooks/useBranding'
 import { useRumPageView } from './hooks/useRumPageView'
 import { useIsMobile } from './hooks/useIsMobile'
+import { useVisualViewport } from './hooks/useVisualViewport'
 import { useSidePanelDock } from './hooks/useSidePanelDock'
 import { useDndSensors } from './hooks/useDndSensors'
 import { usePreviewFlagRevision } from './hooks/usePreviewFlag'
-import { setRailWidth, railWidthFor } from './hooks/useRailWidth'
+import { setRailWidth } from './hooks/useRailWidth'
+import { useNavigationResize } from './hooks/useNavigationResize'
+import NavigationGrabber, { DASHBOARD_NAVIGATION_ID } from './components/NavigationGrabber'
 import { useFocusMode, useFocusChromeVisible, setFocusChromeVisible, FOCUS_INSET } from './hooks/useFocusMode'
 import { APP_NAV_ORDER_KEY, buildReorderBaseline, mergeVisibleReorder, readAppNavOrder, useAppNavHidden } from './lib/appNavHidden'
 import { useNavPinned } from './lib/navPinned'
@@ -66,27 +69,12 @@ import { useMayLeaveForNavigation, useIsCurrentUrl, useGuardedLeave } from './co
 import { motion, AnimatePresence, useMotionValue, useTransform } from 'framer-motion'
 import { useDrawerSwipe, animateDrawer, registerDrawerTargets, takeOverDrawer, safeAreaLeft } from './hooks/useDrawerSwipe'
 
-/** Mobile nav drawer travel: its 220px width + the 8px mx-2 inset + border. */
-/** Mobile nav drawer width. Shared with its travel below so the two cannot drift
- *  — a travel wider than the panel spends the settle's tail moving something
- *  already off the screen. */
-const MOBILE_NAV_WIDTH = 220
-/** The chat route, spelled once. Two things key off it on the phone -- the
- *  single-bar header variant and the shell nav drawer's swipe gate -- and a
- *  drift between two spellings is exactly how "two drawers for one gesture"
- *  would come back. */
+/** The shell drawer contains the same 72px rail as the chat drawer, flush to
+ * the safe-area edge. Its compositor travel follows its actual width. */
+const MOBILE_NAV_WIDTH = 72
+/** Chat owns its combined rail/session drawer and its Back-history entry. */
 const isChatRoute = (pathname: string) => pathname === '/chat' || pathname.startsWith('/chat/') || pathname === '/'
-/** The `mx-2` inset the panel sits at, so its left edge starts here. */
-const MOBILE_NAV_INSET = 8
-/** What it takes for the nav drawer to clear the screen: its own width, the
- *  `mx-2` inset it starts at, a hair for the 1px border and `shadow-sm`'s
- *  spread, and the safe-area inset — the panel is pinned at `left-safe`, so on a
- *  notched phone in landscape it starts that far in and has to cross it too.
- *  Was a flat 240, which both overshot the width by 9px (parking the panel
- *  offscreen at 96% of the slide, so the rest of the settle moved nothing) and
- *  ignored the inset (parking it with a strip still visible in landscape). */
-const mobileNavTravel = () =>
-  MOBILE_NAV_WIDTH + MOBILE_NAV_INSET + 3 + safeAreaLeft()
+const mobileNavTravel = () => MOBILE_NAV_WIDTH + 3 + safeAreaLeft()
 import { usePersistedBool } from './hooks/usePersistedBool'
 import { isMacElectron, isWinElectron, isLinuxFramelessElectron } from './lib/electron'
 import { DndContext, closestCenter, DragOverlay, type DragStartEvent, type DragEndEvent } from '@dnd-kit/core'
@@ -776,28 +764,35 @@ export function NavBadge({ navId, collapsed, appBadges, runState }: { navId: str
  *  as an in-flow absolute child, because the nav's scroll container clips
  *  vertically (so a tall icon list scrolls instead of spilling out of the rail)
  *  and a vertical clip forces horizontal clipping too, which would chop the
- *  flyout at the 58px rail edge. Repositions while shown so it follows the row
- *  when the rail is scrolled/resized. */
+ *  flyout at the rail edge. After 100ms of hover, show the label flush with the
+ *  icon tile without duplicating its icon. Keyboard focus opens it immediately.
+ *  Repositions while shown so it follows the row on scroll/resize. */
 function useNavTip<T extends HTMLElement>(enabled: boolean) {
   const [tip, setTip] = useState<{ top: number; left: number; height: number } | null>(null)
   const [tipOn, setTipOn] = useState(false) // drives the opacity fade
   const rowRef = useRef<T | null>(null)
+  const showTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rafId = useRef<number | null>(null)
+  const cancelShow = useCallback(() => {
+    if (showTimer.current != null) { clearTimeout(showTimer.current); showTimer.current = null }
+  }, [])
   const place = useCallback(() => {
     if (!rowRef.current) return
     const r = rowRef.current.getBoundingClientRect()
-    // Overlay the row exactly (same top-left + height) so the flyout reads as
-    // the collapsed row expanding in place. Bail out (return the same object) if
-    // nothing moved — the scroll listener fires on any document scroll, so this
-    // avoids needless re-renders when the rail itself didn't move.
+    // Use the tile's edge, not the rail padding, so its label sits directly
+    // beside the icon. Overflow toggles without a tile retain the rail anchor.
+    const icon = rowRef.current.querySelector('.nav-icon-frame')?.getBoundingClientRect()
+    const rail = rowRef.current.closest('nav')?.getBoundingClientRect()
+    const left = icon?.right ?? rail?.right ?? r.right
     setTip(prev =>
-      prev && prev.top === r.top && prev.left === r.left && prev.height === r.height
+      prev && prev.top === r.top && prev.left === left && prev.height === r.height
         ? prev
-        : { top: r.top, left: r.left, height: r.height }
+        : { top: r.top, left, height: r.height }
     )
   }, [])
-  const showTip = useCallback(() => {
+  const showTipNow = useCallback(() => {
+    cancelShow()
     if (!enabled || !rowRef.current) return
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null }
     place()
@@ -807,22 +802,30 @@ function useNavTip<T extends HTMLElement>(enabled: boolean) {
     // and flashes the label to full opacity before the unmount timer.
     if (rafId.current != null) cancelAnimationFrame(rafId.current)
     rafId.current = requestAnimationFrame(() => { rafId.current = null; setTipOn(true) })
-  }, [enabled, place])
+  }, [enabled, place, cancelShow])
+  const showTip = useCallback(() => {
+    if (!enabled) return
+    cancelShow()
+    showTimer.current = setTimeout(showTipNow, 100)
+  }, [enabled, cancelShow, showTipNow])
   const hideTip = useCallback(() => {
+    cancelShow()
+    if (hideTimer.current) clearTimeout(hideTimer.current)
     if (rafId.current != null) { cancelAnimationFrame(rafId.current); rafId.current = null }
     setTipOn(false)
-    hideTimer.current = setTimeout(() => setTip(null), 150) // keep mounted for fade-out
-  }, [])
+    hideTimer.current = setTimeout(() => { hideTimer.current = null; setTip(null) }, 150)
+  }, [cancelShow])
   // Dismiss with NO fade-out, for rows whose label text changes on activation
   // (the Apps overflow toggle flips "N more" <-> "Show less"). A fading label
   // stays mounted through the re-render, so it would flash the OPPOSITE label
   // as a ghost at the old coordinates before unmounting.
   const dismissTip = useCallback(() => {
+    cancelShow()
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null }
     if (rafId.current != null) { cancelAnimationFrame(rafId.current); rafId.current = null }
     setTipOn(false)
     setTip(null)
-  }, [])
+  }, [cancelShow])
   // While shown, follow the row on scroll/resize (capture:true catches the
   // nav's inner scroll container, which doesn't bubble scroll to window).
   // Depend on a stable boolean — not `tip` itself — so the listeners subscribe
@@ -843,17 +846,14 @@ function useNavTip<T extends HTMLElement>(enabled: boolean) {
   // which would otherwise leave the scroll/resize listeners attached and firing
   // place() on every document scroll even though the portal no longer renders.
   useEffect(() => {
-    if (enabled) return
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null }
-    if (rafId.current != null) { cancelAnimationFrame(rafId.current); rafId.current = null }
-    setTip(null)
-    setTipOn(false)
-  }, [enabled])
+    if (!enabled) dismissTip()
+  }, [enabled, dismissTip])
   useEffect(() => () => {
+    cancelShow()
     if (hideTimer.current) clearTimeout(hideTimer.current)
     if (rafId.current != null) cancelAnimationFrame(rafId.current)
-  }, [])
-  return { tip, tipOn, rowRef, showTip, hideTip, dismissTip }
+  }, [cancelShow])
+  return { tip, tipOn, rowRef, showTip, showTipNow, hideTip, dismissTip }
 }
 
 /** Exported for `capture/nav-badge-chord.tsx`, which measures the row's
@@ -889,7 +889,7 @@ export function NavItem({ path, label, icon, active, collapsed, badge, onClickOv
   // the row-reorder glide that `layout` buys there.
   const isMobileRow = useIsMobile()
   const iconEl = <span className={`app-icon-nav w-4 h-4 flex items-center justify-center shrink-0 transition-opacity ${active ? 'opacity-100 text-accent is-lit' : 'opacity-70'}`}>{icon}</span>
-  const { tip, tipOn, rowRef, showTip, hideTip } = useNavTip<HTMLDivElement>(collapsed)
+  const { tip, tipOn, rowRef, showTip, showTipNow, hideTip, dismissTip } = useNavTip<HTMLDivElement>(collapsed && !touch)
   // Derived from the shortcut registry by route, so a row with a bound panel
   // chord advertises it and a row without one is untouched. Null when the user
   // has turned shortcuts off. See useNavShortcutHint for why this resolves per
@@ -909,6 +909,7 @@ export function NavItem({ path, label, icon, active, collapsed, badge, onClickOv
     // ask would pop a discard-confirm over a click that was never going to
     // destroy anything.
     if (!onClickOverride && !isCurrentUrl(path) && !mayLeave()) return
+    dismissTip()
     onClick?.(); (onClickOverride || (() => navigate(path, { replace })))()
   }
   return (
@@ -931,15 +932,17 @@ export function NavItem({ path, label, icon, active, collapsed, badge, onClickOv
       // the glyph span), which on the phone rail's flat 40x40 tiles measured
       // 3.4:1 against a light surface. The tile keeps the muted colour at full
       // opacity instead (>= 4.5:1); active tiles are unchanged.
-      className={`nav-item group/nav relative flex items-center min-w-0 cursor-pointer text-sm font-medium whitespace-nowrap gap-2.5 transition-colors duration-200 ${touch ? 'w-16 h-14 px-0.5 flex-col justify-center gap-0.5 rounded-xl shrink-0 [&_.app-icon-nav]:w-5 [&_.app-icon-nav]:h-5 [&_.app-icon-nav>svg]:w-5 [&_.app-icon-nav>svg]:h-5 [&_.app-icon-nav]:opacity-100' : 'rounded-md py-2 pl-3 pr-3'} ${collapsed ? '' : 'overflow-hidden'} ${active ? 'nav-active text-text-strong bg-accent-subtle hover:brightness-110' : 'text-muted hover:text-text hover:bg-bg-hover/60'}`}
+      className={`nav-item group/nav relative flex items-center min-w-0 cursor-pointer text-sm font-medium whitespace-nowrap transition-colors duration-200 ${touch ? 'w-16 min-h-14 py-0.5 px-0.5 flex-col justify-center gap-0.5 rounded-xl shrink-0 [&_.app-icon-nav]:w-5 [&_.app-icon-nav]:h-5 [&_.app-icon-nav>svg]:w-5 [&_.app-icon-nav>svg]:h-5 [&_.app-icon-nav]:opacity-100' : 'gap-2.5 rounded-md py-2 pl-3 pr-3'} ${collapsed ? '' : 'overflow-hidden'} ${active ? 'nav-active text-text-strong bg-accent-subtle hover:brightness-110' : 'text-muted hover:text-text hover:bg-bg-hover/60'}`}
       onClick={activate}
-      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() } }}
+      onKeyDown={e => {
+        if (e.key === 'Escape') dismissTip()
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate() }
+      }}
       onMouseEnter={showTip}
       onMouseLeave={hideTip}
-      // Keyboard-only users (no pointer) can't trigger the mouse-driven hover
-      // label, so surface it on focus too. showTip/hideTip no-op unless collapsed,
-      // making these inert in expanded mode where the text label is already shown.
-      onFocus={showTip}
+      // Focus does not wait for pointer intent. Expanded rows already show
+      // their label, and touch tiles carry their own caption.
+      onFocus={showTipNow}
       onBlur={hideTip}
       aria-label={collapsed ? label : undefined}
       aria-pressed={pressed}
@@ -950,7 +953,12 @@ export function NavItem({ path, label, icon, active, collapsed, badge, onClickOv
       // attribute is the non-visual route rather than a duplicate of one.
       aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
     >
-      {iconEl}
+      <span className="nav-icon-frame relative flex shrink-0 items-center justify-center">
+        {iconEl}
+        {/* Desktop icon-only badges belong to the tile, not the wider row.
+            Keep them outside the glyph's opacity so status stays undimmed. */}
+        {collapsed && !touch ? badge : null}
+      </span>
       {/* `aria-label` carries the FULL label: this span is `whitespace-nowrap overflow-hidden`, so
           a translation longer than the rail is silently cut off with no way to read it. Surfaced by
           the render gate under the en-XA pseudolocale at 2.2x once a new app entry narrowed the
@@ -972,7 +980,7 @@ export function NavItem({ path, label, icon, active, collapsed, badge, onClickOv
           summon, and a cold reader could not tell the Artifacts and
           Capabilities glyphs apart (UX lane). 10px is this project's floor. */}
       {collapsed && touch && (
-        <span aria-hidden="true" className="max-w-full whitespace-normal text-center text-[10px] leading-[1.1] font-medium tracking-tight line-clamp-2 [overflow-wrap:anywhere]">{caption ?? label}</span>
+        <span aria-hidden="true" className="max-w-full shrink-0 whitespace-normal text-center text-[11px] leading-[1.2] font-medium tracking-tight [overflow-wrap:anywhere]">{caption ?? label}</span>
       )}
       {/* Expanded rail: the chord rides the row's existing `group/nav` seam, so it
           appears on hover AND on keyboard focus-visible rather than on hover alone
@@ -998,19 +1006,15 @@ export function NavItem({ path, label, icon, active, collapsed, badge, onClickOv
           {shortcut.chord}
         </span>
       )}
-      {/* LAST in the flex line, so the expanded unread/activity indicators sit to
-          the RIGHT of the chord above rather than over it. Order matters only for
-          the in-flow expanded indicators: every caller-supplied badge (the dev
-          dot, the update dot) and the collapsed dot are absolutely positioned
-          against the row, so they render where they always did regardless of
-          where in the children they appear. */}
-      {badge}
+      {/* Expanded indicators follow the chord in the row's flex line. Phone
+          tiles retain their row-corner badges above the icon and caption. */}
+      {(!collapsed || touch) && badge}
       {collapsed && tip && createPortal(
         <div
-          className={`fixed flex items-center gap-2.5 pl-3 pr-3 rounded-md bg-card border border-border shadow-lg text-text text-sm font-medium z-[9999] pointer-events-none whitespace-nowrap transition-opacity duration-150 ${tipOn ? 'opacity-100' : 'opacity-0'}`}
+          role="tooltip"
+          className={`fixed flex items-center gap-2.5 px-3 rounded-xl bg-card border border-border shadow-lg text-text text-sm font-medium z-[9999] pointer-events-none whitespace-nowrap transition-opacity duration-150 motion-reduce:transition-none ${tipOn ? 'opacity-100' : 'opacity-0'}`}
           style={{ top: tip.top, left: tip.left, height: tip.height }}
         >
-          <span className={`app-icon-nav w-4 h-4 flex items-center justify-center shrink-0 ${active ? 'text-accent is-lit' : ''}`}>{icon}</span>
           {label}
           {/* Collapsed rail: the row carries no text label, so this flyout IS its
               hover affordance — and it already opens on focus as well as hover
@@ -1064,7 +1068,7 @@ function SortableAppNavRow({ id, children }: { id: string; children: React.React
 function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
   collapsed: boolean; expanded: boolean; hiddenCount: number; onClick: () => void
 }) {
-  const { tip, tipOn, rowRef, showTip, hideTip, dismissTip } = useNavTip<HTMLButtonElement>(collapsed)
+  const { tip, tipOn, rowRef, showTip, showTipNow, hideTip, dismissTip } = useNavTip<HTMLButtonElement>(collapsed)
   // `hiddenCount === 0 && !expanded` happens when the only overflow item is the
   // active app (kept visible) — nothing is actually hidden, so the toggle just
   // offers to re-collapse rather than reveal "0 more".
@@ -1093,10 +1097,10 @@ function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
       title={titleText}
       onMouseEnter={showTip}
       onMouseLeave={hideTip}
-      // Surface the collapsed-mode hover label on keyboard focus too (button is
-      // already focusable). Inert when expanded — showTip/hideTip gate on collapsed.
-      onFocus={showTip}
+      // Focus reveals the collapsed label immediately; hover waits for intent.
+      onFocus={showTipNow}
       onBlur={hideTip}
+      onKeyDown={e => { if (e.key === 'Escape') dismissTip() }}
     >
       <span className="w-4 h-4 flex items-center justify-center shrink-0 opacity-70"><Icon size={16} /></span>
       {/* Same reason as the nav-item label above: clipped by `whitespace-nowrap
@@ -1109,10 +1113,10 @@ function NavToggle({ collapsed, expanded, hiddenCount, onClick }: {
       )}
       {collapsed && tip && createPortal(
         <div
-          className={`fixed flex items-center gap-2.5 pl-3 pr-3 rounded-md bg-card border border-border shadow-lg text-text text-sm font-medium z-[9999] pointer-events-none whitespace-nowrap transition-opacity duration-150 ${tipOn ? 'opacity-100' : 'opacity-0'}`}
+          role="tooltip"
+          className={`fixed flex items-center gap-2.5 px-3 rounded-xl bg-card border border-border shadow-lg text-text text-sm font-medium z-[9999] pointer-events-none whitespace-nowrap transition-opacity duration-150 motion-reduce:transition-none ${tipOn ? 'opacity-100' : 'opacity-0'}`}
           style={{ top: tip.top, left: tip.left, height: tip.height }}
         >
-          <span className="w-4 h-4 flex items-center justify-center shrink-0"><Icon size={16} /></span>
           {labelText}
         </div>,
         document.body
@@ -2002,6 +2006,14 @@ export default function App() {
   // twice under StrictMode, which would make the second pass read an
   // already-cleared ref and lose the restore value.
   const navAutoCollapsed = useRef<boolean | null>(null)
+  const navigation = useNavigationResize({
+    collapsed: navCollapsed,
+    onCollapsedChange: next => {
+      setNavCollapsed(next)
+      safeSetItem('mc-nav', next ? '1' : '0')
+    },
+    onUserResize: () => { navAutoCollapsed.current = null },
+  })
   useEffect(() => {
     const onPreviewExpand = (e: Event) => {
       const expanded = !!(e as CustomEvent<{ expanded?: boolean }>).detail?.expanded
@@ -2054,7 +2066,7 @@ export default function App() {
     // exists — an overlay opened with the pointer OFF-window has no
     // enter/leave history for the event-based close to work from. The band is
     // the rail track at the user's collapse state; +12 slack.
-    departWhen: e => e.clientX > railWidthFor({ isMobile: false, collapsed: navCollapsed }) + 12,
+    departWhen: e => e.clientX > navigation.width + 12,
     dismissOnWindowExit: true,
   })
   // Edge-slam reveal: overshooting a trigger straight OUT of the window must
@@ -2269,15 +2281,17 @@ export default function App() {
    * runs on the COMPOSITOR via animateDrawer — the shell shares its main
    * thread with every streaming session, so a framer main-thread tween here
    * dropped frames exactly when the app was busiest. The width used by the
-   * offset is the drawer's own 220px + its 8px inset, not the viewport.
+   * offset follows the drawer's own 72px rail and safe-area edge, not the viewport.
    */
   const [mobileNavPhase, setMobileNavPhase] = useState<'closed' | 'open' | 'closing'>('closed')
+  const mobileViewport = useVisualViewport()
+  const mobileKeyboardInset = Math.max(0, window.innerHeight - mobileViewport.offsetTop - mobileViewport.height)
   const mobileNavMounted = mobileNavPhase !== 'closed'
   const mobileNavPhaseRef = useRef(mobileNavPhase)
   mobileNavPhaseRef.current = mobileNavPhase
   /** Panel offset in px: -mobileNavTravel() offscreen, 0 at rest. */
   const mobileNavX = useMotionValue(0)
-  const mobileNavPanelRef = useRef<HTMLElement | null>(null)
+  const mobileNavPanelRef = useRef<HTMLDivElement | null>(null)
   const mobileNavScrimRef = useRef<HTMLDivElement | null>(null)
   /**
    * The dashboard shell — the common ancestor of `<main>`, the nav drawer's
@@ -3603,7 +3617,7 @@ export default function App() {
     }
   }
   // Close mobile nav on route change
-  useEffect(() => { if (isMobile) closeMobileNavDrawer() }, [location.pathname]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (isMobile) closeMobileNavDrawer() }, [location.pathname, location.search]) // eslint-disable-line react-hooks/exhaustive-deps
   // Escape closes the open drawer — the keyboard's dismissal path. The scrim's
   // click-to-dismiss is pointer-only (it is aria-hidden and unfocusable, so a
   // full-screen tab stop never appears in the tab order).
@@ -3618,14 +3632,13 @@ export default function App() {
   useEffect(() => { if (!isMobile) { setMobileNavPhase('closed'); takeOverDrawer(mobileNavX) } }, [isMobile, mobileNavX])
   // Focus mode honours the collapse preference too: the overlay rail is as wide
   // as the docked rail would be, and the collapse control toggles it the same way.
-  const effectiveCollapsed = navCollapsed && !isMobile
-  // Publish the rail track so consumers outside the shell can size against the
-  // space actually left for content — ChatPage's activity panel decides
-  // beside-vs-fill from it. Kept in sync with the gridTemplateColumns value
-  // below; railWidthFor is the single source for both.
+  const effectiveCollapsed = navigation.compact && !isMobile
+  const navTrackWidth = isMobile || focusActive ? 0 : navigation.width
+  // Publish the live track, not just its two endpoints: sibling panels must
+  // size against the space a dragged rail actually leaves for their content.
   useEffect(() => {
-    setRailWidth(focusActive ? 0 : railWidthFor({ isMobile, collapsed: effectiveCollapsed }))
-  }, [isMobile, effectiveCollapsed, focusActive])
+    setRailWidth(navTrackWidth)
+  }, [navTrackWidth])
   // The header's three grid tracks (see `.topbar` in index.css) size themselves:
   // the search width is a function of the window, the two side groups split the
   // remainder, and each group re-lays-out its own contents with a container
@@ -3649,9 +3662,8 @@ export default function App() {
   // Phone chat page: the header is ONE bar for both the shell and the
   // conversation. The chat page fills `#mobile-topbar-slot` (sessions toggle,
   // session title + menu) and `#mobile-topbar-trail-slot` (its overflow menu)
-  // through portals, and the shell keeps only the crew switcher and the bell.
-  // The nav drawer's logo trigger, the readout capsule and the search square
-  // are not rendered here: search and the main destinations live in the rail
+  // through portals, and the shell keeps the bell and extension widgets.
+  // Crew switching, search and the main destinations live in the shared rail
   // the chat page's sessions drawer shows (see `mobileNavRail` below).
   const mobileSingle = isMobile && isChat
   // /webhooks is a full-height rail-and-detail shell (like /capabilities), so it
@@ -3717,40 +3729,15 @@ export default function App() {
   )
 
   /**
-   * Phone chat page: the main navigation as a 72px icon rail.
-   *
-   * The chat page renders this beside its sessions pane, inside the ONE drawer
-   * a phone chat has (MobileNavRailContext). The rows are the shell's — the
-   * same registry (`advertisedNavItems`, `sortedAppGroup`, the Bottom group),
-   * the same `NavItem`, the same badges and active rules the desktop rail and
-   * the nav drawer use — so a destination added to the registry appears here
-   * without a second list to maintain. `touch` gives each row a 64x56
-   * `rounded-xl` tile with a one-word caption under the glyph -- the desktop
-   * rail names its collapsed rows with a hover tip a finger cannot summon; the
-   * selected paint is the desktop rail's.
-   *
-   * Two rows behave differently from the nav drawer's, both because the host
-   * drawer minted a duplicate history entry when it opened (see ChatPage's
-   * `pushDrawerEntry`): the row for the page the user is ON only closes the
-   * drawer (`onActivate`), and a row that leaves the chat page navigates with
-   * `replace` so Back returns to the chat rather than to a second copy of it.
-   * That is a property of the drawer that hosts the rail, so it is not an option.
-   *
-   * Rows the full nav drawer offers and this rail does not: Library (reachable
-   * from Discover), Developer, Terminal and Connect-your-phone — each toggles a
-   * desktop-shaped surface or is moot on the phone itself.
-   *
-   * The brand mark on top is a control -- the product's "home": it goes to the
-   * chat root (the page every other app's logo returns to) and closes the
-   * drawer. A cold reader tapped it expecting exactly that, and an inert mark
-   * in the tap-target position of every other app read as broken. Search is
-   * pinned at the bottom and opens the same command palette the header's
-   * search square used to.
-   *
-   * `null` off the phone chat page, so every other consumer renders no rail.
+   * One 72px captioned rail on every phone route, built from the actual nav
+   * registry. Chat hosts it beside its real Sessions pane; the other routes
+   * use the shell's rail-only drawer. The host owns close and history behavior:
+   * chat replaces its duplicate drawer entry, while the shell pushes normally.
+   * The current crew chooser and Search stay pinned. All destinations scroll
+   * together so shorter screens never lose Settings or an installed app.
    */
-  const mobileNavRail = mobileSingle
-    ? ({ onActivate }: MobileNavRailOptions) => {
+  const mobileNavRail = isMobile
+    ? ({ onActivate, replace = false }: MobileNavRailOptions) => {
       const railRow = (
         n: { path: string; id: string; label: string; labelKey?: string; icon: React.ReactNode; appName?: string },
       ) => {
@@ -3765,7 +3752,7 @@ export default function App() {
             active={active}
             collapsed
             touch
-            replace
+            replace={replace}
             caption={n.id === 'capabilities' ? i18nT('nav.agent_capabilities_short') : undefined}
             onClickOverride={active ? onActivate : undefined}
             badge={<NavBadge navId={n.id} collapsed appBadges={isAppNavId(n.id) ? railAppBadges : appBadges} runState={n.appName ? railAppRunStates[n.appName] : undefined} />}
@@ -3782,20 +3769,12 @@ export default function App() {
           data-testid="mobile-nav-rail"
           role="navigation"
           aria-label={i18nT('app.main_navigation')}
-          className="w-[72px] shrink-0 h-full flex flex-col items-center gap-1 pt-1.5 pb-2.5 border-r border-border bg-bg-accent overflow-hidden"
+          className="mobile-navigation-rail w-[72px] shrink-0 h-full flex flex-col items-center gap-1 pt-1.5 pb-2.5 border-r border-border bg-[var(--chrome)] text-text overflow-hidden"
         >
-          <button
-            type="button"
-            data-testid="mobile-nav-rail-home"
-            onClick={() => { onActivate(); if (!(activePath === '/chat' || activePath === '/')) navigate('/chat', { replace: true }) }}
-            className="w-11 h-11 mb-1 flex items-center justify-center shrink-0 rounded-xl bg-transparent border-none cursor-pointer"
-            // Named for what it DOES (home = the chat root), not for the brand
-            // it shows: an icon-only control announced as the product name told
-            // a screen-reader user nothing about where the tap goes.
-            aria-label={i18nT('nav.home')}
-          >
-            <RailHeaderGlyph avatar={avatar} boxClass={branding?.logoClass ?? 'w-7 h-7'} iconSize={18} />
-          </button>
+          <div className="w-full shrink-0">
+            <InstanceTabBar variant="navigation" collapsed />
+          </div>
+          <div data-testid="mobile-nav-rail-scroll" className="flex-1 min-h-0 w-full flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden overscroll-y-none scrollbar-overlay">
           {advertisedNavItems.filter(n => n.group === 'Main').map(railRow)}
           <NavItem
             navId="apps"
@@ -3805,22 +3784,24 @@ export default function App() {
             active={discoverNavActive}
             collapsed
             touch
-            replace
+            replace={replace}
             onClickOverride={discoverNavActive ? onActivate : undefined}
             badge={<NavBadge navId="apps" collapsed appBadges={discoverBadges} />}
           />
-          {/* Apps list: scrolls in its OWN frame when many apps are installed --
-              the brand mark, the Main rows and Discover above it, and
-              Capabilities / Settings / Search below it stay pinned, exactly as
-              the desktop rail does. The scroller has no gap of its own so a
-              short list sits flush under Discover. */}
-          <div
-            data-testid="mobile-nav-rail-apps"
-            className="flex-1 min-h-0 w-full flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden overscroll-y-none scrollbar-none"
-            style={{ scrollbarWidth: 'none' }}
-          >
+          {railRow({ id: 'library', path: '/apps/library', label: i18nT('nav.library'), icon: <LayoutGrid size={16} /> })}
+          {/* One scroll region keeps every destination reachable on short
+              screens and with a keyboard open. Crew identity and Search stay
+              pinned; apps retain the desktop registry's order. */}
+          <div data-testid="mobile-nav-rail-apps" className="w-full flex flex-col items-center gap-1 shrink-0">
             {sortedAppGroup.map(railRow)}
           </div>
+          {devMode && railRow({ id: 'developer', path: '/developer', label: i18nT('app.developer'), icon: <Code size={16} /> })}
+          {terminalEnabled && <NavItem path="#" label={i18nT('app.terminal')} icon={<SquareTerminal size={16} />}
+            active={bottomTerminalOpen || terminalPoppedOut} pressed={bottomTerminalOpen || terminalPoppedOut} collapsed touch
+            onClickOverride={() => { onActivate(); if (terminalPoppedOut) focusTerminalPopout(); else toggleBottomTerminal(activeSlotProject) }} />}
+          {hasRenderableMobileConnect && <NavItem path="#" label={i18nT('app.connect_your_phone')} icon={<Smartphone size={16} />}
+            active={mobileConnectOpen} pressed={mobileConnectOpen} collapsed touch
+            onClickOverride={() => { onActivate(); setMobileConnectOpen(true) }} />}
           {railRow(capabilitiesSurface)}
           {/* The account modal (balance, sign-in state): the desktop opens it
               from the readout capsule, which the phone does not render, so the
@@ -3846,10 +3827,11 @@ export default function App() {
             active={navRowActive(settingsSurface.path)}
             collapsed
             touch
-            replace
+            replace={replace}
             onClickOverride={navRowActive(settingsSurface.path) ? onActivate : undefined}
             badge={updateAvailable ? <span title={i18nT('app.update_available')} role="status" aria-label={i18nT('app.update_available_2')} className="absolute top-1 right-1 w-2 h-2 bg-accent rounded-full z-10" /> : undefined}
           />
+          </div>
           <button
             type="button"
             data-testid="mobile-nav-rail-search"
@@ -3914,7 +3896,7 @@ export default function App() {
     <div
       ref={shellRef}
       data-testid="dashboard-shell"
-      className={`relative z-[1] h-full grid ${shellEntered ? '' : 'animate-rise'} overflow-hidden bg-bg p-safe ${isMacElectron ? `mac-electron ${macFullscreen ? 'mac-fullscreen' : ''}` : ''} ${isWinElectron ? 'win-electron' : ''} ${isLinuxFramelessElectron ? 'linux-electron' : ''} ${isMobile ? 'grid-cols-[minmax(0,1fr)] grid-rows-[42px_minmax(0,1fr)]' : bottomDock ? 'grid-rows-[42px_minmax(0,1fr)_auto]' : 'grid-rows-[42px_minmax(0,1fr)]'}`}
+      className={`relative z-[1] h-full grid ${isMobile ? 'mobile-chrome' : !focusActive ? 'grabber-shell' : ''} ${shellEntered ? '' : 'animate-rise'} overflow-hidden bg-bg p-safe ${isMacElectron ? `mac-electron ${macFullscreen ? 'mac-fullscreen' : ''}` : ''} ${isWinElectron ? 'win-electron' : ''} ${isLinuxFramelessElectron ? 'linux-electron' : ''} ${isMobile ? 'grid-cols-[minmax(0,1fr)] grid-rows-[42px_minmax(0,1fr)]' : bottomDock ? 'grid-rows-[42px_minmax(0,1fr)_auto]' : 'grid-rows-[42px_minmax(0,1fr)]'}`}
       // Retire the entrance animation once it has played, so re-showing this
       // pane cannot replay it. Guarded on BOTH the keyframe name and the event
       // target: `animationend` bubbles, and descendants (banners, cards) use
@@ -3927,13 +3909,12 @@ export default function App() {
         gridTemplateAreas: isMobile ? '"topbar" "content"' : bottomDock ? '"topbar topbar" "nav content" "nav actbar"' : '"topbar topbar topbar" "nav content actbar"',
         ...(!isMobile && {
           gridTemplateColumns: bottomDock
-            ? `${focusActive ? 0 : railWidthFor({ isMobile, collapsed: effectiveCollapsed })}px minmax(0,1fr)`
-            : `${focusActive ? 0 : railWidthFor({ isMobile, collapsed: effectiveCollapsed })}px minmax(0,1fr) auto`,
-          // Transition fires only when the template string itself changes (the
-          // collapse toggle) — content-driven resizes of the auto track (e.g.
-          // the Activity panel opening) don't alter the value, so keeping this
-          // unconditional is safe and avoids the gated-pulse snap regression.
-          transition: 'grid-template-columns 150ms cubic-bezier(0.2, 0, 0, 1)',
+            ? `${navTrackWidth}px minmax(0,1fr)`
+            : `${navTrackWidth}px minmax(0,1fr) auto`,
+          // Direct manipulation tracks the pointer without a trailing grid
+          // animation. Keyboard toggles and release snaps animate to the target;
+          // content-driven changes to the auto track leave this string unchanged.
+          transition: navigation.dragging ? 'none' : 'grid-template-columns 150ms cubic-bezier(0.2, 0, 0, 1)',
         }),
         // Focus mode collapses the chrome tracks. Inline so it beats the Tailwind
         // `grid-rows-[42px_...]` class rather than having to fight it there, and
@@ -4041,22 +4022,9 @@ export default function App() {
           : { gridArea: 'topbar', zIndex: TOPBAR_Z }}
         {...(focusActive ? topPeek.surfaceProps : {})}
       >
-        {/* Left: mobile menu toggle + inline instance selector. The brand now
-            lives in the sidebar (item 1.1). The selector reuses InstanceTabBar's
-            visibility rule — it renders nothing unless >=1 remote instance
-            exists, so the common single-instance header-left is empty (only the
-            macOS traffic-light clearance remains). */}
-        {/* No mobile-only `px-2` here on purpose. The icon buttons inside carry
-            their own 8px, so this padding stacked on top of the header's `pl-2`
-            and pushed the hamburger out past the page's own left edge. Dropping
-            it lands the button's BOX at 8 + 8 = 16px, the page gutter; the glyph
-            inside it then needs its own 2.5px correction because `Menu`'s artwork
-            does not fill its box (see the button below). Box and glyph together
-            put the hamburger, the page title and the chat session-list toggle on
-            one line. Deliberately only the LEFT cluster:
-            `.tb-right` carries a padding/negative-margin pair that keeps the
-            notification badge's 4px overhang from being clipped, and re-tuning
-            that needs a real WebKit check, not a local one. */}
+        {/* The non-chat phone header opens the shared navigation drawer.
+            Crew identity stays in that drawer, matching desktop navigation.
+            Keep the existing right cluster's badge-clearance padding intact. */}
         {!mobileSingle && (
         <div className="tb-left relative h-full">
           {/* Windows only: the application menu shares this cluster. It needs no
@@ -4074,48 +4042,18 @@ export default function App() {
               matching where every browser puts it. */}
           {!isMobile && <NavHistoryArrows />}
           {isMobile && (
-            <button className="group p-2 rounded-md bg-transparent border-none cursor-pointer text-muted hover:text-text shrink-0" onClick={toggleNav} aria-label={i18nT('app.open_menu')}>
-              {/* The product logo, not a generic menu glyph. A narrow layout has exactly
-                  one nav affordance, and it opens the same rail whose header carries this
-                  same `avatar` on a wide one -- so it is the same asset, the same
-                  `rounded-md object-contain` treatment and the same hover tilt, which is
-                  live here because this bar is what a NARROW WINDOW gets, not only a
-                  touch device. Reading `avatar` rather than importing a file is what
-                  keeps a theme-supplied or user-configured logo in step: the branding
-                  registry resolves it once for the whole shell.
-
-                  A full-colour raster mark is an <img>, which is exactly what the
-                  `use-lucide-icons` rule's brand-mark exception prescribes -- a CSS mask
-                  over `currentColor` would flatten the art to one colour. But an <img>
-                  can FAIL, and `alt=""` + `aria-hidden` means failure renders nothing --
-                  an invisible button as the page's only nav route -- so MobileNavGlyph
-                  holds the Menu hamburger up until the logo's own `load` event.
-
-                  Square box, so no optical correction exists: the art is square and
-                  `object-contain` fills the box, putting the ink on the 16px page gutter
-                  (topbar pl-2 + this button's p-2) that the page title and every card's
-                  left edge below it sit on, with the button's own box at 24 + 16 = 40px
-                  for the tap target. `narrowFirstBaseline.test.ts` re-derives that sum. */}
-              <MobileNavGlyph avatar={avatar} />
+            <button className="p-2 w-10 h-10 rounded-md bg-transparent border-none cursor-pointer text-text hover:text-text-strong hover:bg-bg-hover shrink-0 flex items-center justify-center" onClick={toggleNav} aria-label={i18nT('app.open_menu')} aria-expanded={mobileNavPhase === 'open'} data-testid="mobile-topbar-navigation-toggle">
+              <PanelLeft size={18} />
             </button>
           )}
-          <InstanceTabBar variant="inline" />
         </div>
         )}
-        {/* Phone chat page, leading cell: the crew switcher (renders nothing
-            until a remote crew exists) and downstream widgets while they exist.
-            The update pill is NOT here: with a remote crew the switcher already
-            renders its chip and its dropdown, and the pill made a third action
-            in the group — on this page the update is the first item of the
-            chat page's overflow menu instead (UpdatePill variant="menu-item").
-            The nav-drawer logo is not here either — on this page the main
-            destinations are the rail inside the sessions drawer, opened by the
-            toggle the chat page puts first in the centre slot, so the bar never
-            offers two drawers. Sized `auto`, so the common empty cell costs no
-            width and the sessions toggle stays on the gutter. */}
+        {/* Phone chat leading cell holds extension widgets only. The page's
+            title slot owns the one drawer toggle; updates live in its overflow
+            menu. The empty auto-sized cell spends no width when no widget is
+            registered. */}
         {mobileSingle && (
           <div data-testid="topbar-lead" className="relative h-full flex items-center gap-1.5 min-w-0">
-            <InstanceTabBar variant="inline" />
             {getTopBarWidgets().map(w => (
               <ErrorBoundary key={w.id} scope={`topbar-widget:${w.id}`} fallback={null}>
                 <w.component />
@@ -4807,7 +4745,7 @@ export default function App() {
           ref={mobileNavScrimRef}
           data-testid="nav-backdrop"
           aria-hidden="true"
-          style={{ opacity: mobileNavScrim }}
+          style={{ opacity: mobileNavScrim, marginTop: mobileViewport.offsetTop, marginBottom: mobileKeyboardInset }}
           className="fixed inset-0 z-[46] bg-black/50 backdrop-blur-xs"
           onClick={closeMobileNavDrawer}
         />
@@ -4831,7 +4769,9 @@ export default function App() {
         <div className="shrink-0 flex flex-col gap-0.5 px-2 pt-2">
           {/* mb-1.5 (6px) + the container's gap-0.5 (2px) = 8px between the
               header and the first nav item, without widening the 2px item gaps. */}
-          <div className={`relative flex items-center mb-1.5 ${effectiveCollapsed ? 'justify-start' : ''}`}>
+          {!isMobile ? (
+            <InstanceTabBar variant="navigation" collapsed={effectiveCollapsed} />
+          ) : <div className={`relative flex items-center mb-1.5 ${effectiveCollapsed ? 'justify-start' : ''}`}>
             {/* One persistent click target that toggles the rail. The logo
                 never unmounts, so it stays perfectly still across collapse/
                 expand (no swap, no shift). Only the brand text + collapse arrow
@@ -4912,10 +4852,7 @@ export default function App() {
                 )}
               </AnimatePresence>
             </button>
-          </div>
-          {/* Hairline under the expanded header (collapsed rail has none —
-              the big logo alone separates well). */}
-          {!effectiveCollapsed && <div aria-hidden="true" className="h-px bg-border shrink-0 mb-[7px]" />}
+          </div>}
           {advertisedNavItems.filter(n => n.group === 'Main').map(n => <div key={n.id}>{renderNavRow(n)}</div>)}
           {/* Apps section: the old single "Explore" header link split into two
               nav rows — Discover (the storefront, /apps) and Library
@@ -5241,55 +5178,37 @@ export default function App() {
         return isMobile ? (
           <>
             {mobileNavMounted && (
-              /* mt-2, unlike the desktop rail's mt-0: this form is `fixed` to the
-                 VIEWPORT top rather than sitting in the grid row below the
-                 topbar, so mt-0 pressed the card's rounded top edge flat against
-                 the screen while mx-2/mb-2 inset the other three sides. Matching
-                 the 8px inset on all four keeps the drawer reading as one
-                 floating card. `top-0 bottom-0` with both margins resolves the
-                 height to viewport-16px, so nothing is clipped. */
-              /* motion.nav, like the sessions drawer and the right overlay: a
-                 drag writes `mobileNavX` directly and ONLY a live binding paints
-                 those frames. A plain <nav> reading `mobileNavX.get()` at render
-                 time was correct while the tap was this panel's only mover —
-                 a MotionValue deliberately does not re-render React, so once the
-                 drawer gained a gesture the panel froze after the single
-                 re-render the lock happens to cause, and moved only on release
-                 when the settle took over. The settle still runs on the
-                 COMPOSITOR through mobileNavPanelRef; framer and that animation
-                 coexist here exactly as they do for the other two panels,
-                 because `takeOverDrawer` adopts and cancels whatever is running
-                 before either one writes. */
-              <motion.nav
+              /* Flush safe-area geometry matches the chat drawer's rail.
+                 The live MotionValue binding owns pointer-drag frames; the
+                 registered compositor animation owns settling. */
+              <motion.div
                 key="mobile-nav-drawer"
                 ref={mobileNavPanelRef}
-                style={{ width: MOBILE_NAV_WIDTH, x: mobileNavX }}
-                className="bg-bg-elevated border border-border rounded-xl flex flex-col mx-2 mt-2 mb-2 shadow-sm z-50 overflow-hidden fixed top-safe left-safe bottom-safe"
-                role="navigation"
-                aria-label={i18nT('app.main_navigation')}
+                style={{ width: MOBILE_NAV_WIDTH, x: mobileNavX, marginTop: mobileViewport.offsetTop, marginBottom: mobileKeyboardInset }}
+                className="bg-[var(--chrome)] text-text rounded-r-xl flex flex-col shadow-sm z-50 overflow-hidden fixed top-safe left-safe bottom-safe"
               >
-                {navBody}
-              </motion.nav>
+                {mobileNavRail?.({ onActivate: closeMobileNavDrawer })}
+              </motion.div>
             )}
           </>
         ) : (
           <nav
+            id={DASHBOARD_NAVIGATION_ID}
             ref={railPeekSurface}
-            className="focus-chrome-rail bg-bg-elevated border border-border rounded-xl flex flex-col mx-2 mt-0 mb-2 shadow-sm z-50 overflow-hidden"
-            // Focus mode: same overlay treatment as the header. The rail's own
-            // `mx-2` means translateX(-100%) would leave its 8px left margin
-            // showing as a sliver, hence the extra 12px of travel. Width has to
-            // become explicit — out of the grid there is no track to fill — and
-            // it is the rail TRACK minus the 16px of horizontal margin, so the
-            // overlay is exactly as wide as the docked rail would have been at
-            // the user's current collapse state.
+            data-compact={effectiveCollapsed ? 'true' : 'false'}
+            data-dragging={navigation.dragging ? 'true' : undefined}
+            className="focus-chrome-rail dashboard-navigation relative flex flex-col min-w-0 min-h-0 bg-[var(--chrome)] text-text z-50"
+            // Focus mode: same overlay treatment as the header. Hide the full
+            // rail and its shadow while the overlay is closed. Width has to
+            // become explicit — out of the grid there is no track to fill —
+            // matching the docked rail at the user's current width.
             style={focusActive
               ? {
                 position: 'absolute',
                 left: 0,
                 top: FOCUS_INSET,
                 bottom: 0,
-                width: railWidthFor({ isMobile: false, collapsed: effectiveCollapsed }) - 16,
+                width: navigation.width,
                 zIndex: 62,
                 transform: railPeek.open ? 'translateX(0)' : 'translateX(calc(-100% - 12px))',
                 transition: 'transform 200ms cubic-bezier(0.2, 0, 0, 1)',
@@ -5300,14 +5219,15 @@ export default function App() {
             aria-label={i18nT('app.main_navigation')}
             {...(focusActive ? railPeek.surfaceProps : {})}
           >
-            {navBody}
+            <div className="flex flex-col flex-1 min-h-0 min-w-0 overflow-hidden">{navBody}</div>
+            <NavigationGrabber {...navigation.grabberProps} className="absolute right-0 top-4 bottom-0 h-auto w-3 z-10" />
           </nav>
         )
       })()}
 
       {/* Content */}
       <div
-        className="flex flex-col min-h-0 min-w-0"
+        className="dashboard-surface flex flex-col min-h-0 min-w-0"
         // Focus mode reclaims the 236px rail column, which leaves everything in
         // this column — the chat sessions drawer first — flush against the
         // window's left edge, while the same surfaces stay inset 8px at the
@@ -5327,7 +5247,7 @@ export default function App() {
           : { gridArea: 'content' }}
       >
         <div className={`flex min-h-0 min-w-0 flex-1 ${terminalPosition === 'right' ? 'flex-row' : 'flex-col'}`}>
-        <main id="main-content" tabIndex={-1} className={`flex flex-col min-h-0 min-w-0 flex-1 overflow-x-hidden ${needsFixedHeight ? 'overflow-hidden p-0' : 'overflow-y-auto'}`}>
+        <main id="main-content" tabIndex={-1} className={`flex flex-col min-h-0 min-w-0 flex-1 overflow-x-hidden scrollbar-overlay workspace-scroll ${needsFixedHeight ? 'overflow-hidden p-0' : 'overflow-y-auto'}`}>
           <MigrationCheck />
           {/* Route-independent, unlike MigrationCheck: "you crashed" is true of
               the app, not of the page, and the launch after a crash rarely lands

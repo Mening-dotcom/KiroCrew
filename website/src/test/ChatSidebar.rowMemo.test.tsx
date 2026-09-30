@@ -20,7 +20,7 @@
  */
 import React from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, act } from '@testing-library/react'
+import { render, act, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
@@ -49,6 +49,7 @@ vi.mock('framer-motion', async () => {
       for (const k of Object.keys(props)) {
         if (k === 'children') continue
         if (k === 'layoutId') { clean['data-layout-id'] = props[k]; continue }
+        if (k === 'layoutDependency') { clean['data-layout-dependency'] = props[k]; continue }
         if (FRAMER_PROPS.has(k)) continue
         clean[k] = props[k]
       }
@@ -280,6 +281,22 @@ describe('chat sidebar — session row memo boundary', () => {
     expect(counts).toEqual({})
   })
 
+  it('resizing the column keeps the row projection dependency and DOM identity', () => {
+    const { view } = renderSidebar()
+    const row = view.container.querySelector('[data-slot-key]') as HTMLElement
+    const key = row.dataset.slotKey
+    const panel = view.container.querySelector('.sidebar-inner') as HTMLElement
+    const handle = view.getByRole('separator', { name: 'Resize sidebar' })
+    expect(row).toHaveAttribute('data-layout-dependency', '0')
+    fireEvent.pointerDown(handle, { clientX: 260, pointerId: 1 })
+    fireEvent.pointerMove(handle, { clientX: 360, pointerId: 1 })
+    expect(panel.style.width).toBe('360px')
+    expect(view.container.querySelector(`[data-slot-key="${key}"]`)).toBe(row)
+    expect(row).toHaveAttribute('data-layout-dependency', '0')
+    fireEvent.pointerUp(handle, { clientX: 360, pointerId: 1 })
+    expect(row).toHaveAttribute('data-layout-dependency', '0')
+  })
+
   // A top insertion shifts every row's paint ordinal by one. Unclamped, that
   // voids all N memo boundaries for one visible change; the clamp bounds the
   // re-render set to the window plus the new row, so the cost of New Chat stops
@@ -295,12 +312,16 @@ describe('chat sidebar — session row memo boundary', () => {
       return sidebar(rows)
     }
     const { sidebarWithSlots, wrap } = renderSidebarWithSlots(initial)
-    render(wrap(<Harness sidebar={sidebarWithSlots} />))
+    const view = render(wrap(<Harness sidebar={sidebarWithSlots} />))
+    const firstRow = view.container.querySelector('[data-slot-key="r-000"]')
+    expect(firstRow).toHaveAttribute('data-layout-dependency', '0')
     expect(Object.keys(counts)).toHaveLength(N)
     for (const k of Object.keys(counts)) delete counts[k]
 
     act(() => { setters[setters.length - 1]([slot('r-new'), ...initial]) })
 
+    expect(view.container.querySelector('[data-slot-key="r-000"]')).toBe(firstRow)
+    expect(firstRow).toHaveAttribute('data-layout-dependency', '1')
     const rerendered = Object.keys(counts).sort()
     // The new row mounts…
     expect(rerendered).toContain('r-new')

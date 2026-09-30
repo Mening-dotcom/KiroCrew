@@ -42,6 +42,16 @@ function mount(loadingOlder: boolean) {
 }
 
 describe('TranscriptScrollShell DOM contract', () => {
+  it('uses the thin reveal scrollbar without changing the scroll container', () => {
+    const { scrollerRef } = mount(false)
+    const scroller = scrollerRef.current!
+    expect(scroller).toHaveClass('chat-container', 'scrollbar-overlay')
+    expect(scroller.style.scrollbarGutter).toBe('stable')
+    expect(scroller.style.overflowY).toBe('auto')
+    expect(scroller.style.overflowX).toBe('hidden')
+    expect(scroller.style.overscrollBehavior).toBe('contain')
+  })
+
   it('renders the skeleton in order: header spacer, aboveRows, top sentinel, top spacer, rows, bottom spacer, bottom sentinel, belowRows', () => {
     const { scrollerRef, virt } = mount(false)
     const scroller = scrollerRef.current!

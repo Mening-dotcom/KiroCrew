@@ -69,7 +69,7 @@ export default function TranscriptScrollShell({
       // -1 so the bar can hand focus here on unmount without adding a tab stop.
       tabIndex={-1}
       // stable theming hook 'chat-container' — see website/docs/theming-contract.md
-      className="chat-container"
+      className="chat-container scrollbar-overlay"
       style={{
         // Host geometry merges FIRST so the shell's own tokens below always
         // win: the scroll contract (overflow axes, anchoring, containment,

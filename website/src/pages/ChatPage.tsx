@@ -7498,7 +7498,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         // covers the whole safe-area height like the App nav drawer it
         // replaces on this route -- the rail's brand mark then sits where
         // that drawer's did. Close: scrim tap, swipe, Back -- all unchanged.
-        morph={!isMobile} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH - 8)} className={isMobile ? `mobile-sessions-overlay fixed ${titleInTopbar ? 'top-safe' : 'top-safe-offset-[42px]'} bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0` : ''}>
+        morph={!isMobile} panelRadius={isMobile ? 12 : 0} morphTarget={TOGGLE_RECT} expandFrom={expandFrom} contentH={Math.max(0, containerH)} className={isMobile ? `mobile-sessions-overlay fixed ${titleInTopbar ? 'top-safe' : 'top-safe-offset-[42px]'} bottom-safe left-safe z-50 bg-bg-elevated !py-0 rounded-r-xl shadow-lg [&>*]:!rounded-none [&>*]:!border-0 [&>*]:!m-0` : 'session-list-drawer'}>
         {/* Phone chat page: ONE drawer holds the shell's navigation rail (72px,
             from MobileNavRailContext) beside the sessions pane, Discord-style, so
             the bar above needs no second drawer trigger. The pane keeps its
@@ -7533,7 +7533,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         )
         return isMobile && mobileNavRail ? (
           <div className="flex h-full min-h-0 w-full" data-testid="mobile-split-drawer">
-            {mobileNavRail({ onActivate: closeSidebar })}
+            {mobileNavRail({ onActivate: closeSidebar, replace: true })}
             {/* The pane sits on the drawer's elevated surface so it reads apart
                 from the rail's `bg-bg-accent` (the sidebar's own shell paints
                 `bg-bg`, one step too close to the rail on the light themes). */}

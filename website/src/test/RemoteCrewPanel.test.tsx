@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { Link } from 'react-router-dom'
 import { renderWithProviders } from './helpers'
 import { RemoteCrewPanel } from '../pages/settings/RemoteCrewPanel'
 import { copyToClipboard } from '../utils/clipboard'
@@ -160,6 +161,26 @@ beforeEach(() => {
 })
 
 describe('RemoteCrewPanel', () => {
+  it('the add-crew deep link reveals the form even from the mounted setup tab', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [] })
+    vi.mocked(api.cloudLaunches).mockResolvedValue({ jobs: [] })
+    vi.mocked(api.cloudPreflight).mockResolvedValue(PREFLIGHT_OK)
+    const u = userEvent.setup()
+    const { container } = renderWithProviders(<>
+      <Link to="/settings/instances?highlight=key%3Aremote-crew-add">Open add crew</Link>
+      <RemoteCrewPanel />
+    </>)
+    const form = () => container.querySelector('[data-setting-key="remote-crew-add"]')
+    await waitFor(() => expect(form()).toBeInTheDocument())
+    await u.click(screen.getByRole('button', { name: /Set up a new one/i }))
+    expect(form()).toBeNull()
+    await u.click(screen.getByRole('link', { name: 'Open add crew' }))
+    await waitFor(() => expect(form()).toBeInTheDocument())
+    expect(within(form() as HTMLElement).getByRole('button', { name: 'Add remote crew' })).toBeDisabled()
+    expect(api.addInstance).not.toHaveBeenCalled()
+    expect(api.cloudLaunch).not.toHaveBeenCalled()
+  })
+
   it('never offers the plain-machine delete to a cloud crew while the launch history is still loading', async () => {
     // The row's cloud identity comes from cloudLaunches. If absent data were treated as
     // [], a real cloud crew would render as hand-added — and its trash button is a

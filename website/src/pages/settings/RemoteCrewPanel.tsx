@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useLocation } from 'react-router-dom'
 import {
   Server,
   Rocket,
@@ -1383,6 +1384,12 @@ export function RemoteCrewPanel() {
   const queryClient = useQueryClient()
   const dispatch = useAppDispatch()
   const [tab, setTab] = useState<'crews' | 'setup'>('crews')
+  const location = useLocation()
+  useEffect(() => {
+    // The add link must reveal its card even when this mounted panel is showing
+    // cloud setup. The shared highlight hook then scrolls to the real form.
+    if (new URLSearchParams(location.search).get('highlight') === 'key:remote-crew-add') setTab('crews')
+  }, [location.key, location.search])
   // Default-on: when set, the web app auto-connects every crew on load and on
   // tab focus (see useAutoConnectInstances). Off lets a many-crew user stop the
   // per-load SSH + token-mint fan-out.

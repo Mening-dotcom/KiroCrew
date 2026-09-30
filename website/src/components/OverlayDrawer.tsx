@@ -52,6 +52,8 @@ interface Props {
   /** Panel pixel height, for the vertical squash ratio. */
   contentH?: number
   className?: string
+  /** Resting corner radius; a docked list joins the shell without card corners. */
+  panelRadius?: number
   children: React.ReactNode
 }
 
@@ -60,7 +62,7 @@ interface Props {
 const EASE = [0.32, 0.72, 0, 1] as const
 const DUR = 0.24
 
-export default function OverlayDrawer({ open, width, dragging, slideX, slideRef, slideStyle, morph, morphTarget, expandFrom, contentH, className, children }: Props) {
+export default function OverlayDrawer({ open, width, dragging, slideX, slideRef, slideStyle, morph, morphTarget, expandFrom, contentH, className, panelRadius = 12, children }: Props) {
   const reduce = useReducedMotion()
   // Gesture end settles from the live presentation value via a critically
   // damped spring (no overshoot, no visible jump) — never a fixed ease tween.
@@ -111,7 +113,7 @@ export default function OverlayDrawer({ open, width, dragging, slideX, slideRef,
     `inset(${px(y)} ${px(width - x - w)} ${px(panelH - y - h)} ${px(x)} round ${px(r)})`
   const clips = morphable
     ? {
-        full: 'inset(0px 0px 0px 0px round 12px)',
+        full: `inset(0px 0px 0px 0px round ${px(panelRadius)})`,
         button: insetFor(morphTarget.x, morphTarget.y, morphTarget.size, morphTarget.size, 6),
         // Radius matches the flyout's `rounded-xl`, so the corner curvature is
         // continuous across the handoff instead of stepping 12 -> 6 -> 12.

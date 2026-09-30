@@ -107,6 +107,15 @@ describe('UpdateFoundModal — desktop source', () => {
     expect(byName('components.updateFoundModal.download')).toBeInTheDocument()
   })
 
+  it('places the dialog and its backdrop on the app modal layer', async () => {
+    await mount(found)
+    const panel = await screen.findByRole('dialog')
+    // happy-dom cannot measure paint order; the browser harness checks pointer
+    // hits over the real navigation rail and the morphing Sessions drawer.
+    expect(panel.parentElement).toHaveClass('fixed', 'inset-0', 'z-[100]')
+    expect(panel.parentElement).not.toHaveClass('z-50')
+  })
+
   it('never opens for a replayed payload', async () => {
     const { container } = await mount({ ...found, replayed: true })
     expect(container.firstChild).toBeNull()

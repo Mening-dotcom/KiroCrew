@@ -100,6 +100,9 @@ export const SETTINGS_DEFAULT_MODEL_ID = 'chat.default-model'
  */
 export const KIRO_SIGN_IN_HIGHLIGHT_ANCHOR = 'kiro-sign-in'
 
+/** Add-existing-crew form, mounted after the Remote Crew feature query settles. */
+export const REMOTE_CREW_ADD_HIGHLIGHT_ANCHOR = 'remote-crew-add'
+
 
 /**
  * useSettingHighlight — deep-link + highlight hook for Settings, also mounted by
@@ -174,11 +177,11 @@ export function useSettingHighlight(owns: boolean = true): void {
         const candidate = matches[entry.occurrence - 1] ?? matches[0]
         return candidate && !candidate.hasAttribute('data-setting-key') && !candidate.hasAttribute('data-setting-id') ? candidate : null
       }
-      // A declared identity -- a registry entry, or the late-mounting sign-in
-      // anchor -- is authoritative even before it mounts, so the probe waits
+      // A declared identity -- a registry entry, or a known late-mounting
+      // sign-in/add-crew anchor -- is authoritative before it mounts, so the probe waits
       // for it. An anchor already in the DOM is highlighted at once. Any other
       // `key:` value with no entry and no element is unknown enough to strip.
-      if (entry || directConfigKey === KIRO_SIGN_IN_HIGHLIGHT_ANCHOR || findDirectTarget()) {
+      if (entry || directConfigKey === KIRO_SIGN_IN_HIGHLIGHT_ANCHOR || directConfigKey === REMOTE_CREW_ADD_HIGHLIGHT_ANCHOR || findDirectTarget()) {
         let observer: MutationObserver | null = null
         const highlightTarget = (): boolean => {
           const el = findTarget()

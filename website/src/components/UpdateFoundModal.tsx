@@ -402,7 +402,9 @@ export default function UpdateFoundModal() {
     // landing here a scrim keydown handler is unreachable anyway. Click-to-
     // dismiss needs no role; Escape covers keyboard dismissal.
     <div
-      className="fixed inset-0 z-50 bg-bg/80 backdrop-blur-xs flex items-center justify-center animate-rise"
+      // Match the app modal layer so both the panel and scrim clear the
+      // navigation, focus peeks, and the Sessions drawer's morph layer.
+      className="fixed inset-0 z-[100] bg-bg/80 backdrop-blur-xs flex items-center justify-center animate-rise"
       role="presentation"
       onClick={e => { if (e.target === e.currentTarget && !required) dismiss() }}
     >

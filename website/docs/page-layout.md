@@ -411,3 +411,69 @@ and below the drop overlay and every shell layer, and takes no pointer events,
 so the click that claims focus lands on the pane. A pane outside split view
 (`focused` undefined) never mounts it. The placeholder pane keeps its accent
 dot as well.
+
+## Desktop grabber shell
+
+The desktop dashboard keeps its real navigation registry and `ChatSidebar` list
+inside continuous top/left chrome. The main page's top divider starts at the
+navigation's right edge and meets an 8px top-left corner. Both top corners have
+that modest radius; a 1px right border and 6px chrome gutter lightly frame the
+workspace without adding a bottom gap or a separate Sessions card. A docked
+activity panel keeps its own frame beyond that gutter. The navigation
+has no floating-card border, inset bottom gutter, or separate collapse button.
+Its only visible resize affordance is `NavigationGrabber`, a keyboard-operable
+separator controlling `dashboard-navigation`. Its hit strip sits inside the
+navigation edge so the session drawer cannot cover the grip. Focus is shown
+by a slightly wider accent-coloured grip, without an exterior outline or ring.
+Pointer movement is live; release
+snaps to icons or a labelled column. The active destination colours a 36px icon
+tile rather than filling the rail width. Desktop collapsed badges are anchored
+to that icon tile, outside the glyph's opacity; expanded indicators retain their
+row placement and mobile captioned tiles keep their existing corner badges.
+Collapsed desktop hover labels wait 100ms, then appear as text-only popouts
+flush with the icon tile's right edge, ignoring the rail's padding so there is
+no gap; the original icon stays unobscured.
+The icon tile highlights immediately with full-opacity ink and a neutral inset
+edge; inactive tiles gain a neutral fill while active tiles keep their accent.
+Departure,
+activation or expansion cancels a pending label. Keyboard focus shows it
+immediately and Escape dismisses it; touch tiles keep their visible captions.
+The current crew identity opens the
+crew chooser instead of toggling navigation, including when only Local exists.
+Pointer feedback is hover-only: clicks and taps leave no background, outline or
+underline after the pointer leaves, even when the menu restores focus. Actual
+keyboard navigation retains a neutral background cue, independent of Radix's
+pointer-driven focus restoration.
+The menu's Add remote crew action opens the existing setup form or opt-in screen;
+it never creates a connection or provisions a machine on selection.
+
+App-wide update prompts put both their dialog and backdrop on the existing
+modal layer (`z-[100]`), above navigation, focus peeks and the Sessions drawer's
+morph layer. Sidebar-local stacking must not obscure or intercept a modal.
+
+Mobile uses the same 72px captioned navigation rail on every route, with the
+current crew chooser at its top and Search pinned below its scrollable
+navigation destinations. Library and enabled utilities remain reachable; the
+selected paint is confined to the 36px icon tile. Chat keeps its actual Sessions
+pane beside the rail. Other tabs show the rail alone, opened by a panel glyph
+rather than the old branded drawer. Chat replaces the history entry its drawer
+owns; other tabs push ordinary route navigation. The shell drawer is flush to
+the safe-area edge and respects the visual viewport while the keyboard is open.
+Mobile chrome shares the top divider and 8px corners but adds no desktop gutter
+or persistent rail, preserving the full reading width at 320px. Focus mode
+retains edge-peek chrome. The main page scroller, Discover and SidePanelLayout
+use the same thin hover/focus-revealed scrollbar with inset track ends as chat.
+Native window-control clearance stays in the titlebar, above the navigation.
+The shell publishes its live width to `useRailWidth`, so page-owned session and
+activity panels continue using the real space left beside it. During dragging,
+row rewrapping retains the existing bounded virtualizer settle batching;
+actively streaming rows remain on their immediate measurement path.
+Session rows key Framer layout projection to their paint-order stamp. Inserting
+or reordering rows still animates; changing an ancestor column's position or
+width does not start an independent row spring, so threads track the column.
+
+The transcript uses the thin `scrollbar-overlay` treatment: fine pointers reveal
+the thumb on hover or focus within the transcript, while coarse pointers retain
+a visible cue. WebKit track ends are inset 8px from the frame. The scroll region
+still reserves its stable gutter, contains overscroll, and keeps native anchoring
+and floating-composer clearance; no extra scroll container is introduced.

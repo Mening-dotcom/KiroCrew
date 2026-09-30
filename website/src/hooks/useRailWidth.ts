@@ -8,11 +8,11 @@ import { useSyncExternalStore } from 'react'
  * activity panel's beside-vs-fill decision against the space actually left for
  * the chat, and the rail is the first thing subtracted from it.
  *
- * Published as the resolved TRACK value (0 / 74 / 236) rather than measured
- * from the DOM on purpose. The rail's collapse is a 150ms grid-template
- * transition, so `getBoundingClientRect()` reports intermediate widths mid
- * animation — enough to flip a width gate twice per toggle. The track value
- * steps once.
+ * Published from the shell's target track, never measured from the DOM.
+ * Keyboard toggles publish one target before the 150ms grid transition;
+ * pointer drags disable that transition and publish each live width. Consumers
+ * therefore follow the space actually available during direct manipulation,
+ * without chasing intermediate DOM measurements during an animated toggle.
  *
  * Module-level (same shape as usePanelTabs) so the value survives consumer
  * remounts and needs no context provider.
@@ -54,9 +54,10 @@ const listeners = new Set<() => void>()
  * virtualizer's ResizeObserver work and forced layout reads by 13-18x per
  * toggle, and none of the extra measurements change the final cached heights.
  *
- * Published here — next to the width itself — because this module already owns
- * "the rail's collapse is a 150ms grid-template transition" as a fact its
- * consumers need (see the note on publishing the stepped track value).
+ * Published here beside the width so both keyboard transitions and live
+ * pointer resizes mark row rewrapping. A drag re-arms this timestamp per move;
+ * geometryScheduling still flushes its pending work on a bounded timer, and
+ * the actively streaming row remains exempt from that batching.
  */
 let railSettlingUntil = 0
 
