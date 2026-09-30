@@ -1795,10 +1795,19 @@ async def _move_in(state: "DashboardState", card: sc.SetupCard) -> sc.SetupCard:
             await asyncio.sleep(1.5)
             step["state"] = "done"
         await asyncio.to_thread(mark_stage, "stay_on")
+        # The commands a real home would answer, shown labelled simulated.
+        from kiro_crew.dashboard.setup_move_in import reach_back
+
         return await _finish(
             card,
             sc.STATUS_COMMITTED,
-            outcome={**base, "move_steps": steps, "moved": True, "simulated": True},
+            outcome={
+                **base,
+                "move_steps": steps,
+                "moved": True,
+                "simulated": True,
+                **(await reach_back(state, card)),
+            },
         )
     from kiro_crew.dashboard.setup_move_in import move_in
 

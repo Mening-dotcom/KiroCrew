@@ -9461,8 +9461,8 @@
       "error_move_in_carry_refused": "Tu hogar rechazó la mudanza, así que las programaciones siguen ejecutándose aquí. Pulsa Mudarse de nuevo.",
       "error_move_in_chat_missing": "Este chat no está abierto, así que no se pudo llevar.",
       "error_move_in_chat_not_persistent": "Este chat no guarda transcripción, así que no se puede llevar.",
-      "error_move_in_chat_busy": "Este chat no se pudo copiar limpiamente ahora mismo. Tu memoria y tus programaciones ya están en tu hogar, así que pulsa Mudarse de nuevo para llevar el chat.",
-      "error_move_in_chat_failed": "Tu hogar no aceptó este chat. Tu memoria y tus programaciones ya están allí, así que pulsa Mudarse de nuevo para llevar el chat.",
+      "error_move_in_chat_busy": "Este chat no se pudo copiar limpiamente ahora mismo y todavía no se ha movido nada más. Pulsa Mudarse de nuevo.",
+      "error_move_in_chat_failed": "Tu hogar no aceptó este chat y todavía no se ha movido nada más. Pulsa Mudarse de nuevo.",
       "error_move_in_failed": "Algo salió mal durante la mudanza. Pulsa Mudarse de nuevo; continúa donde se detuvo.",
       "error_move_in_interrupted": "La mudanza se interrumpió. Pulsa Mudarse de nuevo; continúa donde se detuvo.",
       "home_moved_where": "Este chat ahora continúa en tu hogar, {{name}}.",
@@ -9475,7 +9475,16 @@
       "home_kept_home_no_store": "tu hogar no pudo leer su lista de programaciones",
       "home_settings_kept": "Tu hogar conservó su propia configuración.",
       "home_reenter_secrets": "Secretos que debes volver a introducir en tu hogar: {{names}}",
-      "home_reenter_connections": "Conexiones que debes volver a configurar en tu hogar: {{names}}"
+      "home_reenter_connections": "Conexiones que debes volver a configurar en tu hogar: {{names}}",
+      "home_next_time": "La próxima vez",
+      "home_next_time_open": "Ejecuta esto en una terminal para volver a abrir tu hogar.",
+      "home_next_time_more": "Más comandos",
+      "home_next_time_stop": "Pausar la facturación",
+      "home_next_time_start": "Reanudar tras una pausa",
+      "home_next_time_status": "Ver su estado",
+      "home_next_time_list": "Encontrar un hogar que olvidaste",
+      "home_next_time_elsewhere": "En otra computadora, primero instala {{productName}} con la configuración de una línea e inicia sesión en AWS.",
+      "home_next_time_simulated": "Estos comandos son simulados y no encontrarán ningún hogar."
     },
     "setupCardTray": {
       "needs_you": "te necesita",

@@ -9205,8 +9205,8 @@
       "error_move_in_carry_refused": "你的家拒绝了搬迁，所以定时任务仍在这里运行。再按一次“搬进去”。",
       "error_move_in_chat_missing": "此聊天未打开，所以无法带过去。",
       "error_move_in_chat_not_persistent": "此聊天不保留记录，所以无法带过去。",
-      "error_move_in_chat_busy": "此聊天暂时无法完整复制。你的记忆和定时任务已经在你的家里了，再按一次“搬进去”即可把聊天带过去。",
-      "error_move_in_chat_failed": "你的家没有接收此聊天。你的记忆和定时任务已经在那里了，再按一次“搬进去”即可把聊天带过去。",
+      "error_move_in_chat_busy": "此聊天暂时无法完整复制，其他内容也还没有搬过去。请再按一次“搬进去”。",
+      "error_move_in_chat_failed": "你的家没有接收此聊天，其他内容也还没有搬过去。请再按一次“搬进去”。",
       "error_move_in_failed": "搬迁过程中出了问题。再按一次“搬进去”；它会从中断处继续。",
       "error_move_in_interrupted": "搬迁被中断了。再按一次“搬进去”；它会从中断处继续。",
       "home_moved_where": "此聊天现在在你的家 {{name}} 上继续。",
@@ -9219,7 +9219,16 @@
       "home_kept_home_no_store": "你的家无法读取自己的定时任务列表",
       "home_settings_kept": "你的家保留了自己的设置。",
       "home_reenter_secrets": "需要在你的家上重新输入的密钥：{{names}}",
-      "home_reenter_connections": "需要在你的家上重新设置的连接：{{names}}"
+      "home_reenter_connections": "需要在你的家上重新设置的连接：{{names}}",
+      "home_next_time": "下次",
+      "home_next_time_open": "在终端中运行这条命令，即可再次打开你的家。",
+      "home_next_time_more": "更多命令",
+      "home_next_time_stop": "暂停计费",
+      "home_next_time_start": "暂停后恢复",
+      "home_next_time_status": "查看它的状态",
+      "home_next_time_list": "找回忘记的家",
+      "home_next_time_elsewhere": "在另一台电脑上，先用一行命令安装 {{productName}}，并登录 AWS。",
+      "home_next_time_simulated": "这些命令是模拟的，找不到任何家。"
     },
     "setupCardTray": {
       "needs_you": "需要你",

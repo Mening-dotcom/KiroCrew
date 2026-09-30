@@ -79,6 +79,7 @@ from kiro_crew.cloud.fargate import (
     validated_region,
 )
 from kiro_crew.cloud.login_target import KiroLoginTarget
+from kiro_crew.cloud.reconnect import home_name
 from kiro_crew.instances.validation import split_ecs_target
 from kiro_crew.platform.defaults import FARGATE_PROVISIONER_ID
 
@@ -1510,7 +1511,7 @@ class FargateLaunchEngine:
             )
         registered = connect.register_instance(
             target,
-            name=f"Kiro Crew Cloud ({tag})",
+            name=home_name(tag),
             profile=profile,
             region=region,
             remote_port=FRONT_PORT,

@@ -199,6 +199,9 @@ async def move_in(state: "DashboardState", card: sc.SetupCard) -> sc.SetupCard:
             await progress.mark("carry", "done", _carry_detail(record))
             _audit(card, "carry", "ok", instance_id)
         if not record.get("adopted"):
+            # The home's copy of this card is what the owner sees after the
+            # switch, so it carries the way back too.
+            reach = await reach_back(state, card)
             await _adopt_chat(
                 state,
                 mgr,
@@ -206,7 +209,12 @@ async def move_in(state: "DashboardState", card: sc.SetupCard) -> sc.SetupCard:
                 card.slot,
                 chat["remote_key"],
                 outcome={
-                    "home": {"name": inst.name, "remote_key": chat["remote_key"]},
+                    "home": {
+                        **reach.get("home", {}),
+                        "name": inst.name,
+                        "remote_key": chat["remote_key"],
+                    },
+                    "reconnect": reach.get("reconnect", []),
                     "jobs_moved": list(record.get("jobs_moved") or []),
                     "jobs_kept_here": list(record.get("jobs_kept_here") or []),
                     "carried": list(record.get("items") or []),
@@ -238,6 +246,7 @@ async def move_in(state: "DashboardState", card: sc.SetupCard) -> sc.SetupCard:
         raise sc.CardRejected(message, "move_in_failed") from None
     await asyncio.to_thread(mark_stage, "stay_on")
     left = await asyncio.to_thread(left_behind)
+    reach = await reach_back(state, card)
     return await sf._finish(
         progress.card,
         sc.STATUS_COMMITTED,
@@ -245,7 +254,8 @@ async def move_in(state: "DashboardState", card: sc.SetupCard) -> sc.SetupCard:
             **progress.base,
             "move_steps": progress.steps,
             "moved": True,
-            "home": {"instance_id": inst.id, "name": inst.name, **chat},
+            "home": {**reach.get("home", {}), "instance_id": inst.id, "name": inst.name, **chat},
+            "reconnect": reach.get("reconnect", []),
             "jobs_moved": list(record.get("jobs_moved") or []),
             "jobs_kept_here": list(record.get("jobs_kept_here") or []),
             "jobs_follow_chat": list(record.get("jobs_follow_chat") or []),
@@ -769,6 +779,56 @@ async def _adopt_chat(
             )
 
 
+# ── coming back ─────────────────────────────────────────────────────────────
+
+
+async def reach_back(state: "DashboardState", card: sc.SetupCard) -> dict[str, Any]:
+    """How to reach the home again, for the committed outcome; ``{}`` when unknown.
+
+    ``{"home": {name, tag, region, profile}, "reconnect": [{purpose, command}]}``.
+    The tag, region and profile are the build's own, read from the launch job the
+    card's build recorded (``private.job_id``); the commands come from
+    ``cloud.reconnect``, which refuses a value the cloud commands would refuse,
+    so a record that does not read leaves the outcome without commands rather
+    than with one that cannot work. No token, URL or credential is in any of it.
+    """
+    from kiro_crew.cloud.reconnect import home_name, reconnect_commands
+    from kiro_crew.dashboard.handlers_cloud import _store
+    from kiro_crew.validation import ValidationError
+
+    job_id = str(card.private.get("job_id") or "")
+    job = await asyncio.to_thread(_store(state).get, job_id) if job_id else None
+    if job is None:
+        return {}
+    tag = str(job.tag or "")
+    region = str(job.region or card.payload.get("region") or "")
+    profile = str(job.profile or "")
+    try:
+        commands = reconnect_commands(tag, region, profile)
+    except ValidationError:
+        logger.warning("home card %s: its launch record names no usable home", card.id)
+        return {}
+    return {
+        "home": {"name": home_name(tag), "tag": tag, "region": region, "profile": profile},
+        "reconnect": commands,
+    }
+
+
+def _open_line(outcome: dict[str, Any]) -> str:
+    """The result sentence that tells the agent how the user comes back."""
+    from kiro_crew.cloud.reconnect import open_command
+
+    reconnect = outcome.get("reconnect")
+    command = open_command(reconnect) if isinstance(reconnect, list) else ""
+    if not command:
+        return ""
+    return (
+        " To open the home again from a terminal (this computer, or another one with "
+        f"Kiro Crew installed and signed in to AWS): `{command}`. Tell the user that in "
+        "one line."
+    )
+
+
 # ── what stays behind ───────────────────────────────────────────────────────
 
 
@@ -854,4 +914,16 @@ def result_detail(outcome: dict[str, Any]) -> str:
     if connections:
         text += f" Connections to grant again on the home: {_names(connections)}."
     text += " Tell the user this in a few short lines."
+    return text + _open_line(outcome)
+
+
+def simulated_result_detail(outcome: dict[str, Any]) -> str:
+    """The ``[Setup card result]`` detail for a committed simulated move-in."""
+    text = " The crew moved into its home in the cloud; keep helping the user from here."
+    line = _open_line(outcome)
+    if line:
+        text += (
+            " This home is simulated: nothing exists in AWS, so the command below finds no "
+            "home; say so if you mention it." + line
+        )
     return text

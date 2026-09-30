@@ -200,6 +200,20 @@ class SetupCard:
     def terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
 
+    def _served_outcome(self) -> dict[str, Any] | None:
+        """The outcome as served, with a home's reconnect commands rebuilt.
+
+        The browser shows those commands for the owner to copy into a terminal,
+        so they are derived again from the home's tag, region and profile rather
+        than read from this store (``cloud.reconnect.commands_for_home``).
+        """
+        outcome = self.outcome
+        if self.kind != KIND_HOME or not isinstance(outcome, dict) or "reconnect" not in outcome:
+            return outcome
+        from kiro_crew.cloud.reconnect import commands_for_home
+
+        return {**outcome, "reconnect": commands_for_home(outcome.get("home"))}
+
     def public(self) -> dict[str, Any]:
         """The card as the owner's browser sees it."""
         return {
@@ -210,7 +224,7 @@ class SetupCard:
             "stakes": self.stakes,
             "hash": self.payload_hash,
             "payload": self.payload,
-            "outcome": self.outcome,
+            "outcome": self._served_outcome(),
             "error": self.error,
             "created_ts": self.created_ts,
             "decided_ts": self.decided_ts,

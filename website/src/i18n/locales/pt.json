@@ -9461,8 +9461,8 @@
       "error_move_in_carry_refused": "Sua casa recusou a mudança, então os agendamentos continuam rodando aqui. Pressione Mudar para lá de novo.",
       "error_move_in_chat_missing": "Este chat não está aberto, então não pôde ser levado.",
       "error_move_in_chat_not_persistent": "Este chat não guarda transcrição, então não pode ser levado.",
-      "error_move_in_chat_busy": "Este chat não pôde ser copiado de forma consistente agora. Sua memória e seus agendamentos já estão na sua casa, então pressione Mudar para lá de novo para levar o chat.",
-      "error_move_in_chat_failed": "Sua casa não aceitou este chat. Sua memória e seus agendamentos já estão lá, então pressione Mudar para lá de novo para levar o chat.",
+      "error_move_in_chat_busy": "Este chat não pôde ser copiado de forma consistente agora, e nada mais foi movido ainda. Pressione Mudar para lá de novo.",
+      "error_move_in_chat_failed": "Sua casa não aceitou este chat, e nada mais foi movido ainda. Pressione Mudar para lá de novo.",
       "error_move_in_failed": "Algo deu errado durante a mudança. Pressione Mudar para lá de novo; ela continua de onde parou.",
       "error_move_in_interrupted": "A mudança foi interrompida. Pressione Mudar para lá de novo; ela continua de onde parou.",
       "home_moved_where": "Este chat agora continua na sua casa, {{name}}.",
@@ -9475,7 +9475,16 @@
       "home_kept_home_no_store": "sua casa não conseguiu ler sua lista de agendamentos",
       "home_settings_kept": "Sua casa manteve as próprias configurações.",
       "home_reenter_secrets": "Segredos para inserir de novo na sua casa: {{names}}",
-      "home_reenter_connections": "Conexões para configurar de novo na sua casa: {{names}}"
+      "home_reenter_connections": "Conexões para configurar de novo na sua casa: {{names}}",
+      "home_next_time": "Da próxima vez",
+      "home_next_time_open": "Execute isto em um terminal para abrir sua casa de novo.",
+      "home_next_time_more": "Mais comandos",
+      "home_next_time_stop": "Pausar a cobrança",
+      "home_next_time_start": "Retomar depois de uma pausa",
+      "home_next_time_status": "Ver o estado dela",
+      "home_next_time_list": "Encontrar uma casa esquecida",
+      "home_next_time_elsewhere": "Em outro computador, primeiro instale o {{productName}} com a configuração de uma linha e entre na AWS.",
+      "home_next_time_simulated": "Estes comandos são simulados e não vão encontrar nenhuma casa."
     },
     "setupCardTray": {
       "needs_you": "precisa de você",

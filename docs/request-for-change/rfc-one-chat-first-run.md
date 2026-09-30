@@ -511,6 +511,10 @@ Nothing waits on it: name, import, connect and the preview job all happen
 locally meanwhile. When the home is healthy and signed in, the crew moves
 automatically (memory, schedules, settings, SOUL.md
 and USER.md, and this chat) and the same conversation continues from the home.
+The moved-in card then says how to come back: the one command that opens the home
+from a terminal, `kirocrew cloud connect` with the home's tag and region (it signs
+in over SSM each time, so it carries no token), with pause, resume and status
+behind a disclosure, and `kirocrew start` on this machine prints the same line.
 The build runs in AWS and in the gateway, not in the browser, so closing the tab
 or letting the laptop sleep does not stop it. A gateway restart mid-build takes
 the build's worker along, so the card is picked up at boot and settled from the

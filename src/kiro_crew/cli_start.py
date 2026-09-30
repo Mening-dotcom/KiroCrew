@@ -105,6 +105,10 @@ _LANDING_TOKEN_TTL = cli_server._RESTART_TOKEN_TTL
 #: A slot key goes into the landing URL, and the first-run state file it comes
 #: from is agent-writable, so only the shape a real slot key has is accepted.
 _SLOT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+#: A home's name as the summary prints it. The card store it is read from is
+#: agent-writable, so any other name (a terminal escape, a second line) is replaced
+#: by the name the home's tag gives it.
+_HOME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()'-]{0,79}$")
 
 # How the gateway this command ended up with is running, for the summary.
 _HOW_REUSED = "reused"
@@ -827,6 +831,7 @@ def _print_summary(port: int, gateway: _Gateway) -> None:
     print()
     if gateway.how == _HOW_FOREGROUND:
         print(f"Kiro Crew is running in this terminal on port {port}.")
+        _print_home_hint()
         print("   Stop it:  press Ctrl-C")
     else:
         where = {
@@ -835,9 +840,61 @@ def _print_summary(port: int, gateway: _Gateway) -> None:
             _HOW_DETACHED: f"a background gateway (pid {gateway.pid})",
         }[gateway.how]
         print(f"Kiro Crew is running on port {port}, in {where}.")
+        _print_home_hint()
         print("   Stop it:  kirocrew stop")
         if gateway.how == _HOW_DETACHED:
             print("   Logs:     kirocrew logs -f")
     if gateway.how != _HOW_SERVICE and service_controller.installed_unit_path() is None:
         print("   Keep it running after logout and reboots:  kirocrew service install")
     print("   A new sign-in link any time:  kirocrew token")
+
+
+def _moved_home() -> tuple[str, str, bool] | None:
+    """``(name, open command, simulated)`` for the home this crew moved into, or ``None``.
+
+    Read-only, from the newest committed home card that moved in. The command is
+    rebuilt from the card's tag, region and profile by ``cloud.reconnect``, which
+    refuses a value the cloud commands would, so nothing stored is printed as-is.
+    """
+    from kiro_crew import setup_cards as sc
+    from kiro_crew.cloud.reconnect import home_name, open_command, reconnect_commands
+    from kiro_crew.validation import ValidationError
+
+    try:
+        cards = sc.load_cards()
+    except Exception:
+        logger.debug("could not read the setup cards for the home hint", exc_info=True)
+        return None
+    for card in reversed(cards):
+        outcome = card.outcome or {}
+        if card.kind != sc.KIND_HOME or card.status != sc.STATUS_COMMITTED:
+            continue
+        if outcome.get("moved") is not True:
+            continue
+        home = outcome.get("home")
+        home = home if isinstance(home, dict) else {}
+        tag, region, profile = (str(home.get(key) or "") for key in ("tag", "region", "profile"))
+        try:
+            command = open_command(reconnect_commands(tag, region, profile))
+        except ValidationError:
+            return None
+        name = str(home.get("name") or "")
+        return (
+            name if _HOME_NAME_RE.match(name) else home_name(tag),
+            command,
+            outcome.get("simulated") is True,
+        )
+    return None
+
+
+def _print_home_hint() -> None:
+    """Name the home this crew moved into, and the command that opens it."""
+    found = _moved_home()
+    if found is None:
+        return
+    name, command, simulated = found
+    if simulated:
+        print(f"   Your home in the cloud: {name} (simulated; this command finds no home)")
+    else:
+        print(f"   Your home in the cloud: {name}")
+    print(f"   Open it:  {command}")

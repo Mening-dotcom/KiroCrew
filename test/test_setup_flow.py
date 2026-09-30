@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -513,6 +514,13 @@ class TestHomeInTheBackground:
         assert moved.outcome["moved"] is True and moved.outcome["simulated"] is True
         assert [s["state"] for s in moved.outcome["move_steps"]] == ["done"] * 4
         assert "moved into its home" in dispatched[-1][2]
+        # The commands a real home would answer, from the simulated launch's own tag.
+        tag = moved.outcome["home"]["tag"]
+        assert re.fullmatch(r"kc-[0-9a-f]{6}", tag)
+        assert moved.outcome["home"]["name"] == f"Kiro Crew Cloud ({tag})"
+        open_cmd = f"kirocrew cloud connect --tag {tag} --region us-west-2"
+        assert moved.outcome["reconnect"][0] == {"purpose": "open", "command": open_cmd}
+        assert "simulated" in dispatched[-1][2] and f"`{open_cmd}`" in dispatched[-1][2]
 
     @pytest.mark.asyncio
     async def test_a_real_home_waits_for_aws_sign_in(self, state, dispatched, monkeypatch):

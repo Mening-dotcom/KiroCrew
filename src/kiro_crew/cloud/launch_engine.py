@@ -17,6 +17,7 @@ from kiro_crew.cloud import connect as connect_mod
 from kiro_crew.cloud import ec2, iam, login, sizes
 from kiro_crew.cloud.aws import AWSError
 from kiro_crew.cloud.login_target import KiroLoginTarget
+from kiro_crew.cloud.reconnect import home_name
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +194,7 @@ class RealLaunchEngine:
         # crew must name the same port or the tunnel forwards to nothing.
         registered = connect_mod.register_instance(
             instance_id,
-            name=f"Kiro Crew Cloud ({tag})",
+            name=home_name(tag),
             profile=profile,
             region=region,
         )

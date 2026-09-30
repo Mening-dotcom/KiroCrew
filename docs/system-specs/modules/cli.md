@@ -639,7 +639,12 @@ the URL is printed for manual opening.
 
 `kirocrew cloud connect` mints a dashboard token over SSM, opens an
 `AWS-StartPortForwardingSession`, waits for the local tunnel port to accept TCP
-connections, and opens or prints the local dashboard URL. If the tunnel port
+connections, and opens or prints the local dashboard URL. Without `--tag` it
+reaches the tag this computer's own `cloud launch` recorded; a home the first
+run's setup card built is not recorded there, so the commands the moved-in card
+shows (`cloud/reconnect.py`) always pass `--tag` and `--region`, plus `--profile`
+unless it is the AWS CLI's default, and so work from any computer
+([first-run](first-run.md#moving-in)). If the tunnel port
 does not become reachable, the command reports failure, does not present the
 dashboard URL as usable, and does not keep a dead tunnel process open. If final
 dashboard opening fails during `cloud launch`, the instance remains running but
@@ -1530,7 +1535,15 @@ The token is printed and handed to the browser, which is the command's purpose,
 and is never passed to a logger (the QR failure path logs only the exception
 type). A short summary follows: where the gateway runs, how to stop it
 (`kirocrew stop`, or Ctrl-C in the foreground), `kirocrew service install` when
-no service is installed, and `kirocrew token` for a fresh link.
+no service is installed, and `kirocrew token` for a fresh link. Right after the
+running line, a crew that moved into a home in the cloud gets two more:
+`Your home in the cloud: <name>` and `Open it:  kirocrew cloud connect --tag …
+--region …` (`_print_home_hint`). They are read, read-only, from the newest
+committed home card whose outcome moved in, and the command is rebuilt from its
+tag, region and profile by `cloud.reconnect`, which refuses a value the cloud
+commands would; a name outside a plain charset is replaced by the tag's own
+(`Kiro Crew Cloud (<tag>)`), since the card store is agent-writable. A simulated
+home's line says the command finds no home.
 
 Exit codes: **0** serving and the URL delivered (in the foreground: the
 gateway's own exit status, 128 + N for death by signal N); **1** no gateway

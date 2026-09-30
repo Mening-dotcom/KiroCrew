@@ -9461,8 +9461,8 @@
       "error_move_in_carry_refused": "Ton chez-toi a refusé le déménagement, les planifications tournent donc toujours ici. Appuie de nouveau sur Emménager.",
       "error_move_in_chat_missing": "Ce chat n’est pas ouvert, il n’a donc pas pu être emporté.",
       "error_move_in_chat_not_persistent": "Ce chat ne garde aucune transcription, il ne peut donc pas être emporté.",
-      "error_move_in_chat_busy": "Ce chat n’a pas pu être copié proprement pour le moment. Ta mémoire et tes planifications sont déjà sur ton chez-toi, appuie donc de nouveau sur Emménager pour emporter le chat.",
-      "error_move_in_chat_failed": "Ton chez-toi n’a pas accepté ce chat. Ta mémoire et tes planifications y sont déjà, appuie donc de nouveau sur Emménager pour emporter le chat.",
+      "error_move_in_chat_busy": "Ce chat n’a pas pu être copié proprement pour le moment, et rien d’autre n’a encore été déplacé. Appuie de nouveau sur Emménager.",
+      "error_move_in_chat_failed": "Ton chez-toi n’a pas accepté ce chat, et rien d’autre n’a encore été déplacé. Appuie de nouveau sur Emménager.",
       "error_move_in_failed": "Un problème est survenu pendant le déménagement. Appuie de nouveau sur Emménager ; il reprend là où il s’est arrêté.",
       "error_move_in_interrupted": "Le déménagement a été interrompu. Appuie de nouveau sur Emménager ; il reprend là où il s’est arrêté.",
       "home_moved_where": "Ce chat continue maintenant sur ton chez-toi, {{name}}.",
@@ -9475,7 +9475,16 @@
       "home_kept_home_no_store": "ton chez-toi n’a pas pu lire sa liste de planifications",
       "home_settings_kept": "Ton chez-toi a gardé ses propres paramètres.",
       "home_reenter_secrets": "Secrets à saisir de nouveau sur ton chez-toi : {{names}}",
-      "home_reenter_connections": "Connexions à configurer de nouveau sur ton chez-toi : {{names}}"
+      "home_reenter_connections": "Connexions à configurer de nouveau sur ton chez-toi : {{names}}",
+      "home_next_time": "La prochaine fois",
+      "home_next_time_open": "Lance ceci dans un terminal pour rouvrir ton chez-toi.",
+      "home_next_time_more": "Plus de commandes",
+      "home_next_time_stop": "Suspendre la facturation",
+      "home_next_time_start": "Reprendre après une pause",
+      "home_next_time_status": "Voir son état",
+      "home_next_time_list": "Retrouver un chez-toi oublié",
+      "home_next_time_elsewhere": "Sur un autre ordinateur, installe d’abord {{productName}} avec l’installation en une ligne et connecte-toi à AWS.",
+      "home_next_time_simulated": "Ces commandes sont simulées et ne trouveront aucun chez-toi."
     },
     "setupCardTray": {
       "needs_you": "t’attend",

@@ -9,7 +9,7 @@
 import type React from 'react'
 
 import { i18nT } from '../../i18n/t'
-import HomeMovedDetail from './HomeMovedDetail'
+import HomeMovedDetail, { HomeNextTime } from './HomeMovedDetail'
 import type { SetupCard, SetupCardClassic, SetupCardStatus } from '../../api/setupCards'
 
 /** Terminal status → its word on the result line. */
@@ -195,8 +195,9 @@ export function homeResultDetail(card: SetupCard): React.ReactNode {
   }
   if (o.moved === true) {
     return (
-      <div className="text-[12px] text-muted pl-5" data-testid="setup-card-result-detail">
-        {i18nT('components.setupCard.home_result_simulated')}
+      <div className="text-[12px] text-muted pl-5 flex flex-col min-w-0" data-testid="setup-card-result-detail">
+        <span>{i18nT('components.setupCard.home_result_simulated')}</span>
+        <HomeNextTime outcome={o} simulated />
       </div>
     )
   }

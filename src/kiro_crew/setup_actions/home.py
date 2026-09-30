@@ -133,15 +133,13 @@ def _result_detail(card: sc.SetupCard) -> str:
             '(setup_card kind "service"), in one sentence: Kiro Crew stays available '
             "only while it runs."
         )
-    if outcome.get("moved") and not outcome.get("simulated"):
-        from kiro_crew.dashboard.setup_move_in import result_detail
+    if outcome.get("moved"):
+        from kiro_crew.dashboard.setup_move_in import result_detail, simulated_result_detail
 
-        return result_detail(outcome)
-    return (
-        " The crew moved into its home in the cloud; keep helping the user from here."
-        if outcome.get("moved")
-        else " The home is ready."
-    )
+        return (
+            simulated_result_detail(outcome) if outcome.get("simulated") else result_detail(outcome)
+        )
+    return " The home is ready."
 
 
 ACTION = SetupAction(

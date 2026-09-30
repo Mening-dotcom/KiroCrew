@@ -852,6 +852,38 @@ reload and acknowledges with `mc-session-opened`. Pending navigation survives a
 cold pane's readiness handshake; only its own frame and origin can acknowledge. Every step is audited as
 `setup_card.move_in`.
 
+**Next time.** The committed outcome, live or simulated, also says how to reach
+the home again (`setup_move_in.reach_back`): `home.tag`, `home.region` and
+`home.profile` from the launch job the card's build recorded (`private.job_id`),
+and `reconnect`, a list of `{purpose, command}` built by
+`cloud/reconnect.reconnect_commands`: `open` (`kirocrew cloud connect`), `stop`
+(pause billing), `start`, `status`, each with `--tag` and `--region`, and `list`
+with `--region`; `--profile` rides every command unless the profile is the AWS
+CLI's default. The helper validates the tag, region and profile with the cloud
+commands' own validators and shell-quotes every argument, so a launch record that
+does not read leaves `reconnect` empty rather than holding a command that cannot
+work. `cloud connect` mints a fresh dashboard token over SSM and opens an SSM
+port-forward each time, so no command, card, chat line or log carries a token, a
+URL with a token, or a credential, and the home keeps no inbound port. The flags
+are explicit because a card build does not write the launch record
+(`cloud/launch_state.py`) a bare `kirocrew cloud connect` resolves, and another
+computer has none; `ec2.stack_name(tag)` is the stack both the card's build and
+`cloud connect --tag` address (`test_cloud_reconnect.py`). The `[Setup card
+result]` hands the agent the `open` command to tell the user in one line; a
+simulated move's result says the command finds no home. The card's "Next time"
+block (`HomeNextTime` in `HomeMovedDetail.tsx`) shows the `open` command with a
+copy button, the others behind a "More commands" disclosure, and one line for
+another computer (install with the one-line setup and sign in to AWS first); on a
+simulated home it says the commands are simulated and will not find a home.
+`kirocrew start` prints the same line after its running line
+([cli](cli.md#start-command)).
+
+A move-in's `SshTunnelManager.connect` records the home's `was_connected`, so a
+later gateway start with Remote Crew on reconnects the home's tunnel by itself
+(`server._revive_intended_instances`) and Your crews opens it without the command,
+as long as this computer's AWS sign-in for the profile is still valid; an expired
+one leaves the tab in its error state until the owner signs in to AWS and retries.
+
 ## The main chat
 
 Once the first run's home card is committed or declined, `setup_flow.graduate`

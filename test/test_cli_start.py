@@ -781,3 +781,70 @@ def test_the_main_chat_is_where_start_lands(monkeypatch) -> None:
     first_run.record_main("chat-1-1790000000")
     monkeypatch.setattr(cli_start, "_first_run_possible", lambda: False)
     assert cli_start._landing_path() == "/chat?sid=chat-1-1790000000"
+
+
+# ── The home this crew moved into ──
+
+
+class TestHomeHint:
+    """After the running line, a crew that moved into a home names it and how to open it."""
+
+    TAG = "kc-4d5e6f"
+
+    def _moved(self, **outcome: Any) -> None:
+        from kiro_crew import setup_cards as sc
+
+        card = sc.create_card(
+            slot="chat-1-1", session_key="dashboard:chat-1-1", kind=sc.KIND_HOME, payload={}
+        )
+
+        def _done(c: sc.SetupCard) -> None:
+            c.status = sc.STATUS_COMMITTED
+            c.outcome = {"moved": True, **outcome}
+
+        sc.update_card(card.id, _done)
+
+    def _home(self, **over: Any) -> dict[str, str]:
+        return {
+            "name": "Kiro Crew Cloud (kc-4d5e6f)",
+            "tag": self.TAG,
+            "region": "eu-west-1",
+            "profile": "",
+            **over,
+        }
+
+    def test_the_home_and_its_open_command_follow_the_running_line(self, host, capsys) -> None:
+        self._moved(home=self._home())
+        assert cli_start.run_start(_args()) == cli_start.EXIT_OK
+        lines = capsys.readouterr().out.splitlines()
+        running = next(i for i, line in enumerate(lines) if "Kiro Crew is running on port" in line)
+        assert lines[running + 1] == "   Your home in the cloud: Kiro Crew Cloud (kc-4d5e6f)"
+        assert lines[running + 2] == (
+            f"   Open it:  kirocrew cloud connect --tag {self.TAG} --region eu-west-1"
+        )
+
+    def test_a_simulated_home_says_its_command_finds_nothing(self, host, capsys) -> None:
+        self._moved(home=self._home(profile="work"), simulated=True)
+        cli_start.run_start(_args())
+        out = capsys.readouterr().out
+        assert "(simulated; this command finds no home)" in out
+        assert f"--tag {self.TAG} --region eu-west-1 --profile work" in out
+
+    def test_a_planted_name_is_replaced_by_the_tags_own(self, host, capsys) -> None:
+        self._moved(home=self._home(name="\x1b]0;owned\x07 Evil"))
+        cli_start.run_start(_args())
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "Your home in the cloud: Kiro Crew Cloud (kc-4d5e6f)" in out
+
+    @pytest.mark.parametrize("bad", [{"tag": "kc;rm -rf ~"}, {"region": ""}, {"profile": "-x"}])
+    def test_a_home_record_that_does_not_validate_prints_no_command(
+        self, host, capsys, bad
+    ) -> None:
+        self._moved(home=self._home(**bad))
+        cli_start.run_start(_args())
+        assert "Your home in the cloud" not in capsys.readouterr().out
+
+    def test_a_crew_that_never_moved_prints_nothing_about_a_home(self, host, capsys) -> None:
+        cli_start.run_start(_args())
+        assert "Your home in the cloud" not in capsys.readouterr().out

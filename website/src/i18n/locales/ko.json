@@ -9205,8 +9205,8 @@
       "error_move_in_carry_refused": "홈이 이동을 거부해 예약 작업이 계속 여기에서 실행됩니다. 옮기기를 다시 누르세요.",
       "error_move_in_chat_missing": "이 채팅이 열려 있지 않아 가져갈 수 없었습니다.",
       "error_move_in_chat_not_persistent": "이 채팅은 기록을 남기지 않아 가져갈 수 없습니다.",
-      "error_move_in_chat_busy": "지금은 이 채팅을 깔끔하게 복사하지 못했습니다. 메모리와 예약 작업은 이미 홈에 있으니 채팅을 가져가려면 옮기기를 다시 누르세요.",
-      "error_move_in_chat_failed": "홈이 이 채팅을 받지 않았습니다. 메모리와 예약 작업은 이미 그곳에 있으니 채팅을 가져가려면 옮기기를 다시 누르세요.",
+      "error_move_in_chat_busy": "지금은 이 채팅을 깔끔하게 복사하지 못했고, 아직 다른 것은 옮겨지지 않았습니다. 옮기기를 다시 누르세요.",
+      "error_move_in_chat_failed": "홈이 이 채팅을 받지 않았고, 아직 다른 것은 옮겨지지 않았습니다. 옮기기를 다시 누르세요.",
       "error_move_in_failed": "이동 중에 문제가 발생했습니다. 옮기기를 다시 누르면 멈춘 곳부터 이어집니다.",
       "error_move_in_interrupted": "이동이 중단되었습니다. 옮기기를 다시 누르면 멈춘 곳부터 이어집니다.",
       "home_moved_where": "이제 이 채팅은 홈 {{name}}에서 이어집니다.",
@@ -9219,7 +9219,16 @@
       "home_kept_home_no_store": "홈이 자신의 예약 작업 목록을 읽지 못함",
       "home_settings_kept": "홈은 자체 설정을 유지했습니다.",
       "home_reenter_secrets": "홈에서 다시 입력할 보안 비밀: {{names}}",
-      "home_reenter_connections": "홈에서 다시 설정할 연결: {{names}}"
+      "home_reenter_connections": "홈에서 다시 설정할 연결: {{names}}",
+      "home_next_time": "다음에",
+      "home_next_time_open": "홈을 다시 열려면 터미널에서 이것을 실행하세요.",
+      "home_next_time_more": "명령 더 보기",
+      "home_next_time_stop": "요금 청구 일시 중지",
+      "home_next_time_start": "일시 중지 후 다시 시작",
+      "home_next_time_status": "상태 확인",
+      "home_next_time_list": "잊어버린 홈 찾기",
+      "home_next_time_elsewhere": "다른 컴퓨터에서는 먼저 한 줄 설치로 {{productName}}을(를) 설치하고 AWS에 로그인하세요.",
+      "home_next_time_simulated": "이 명령은 시뮬레이션이며 홈을 찾지 못합니다."
     },
     "setupCardTray": {
       "needs_you": "확인 필요",

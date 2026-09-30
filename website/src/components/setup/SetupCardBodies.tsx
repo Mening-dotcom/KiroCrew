@@ -8,21 +8,20 @@
  * the gateway, but a field of the wrong type must degrade to "not shown", never
  * to a crash inside the transcript.
  */
-import { useEffect, useId, useRef, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import type React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Check, Circle, CircleCheck, CircleSlash, CircleX, Copy, ExternalLink, FlaskConical, Loader2 } from 'lucide-react'
+import { Circle, CircleCheck, CircleSlash, CircleX, ExternalLink, FlaskConical, Loader2 } from 'lucide-react'
 
 import { api } from '../../api/client'
 import type { SetupCard, SetupDecision } from '../../api/setupCards'
 import { fmtCurrency, fmtList, fmtNumber, fmtUnit } from '../../i18n/format'
 import { useImeGuard } from '../../hooks/useImeGuard'
-import { copyToClipboard } from '../../utils/clipboard'
 import ErrorNotice from '../ErrorNotice'
 import MarkdownRenderer from '../MarkdownRenderer'
 import SegmentedControl from '../SegmentedControl'
-import { Btn, Checkbox, IconButton, Input } from '../ui'
+import { Btn, Checkbox, Input } from '../ui'
 import { NativeSelect, NativeSelectOption } from '../ui/native-select'
 import {
   PrivacyCommandList,
@@ -30,6 +29,7 @@ import {
   TelemetryToggle,
   type BeaconStatus,
 } from '../PrivacyDisclosure'
+import CommandLine from './CommandLine'
 import CronPreviewApprovals from './CronPreviewApprovals'
 import { safeConsentUrl, soulFileName, type HomeLeftover } from './setupCardCopy'
 
@@ -1344,40 +1344,5 @@ function HomeSizeOptions({ name, options, selected, suggested, onPick, planType,
         </p>
       )}
     </fieldset>
-  )
-}
-
-// ── shared ─────────────────────────────────────────────────────────────────
-
-/** A command (or chat message) to copy, with a copy button beside it. */
-function CommandLine({ text, copyLabel, testId }: { text: string; copyLabel: string; testId: string }) {
-  const { t } = useTranslation()
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
-  const copy = async () => {
-    // A tick only once the text is really on the clipboard (copyToClipboard's
-    // contract): a false "copied" is worse than none.
-    if (!(await copyToClipboard(text))) return
-    setCopied(true)
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = setTimeout(() => setCopied(false), 1500)
-  }
-  return (
-    <div className="flex items-center gap-2 min-w-0 rounded-md border border-border bg-bg px-2.5 py-1.5">
-      <code className="flex-1 min-w-0 break-all font-mono text-[13px] text-text select-all" translate="no" data-testid={testId}>
-        {text}
-      </code>
-      <IconButton
-        aria-label={copied ? t('components.setupCard.copied') : copyLabel}
-        title={copied ? t('components.setupCard.copied') : copyLabel}
-        onClick={() => { void copy() }}
-        data-testid={`${testId}-copy`}
-      >
-        {copied
-          ? <Check size={14} className="text-ok" aria-hidden="true" />
-          : <Copy size={14} aria-hidden="true" />}
-      </IconButton>
-    </div>
   )
 }

@@ -9333,8 +9333,8 @@
       "error_move_in_carry_refused": "Dein Zuhause hat den Umzug abgelehnt, daher laufen die Zeitpläne weiter hier. Drücke erneut Einziehen.",
       "error_move_in_chat_missing": "Dieser Chat ist nicht geöffnet und konnte daher nicht mitgenommen werden.",
       "error_move_in_chat_not_persistent": "Dieser Chat speichert keinen Verlauf und kann daher nicht mitgenommen werden.",
-      "error_move_in_chat_busy": "Dieser Chat ließ sich gerade nicht sauber kopieren. Dein Gedächtnis und deine Zeitpläne sind schon auf deinem Zuhause; drücke erneut Einziehen, um den Chat mitzunehmen.",
-      "error_move_in_chat_failed": "Dein Zuhause hat diesen Chat nicht angenommen. Dein Gedächtnis und deine Zeitpläne sind schon dort; drücke erneut Einziehen, um den Chat mitzunehmen.",
+      "error_move_in_chat_busy": "Dieser Chat ließ sich gerade nicht sauber kopieren, und sonst ist noch nichts umgezogen. Drücke erneut Einziehen.",
+      "error_move_in_chat_failed": "Dein Zuhause hat diesen Chat nicht angenommen, und sonst ist noch nichts umgezogen. Drücke erneut Einziehen.",
       "error_move_in_failed": "Beim Umzug ist etwas schiefgegangen. Drücke erneut Einziehen; es geht dort weiter, wo es aufgehört hat.",
       "error_move_in_interrupted": "Der Umzug wurde unterbrochen. Drücke erneut Einziehen; es geht dort weiter, wo es aufgehört hat.",
       "home_moved_where": "Dieser Chat geht jetzt auf deinem Zuhause weiter, {{name}}.",
@@ -9347,7 +9347,16 @@
       "home_kept_home_no_store": "dein Zuhause konnte seine Zeitplanliste nicht lesen",
       "home_settings_kept": "Dein Zuhause hat seine eigenen Einstellungen behalten.",
       "home_reenter_secrets": "Geheimnisse, die du auf deinem Zuhause erneut eingibst: {{names}}",
-      "home_reenter_connections": "Verbindungen, die du auf deinem Zuhause erneut einrichtest: {{names}}"
+      "home_reenter_connections": "Verbindungen, die du auf deinem Zuhause erneut einrichtest: {{names}}",
+      "home_next_time": "Nächstes Mal",
+      "home_next_time_open": "Führe das in einem Terminal aus, um dein Zuhause wieder zu öffnen.",
+      "home_next_time_more": "Weitere Befehle",
+      "home_next_time_stop": "Abrechnung pausieren",
+      "home_next_time_start": "Nach einer Pause fortsetzen",
+      "home_next_time_status": "Zustand prüfen",
+      "home_next_time_list": "Ein vergessenes Zuhause finden",
+      "home_next_time_elsewhere": "Auf einem anderen Computer installierst du zuerst {{productName}} mit der Einzeiler-Einrichtung und meldest dich bei AWS an.",
+      "home_next_time_simulated": "Diese Befehle sind simuliert und finden kein Zuhause."
     },
     "setupCardTray": {
       "needs_you": "braucht dich",

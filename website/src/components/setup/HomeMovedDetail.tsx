@@ -7,7 +7,8 @@
  * value.
  *
  * Kept to a few short lines: the full account went to the agent, which tells
- * the owner in chat.
+ * the owner in chat. Last comes "Next time" (`HomeNextTime`): the command that
+ * opens the home again, and the others behind a disclosure.
  */
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
@@ -18,6 +19,7 @@ import { api } from '../../api/client'
 import { fmtList, fmtNumber } from '../../i18n/format'
 import { useSelectInstance } from '../../hooks/useSelectInstance'
 import { Btn } from '../ui'
+import CommandLine from './CommandLine'
 
 /** Where "Your crews" lives (Settings → Remote Crew). */
 const YOUR_CREWS_PATH = '/settings/instances'
@@ -49,6 +51,74 @@ function nameList(names: string[]): string {
   const shown = names.slice(0, LISTED_NAMES)
   const rest = names.length - shown.length
   return fmtList(rest > 0 ? [...shown, `+${fmtNumber(rest)}`] : shown)
+}
+
+/**
+ * `cloud.reconnect`'s purposes other than opening the home → their label. The
+ * KEYS are wire values; a purpose not listed here is not shown.
+ */
+const OTHER_PURPOSE_KEY = {
+  stop: 'components.setupCard.home_next_time_stop',
+  start: 'components.setupCard.home_next_time_start',
+  status: 'components.setupCard.home_next_time_status',
+  list: 'components.setupCard.home_next_time_list',
+} as const
+
+type OtherPurpose = keyof typeof OTHER_PURPOSE_KEY
+
+interface ReconnectCommand { purpose: string; command: string }
+
+function reconnectCommands(raw: unknown): ReconnectCommand[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((c): ReconnectCommand[] => {
+    if (!c || typeof c !== 'object') return []
+    const { purpose, command } = c as { purpose?: unknown; command?: unknown }
+    return typeof purpose === 'string' && typeof command === 'string' && command
+      ? [{ purpose, command }]
+      : []
+  })
+}
+
+/**
+ * "Next time": how the owner reaches the home again, from the committed
+ * outcome's `reconnect` (setup_move_in.reach_back). The commands carry no token
+ * or URL: `kirocrew cloud connect` gets a fresh sign-in over SSM each time. A
+ * simulated home's commands are shown too, marked as finding nothing.
+ */
+export function HomeNextTime({ outcome, simulated = false }: { outcome: Record<string, unknown>; simulated?: boolean }) {
+  const { t } = useTranslation()
+  const commands = reconnectCommands(outcome.reconnect)
+  const open = commands.find(c => c.purpose === 'open')
+  if (!open) return null
+  const others = commands.filter((c): c is ReconnectCommand & { purpose: OtherPurpose } =>
+    Object.prototype.hasOwnProperty.call(OTHER_PURPOSE_KEY, c.purpose))
+  const copyLabel = t('components.setupCard.copy_command')
+  return (
+    <div className="mt-1.5 flex flex-col gap-1 min-w-0" data-testid="setup-card-home-next-time">
+      <span className="font-medium text-text">{t('components.setupCard.home_next_time')}</span>
+      {simulated && (
+        <span className="text-warn" data-testid="setup-card-home-next-time-simulated">
+          {t('components.setupCard.home_next_time_simulated')}
+        </span>
+      )}
+      <span>{t('components.setupCard.home_next_time_open')}</span>
+      <CommandLine text={open.command} copyLabel={copyLabel} testId="setup-card-home-next-time-open" />
+      {others.length > 0 && (
+        <details data-testid="setup-card-home-next-time-more">
+          <summary className="cursor-pointer text-accent">{t('components.setupCard.home_next_time_more')}</summary>
+          <ul className="mt-1 flex flex-col gap-1.5 min-w-0">
+            {others.map(c => (
+              <li key={c.purpose} className="flex flex-col gap-0.5 min-w-0">
+                <span>{t(OTHER_PURPOSE_KEY[c.purpose])}</span>
+                <CommandLine text={c.command} copyLabel={copyLabel} testId={`setup-card-home-next-time-${c.purpose}`} />
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <span data-testid="setup-card-home-next-time-elsewhere">{t('components.setupCard.home_next_time_elsewhere')}</span>
+    </div>
+  )
 }
 
 export default function HomeMovedDetail({ outcome }: { outcome: Record<string, unknown> }) {
@@ -120,6 +190,7 @@ export default function HomeMovedDetail({ outcome }: { outcome: Record<string, u
           {t('components.setupCard.home_reenter_connections', { names: nameList(connections) })}
         </div>
       )}
+      <HomeNextTime outcome={outcome} />
     </div>
   )
 }

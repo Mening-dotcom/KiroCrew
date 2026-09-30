@@ -9205,8 +9205,8 @@
       "error_move_in_carry_refused": "ホームが移動を拒否したため、スケジュールは引き続きここで動いています。もう一度「移動する」を押してください。",
       "error_move_in_chat_missing": "このチャットは開いていないため、持っていけませんでした。",
       "error_move_in_chat_not_persistent": "このチャットは履歴を保存しないため、持っていけません。",
-      "error_move_in_chat_busy": "今はこのチャットをきれいにコピーできませんでした。メモリーとスケジュールはすでにホームにあるので、チャットを持っていくにはもう一度「移動する」を押してください。",
-      "error_move_in_chat_failed": "ホームがこのチャットを受け取りませんでした。メモリーとスケジュールはすでにそこにあるので、チャットを持っていくにはもう一度「移動する」を押してください。",
+      "error_move_in_chat_busy": "今はこのチャットをきれいにコピーできず、ほかにはまだ何も移動していません。もう一度「移動する」を押してください。",
+      "error_move_in_chat_failed": "ホームがこのチャットを受け取らず、ほかにはまだ何も移動していません。もう一度「移動する」を押してください。",
       "error_move_in_failed": "移動中に問題が発生しました。もう一度「移動する」を押すと、止まったところから再開します。",
       "error_move_in_interrupted": "移動が中断されました。もう一度「移動する」を押すと、止まったところから再開します。",
       "home_moved_where": "このチャットは今、ホーム {{name}} で続いています。",
@@ -9219,7 +9219,16 @@
       "home_kept_home_no_store": "ホームが自分のスケジュール一覧を読めなかったため",
       "home_settings_kept": "ホームは独自の設定を保持しました。",
       "home_reenter_secrets": "ホームで再入力するシークレット：{{names}}",
-      "home_reenter_connections": "ホームで再設定する接続：{{names}}"
+      "home_reenter_connections": "ホームで再設定する接続：{{names}}",
+      "home_next_time": "次回",
+      "home_next_time_open": "ホームをもう一度開くには、ターミナルでこれを実行してください。",
+      "home_next_time_more": "その他のコマンド",
+      "home_next_time_stop": "課金を一時停止",
+      "home_next_time_start": "一時停止から再開",
+      "home_next_time_status": "状態を確認",
+      "home_next_time_list": "忘れたホームを探す",
+      "home_next_time_elsewhere": "別のコンピューターでは、先に 1 行のセットアップで {{productName}} をインストールし、AWS にサインインしてください。",
+      "home_next_time_simulated": "これらのコマンドはシミュレーションで、ホームは見つかりません。"
     },
     "setupCardTray": {
       "needs_you": "対応が必要",

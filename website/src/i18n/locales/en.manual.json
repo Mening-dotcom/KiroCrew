@@ -3750,8 +3750,8 @@
       "error_move_in_carry_refused": "Your home refused the move, so the schedules still run here. Press Move in again.",
       "error_move_in_chat_missing": "This chat is not open, so it could not be brought along.",
       "error_move_in_chat_not_persistent": "This chat keeps no transcript, so it cannot be brought along.",
-      "error_move_in_chat_busy": "This chat could not be copied cleanly just now. Your memory and schedules are already on your home, so press Move in again to bring the chat.",
-      "error_move_in_chat_failed": "Your home did not take this chat. Your memory and schedules are already there, so press Move in again to bring the chat.",
+      "error_move_in_chat_busy": "This chat could not be copied cleanly just now, and nothing else has moved yet. Press Move in again.",
+      "error_move_in_chat_failed": "Your home did not take this chat, and nothing else has moved yet. Press Move in again.",
       "error_move_in_failed": "Something went wrong while moving. Press Move in again; it picks up where it stopped.",
       "error_move_in_interrupted": "The move was interrupted. Press Move in again; it picks up where it stopped.",
       "home_moved_where": "This chat now continues on your home, {{name}}.",
@@ -3764,7 +3764,16 @@
       "home_kept_home_no_store": "your home could not read its schedule list",
       "home_settings_kept": "Your home kept its own settings.",
       "home_reenter_secrets": "Secrets to enter again on your home: {{names}}",
-      "home_reenter_connections": "Connections to set up again on your home: {{names}}"
+      "home_reenter_connections": "Connections to set up again on your home: {{names}}",
+      "home_next_time": "Next time",
+      "home_next_time_open": "Run this in a terminal to open your home again.",
+      "home_next_time_more": "More commands",
+      "home_next_time_stop": "Pause billing",
+      "home_next_time_start": "Resume after a pause",
+      "home_next_time_status": "Check its state",
+      "home_next_time_list": "Find a home you forgot",
+      "home_next_time_elsewhere": "On another computer, install {{productName}} with the one-line setup and sign in to AWS first.",
+      "home_next_time_simulated": "These commands are simulated and will not find a home."
     },
     "setupCardTray": {
       "needs_you": "needs you",

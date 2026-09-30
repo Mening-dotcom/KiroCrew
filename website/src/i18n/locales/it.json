@@ -9461,8 +9461,8 @@
       "error_move_in_carry_refused": "La tua casa ha rifiutato il trasferimento, quindi le pianificazioni continuano a girare qui. Premi di nuovo Trasferisciti.",
       "error_move_in_chat_missing": "Questa chat non è aperta, quindi non è stato possibile portarla.",
       "error_move_in_chat_not_persistent": "Questa chat non conserva la trascrizione, quindi non si può portare.",
-      "error_move_in_chat_busy": "Questa chat non si è potuta copiare in modo coerente in questo momento. La tua memoria e le tue pianificazioni sono già sulla tua casa, quindi premi di nuovo Trasferisciti per portare la chat.",
-      "error_move_in_chat_failed": "La tua casa non ha accettato questa chat. La tua memoria e le tue pianificazioni sono già lì, quindi premi di nuovo Trasferisciti per portare la chat.",
+      "error_move_in_chat_busy": "Questa chat non si è potuta copiare in modo coerente in questo momento, e nient’altro è stato ancora spostato. Premi di nuovo Trasferisciti.",
+      "error_move_in_chat_failed": "La tua casa non ha accettato questa chat, e nient’altro è stato ancora spostato. Premi di nuovo Trasferisciti.",
       "error_move_in_failed": "Qualcosa è andato storto durante il trasferimento. Premi di nuovo Trasferisciti; riprende da dove si era fermato.",
       "error_move_in_interrupted": "Il trasferimento è stato interrotto. Premi di nuovo Trasferisciti; riprende da dove si era fermato.",
       "home_moved_where": "Questa chat ora continua sulla tua casa, {{name}}.",
@@ -9475,7 +9475,16 @@
       "home_kept_home_no_store": "la tua casa non è riuscita a leggere il suo elenco di pianificazioni",
       "home_settings_kept": "La tua casa ha mantenuto le sue impostazioni.",
       "home_reenter_secrets": "Segreti da reinserire sulla tua casa: {{names}}",
-      "home_reenter_connections": "Connessioni da riconfigurare sulla tua casa: {{names}}"
+      "home_reenter_connections": "Connessioni da riconfigurare sulla tua casa: {{names}}",
+      "home_next_time": "La prossima volta",
+      "home_next_time_open": "Esegui questo in un terminale per riaprire la tua casa.",
+      "home_next_time_more": "Altri comandi",
+      "home_next_time_stop": "Sospendi la fatturazione",
+      "home_next_time_start": "Riprendi dopo una pausa",
+      "home_next_time_status": "Controlla il suo stato",
+      "home_next_time_list": "Trova una casa dimenticata",
+      "home_next_time_elsewhere": "Su un altro computer, installa prima {{productName}} con la configurazione in una riga e accedi ad AWS.",
+      "home_next_time_simulated": "Questi comandi sono simulati e non troveranno nessuna casa."
     },
     "setupCardTray": {
       "needs_you": "ha bisogno di te",

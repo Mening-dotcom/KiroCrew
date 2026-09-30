@@ -177,8 +177,8 @@ describe('home card — a live move-in', () => {
     ['move_in_carry_failed', 'Your home did not confirm the move'],
     ['move_in_chat_missing', 'This chat is not open'],
     ['move_in_chat_not_persistent', 'This chat keeps no transcript'],
-    ['move_in_chat_busy', 'could not be copied cleanly just now'],
-    ['move_in_chat_failed', 'Your home did not take this chat.'],
+    ['move_in_chat_busy', 'could not be copied cleanly just now, and nothing else has moved yet'],
+    ['move_in_chat_failed', 'Your home did not take this chat, and nothing else has moved yet.'],
     ['move_in_failed', 'Something went wrong while moving.'],
     ['move_in_interrupted', 'The move was interrupted.'],
   ])('says %s in the owner’s language', async (code, text) => {
@@ -243,6 +243,58 @@ describe('home card — a live move-in', () => {
     renderHomeCard(home({ status: 'committed', outcome: { moved: true, simulated: true } }))
     expect(await screen.findByTestId('setup-card-result-detail')).toHaveTextContent('Simulated move')
     expect(screen.queryByTestId('setup-card-home-moved')).toBeNull()
+  })
+
+  const RECONNECT = [
+    { purpose: 'open', command: 'kirocrew cloud connect --tag kc-4d5e6f --region eu-west-1' },
+    { purpose: 'stop', command: 'kirocrew cloud stop --tag kc-4d5e6f --region eu-west-1' },
+    { purpose: 'start', command: 'kirocrew cloud start --tag kc-4d5e6f --region eu-west-1' },
+    { purpose: 'status', command: 'kirocrew cloud status --tag kc-4d5e6f --region eu-west-1' },
+    { purpose: 'list', command: 'kirocrew cloud list --region eu-west-1' },
+    { purpose: 'someday', command: 'kirocrew cloud future-verb' },
+  ]
+
+  it('"Next time": the open command with a copy button, the rest behind a disclosure, and another computer', async () => {
+    renderHomeCard(home({
+      status: 'committed',
+      outcome: { moved: true, home: { instance_id: 'inst-1', name: 'nova-home' }, reconnect: RECONNECT },
+    }))
+    const next = await screen.findByTestId('setup-card-home-next-time')
+    expect(next).toHaveTextContent('Next time')
+    expect(screen.getByTestId('setup-card-home-next-time-open'))
+      .toHaveTextContent('kirocrew cloud connect --tag kc-4d5e6f --region eu-west-1')
+    expect(screen.getByTestId('setup-card-home-next-time-open-copy')).toHaveAccessibleName('Copy command')
+    const more = screen.getByTestId('setup-card-home-next-time-more')
+    expect(more.tagName).toBe('DETAILS')
+    expect(more).not.toHaveAttribute('open')
+    expect(within(more).getByText('More commands')).toBeInTheDocument()
+    expect(within(more).getByText('Pause billing')).toBeInTheDocument()
+    expect(within(more).getByTestId('setup-card-home-next-time-stop'))
+      .toHaveTextContent('kirocrew cloud stop --tag kc-4d5e6f --region eu-west-1')
+    expect(within(more).getByTestId('setup-card-home-next-time-list'))
+      .toHaveTextContent('kirocrew cloud list --region eu-west-1')
+    // A purpose this build does not know is not shown.
+    expect(next).not.toHaveTextContent('future-verb')
+    expect(screen.getByTestId('setup-card-home-next-time-elsewhere')).toHaveTextContent(
+      'On another computer, install Kiro Crew with the one-line setup and sign in to AWS first.',
+    )
+    expect(screen.queryByTestId('setup-card-home-next-time-simulated')).toBeNull()
+  })
+
+  it('a simulated move shows the commands too, saying plainly they will not find a home', async () => {
+    renderHomeCard(home({ status: 'committed', outcome: { moved: true, simulated: true, reconnect: RECONNECT } }))
+    expect(await screen.findByTestId('setup-card-result-detail')).toHaveTextContent('Simulated move')
+    expect(screen.getByTestId('setup-card-home-next-time-simulated'))
+      .toHaveTextContent('These commands are simulated and will not find a home.')
+    expect(screen.getByTestId('setup-card-home-next-time-open'))
+      .toHaveTextContent('kirocrew cloud connect --tag kc-4d5e6f --region eu-west-1')
+    expect(screen.queryByTestId('setup-card-home-moved')).toBeNull()
+  })
+
+  it('no reconnect commands, no "Next time"', async () => {
+    renderHomeCard(home({ status: 'committed', outcome: { moved: true, home: { name: 'nova-home' }, reconnect: [] } }))
+    await screen.findByTestId('setup-card-home-moved')
+    expect(screen.queryByTestId('setup-card-home-next-time')).toBeNull()
   })
 
   it('without an instance id, "Open your home" goes to Your crews', async () => {

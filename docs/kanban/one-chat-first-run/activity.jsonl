@@ -473,3 +473,7 @@
 {"timestamp":"2026-09-29T21:02:53.63871072Z","action":"handoff","task_id":126,"detail":"P2.24 The pinned user prompt must not cover the row under it"}
 {"timestamp":"2026-09-29T21:02:53.639220607Z","action":"release","task_id":126,"detail":"P2.24 The pinned user prompt must not cover the row under it"}
 {"timestamp":"2026-09-29T21:03:37.777313601Z","action":"move","task_id":127,"detail":"in-progress -\u003e review"}
+{"timestamp":"2026-09-30T15:17:54.062115997Z","action":"create","task_id":128,"detail":"PN.25 After Move in: the commands to reach the home next time"}
+{"timestamp":"2026-09-30T16:18:16.568655573Z","action":"move","task_id":128,"detail":"in-progress -\u003e review"}
+{"timestamp":"2026-09-30T16:18:16.569730556Z","action":"handoff","task_id":128,"detail":"PN.25 After Move in: the commands to reach the home next time"}
+{"timestamp":"2026-09-30T16:18:16.570091805Z","action":"release","task_id":128,"detail":"PN.25 After Move in: the commands to reach the home next time"}

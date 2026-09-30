@@ -256,13 +256,27 @@ def dispatched(monkeypatch):
     return calls
 
 
-def _ready_home_card() -> sc.SetupCard:
+#: The launch job a card build records (``private.job_id``); the store's id shape.
+LAUNCH_JOB_ID = "0123456789ab"
+HOME_TAG = "kc-4d5e6f"
+
+
+def _saved_launch(tag: str = HOME_TAG, region: str = "us-east-1", profile: str = "") -> None:
+    """The launch record the card's build left, as ``handlers_cloud``'s store keeps it."""
+    from kiro_crew.cloud.launch_job import LaunchJob, LaunchJobStore
+
+    LaunchJobStore().save(
+        LaunchJob(id=LAUNCH_JOB_ID, profile=profile, region=region, size_key="light", tag=tag)
+    )
+
+
+def _ready_home_card(job_id: str = "lj-1") -> sc.SetupCard:
     card = sc.create_card(
         slot="chat-1-1",
         session_key="dashboard:chat-1-1",
         kind=sc.KIND_HOME,
         payload={"simulated": False, "region": "us-east-1"},
-        private={"phase": "move", "instance_id": HOME_EC2_ID, "job_id": "lj-1"},
+        private={"phase": "move", "instance_id": HOME_EC2_ID, "job_id": job_id},
     )
 
     def _ready(c: sc.SetupCard) -> None:
@@ -359,6 +373,64 @@ class TestHappyPath:
         store = (data_home() / "setup" / sc.CARDS_FILE).read_text()
         for where in (text, store, json.dumps(state.events)):
             assert SENTINEL_SECRET not in where
+
+
+class TestNextTime:
+    """The committed move names the commands that reach the home again."""
+
+    @pytest.mark.asyncio
+    async def test_the_outcome_carries_the_commands_and_the_agent_gets_the_open_one(
+        self, state, exported, dispatched
+    ):
+        _saved_launch()
+        moved = await _move(state, _ready_home_card(LAUNCH_JOB_ID))
+        assert moved.status == sc.STATUS_COMMITTED, moved.error
+
+        where = f"--tag {HOME_TAG} --region us-east-1"
+        assert moved.outcome["reconnect"] == [
+            {"purpose": "open", "command": f"kirocrew cloud connect {where}"},
+            {"purpose": "stop", "command": f"kirocrew cloud stop {where}"},
+            {"purpose": "start", "command": f"kirocrew cloud start {where}"},
+            {"purpose": "status", "command": f"kirocrew cloud status {where}"},
+            {"purpose": "list", "command": "kirocrew cloud list --region us-east-1"},
+        ]
+        home = moved.outcome["home"]
+        assert (home["tag"], home["region"], home["profile"]) == (HOME_TAG, "us-east-1", "")
+        assert home["name"] == HOME_NAME and home["instance_id"] == HOME_REG_ID
+        # A real move-in switches the window to the home's chat, so no result
+        # turn is posted here; the open line rides the result text that travels
+        # to the home instead.
+        text = setup_move_in.result_detail(moved.outcome)
+        assert f"`kirocrew cloud connect {where}`" in text
+        assert "in one line" in text
+        assert "token" not in json.dumps(moved.outcome["reconnect"])
+
+    @pytest.mark.asyncio
+    async def test_the_homes_copy_of_the_card_carries_them_too(self, state, exported, dispatched):
+        # After the move the owner is switched to the chat's copy on the home, so
+        # the card they see there is the receipt the arrival completes.
+        _saved_launch()
+        moved = await _move(state, _ready_home_card(LAUNCH_JOB_ID))
+        assert moved.status == sc.STATUS_COMMITTED, moved.error
+        arrival = state.instances_manager.arrivals[-1]["outcome"]
+        assert arrival["reconnect"] == moved.outcome["reconnect"]
+        assert (arrival["home"]["tag"], arrival["home"]["region"]) == (HOME_TAG, "us-east-1")
+
+    @pytest.mark.asyncio
+    async def test_a_named_profile_rides_every_command(self, state, exported, dispatched):
+        _saved_launch(profile="work")
+        moved = await _move(state, _ready_home_card(LAUNCH_JOB_ID))
+        assert all(c["command"].endswith("--profile work") for c in moved.outcome["reconnect"])
+
+    @pytest.mark.asyncio
+    async def test_a_launch_record_that_no_longer_reads_gives_no_command(
+        self, state, exported, dispatched
+    ):
+        _saved_launch(tag="kc bad;tag")
+        moved = await _move(state, _ready_home_card(LAUNCH_JOB_ID))
+        assert moved.status == sc.STATUS_COMMITTED
+        assert moved.outcome["reconnect"] == []
+        assert "To open the home again" not in setup_move_in.result_detail(moved.outcome)
 
 
 class TestCarryFailure:

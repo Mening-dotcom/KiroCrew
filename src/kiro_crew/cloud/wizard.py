@@ -25,6 +25,7 @@ from kiro_crew.cloud.aws import AWSError
 from kiro_crew.cloud.config import DEFAULT_REGION
 from kiro_crew.cloud.launch_state import LaunchState
 from kiro_crew.cloud.login_target import KiroLoginTarget, LoginTargetError
+from kiro_crew.cloud.reconnect import home_name
 from kiro_crew.validation import ValidationError
 
 _TOTAL_STEPS = 6
@@ -679,7 +680,7 @@ def launch(
     # SSH key / inbound port / ~/.ssh/config.
     connect_mod.register_instance(
         instance_id,
-        name=f"Kiro Crew Cloud ({result.tag})",
+        name=home_name(result.tag),
         profile=profile,
         region=region,
     )
