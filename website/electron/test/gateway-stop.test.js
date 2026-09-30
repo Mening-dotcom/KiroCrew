@@ -753,6 +753,19 @@ test("classifyPortOwner: ours wins when a mixed set holds the port", async () =>
 test("classifyPortOwner and forceStopPort share one KiroCrew matcher", async () => {
   // Drift between the two would let one mis-target a stranger's process.
   assert.ok(isKirocrewCommand("python -m kiro_crew gateway"));
+  // A repackaged distribution runs the same wrapper as a distribution-scoped
+  // backend module (`-m kirocrew_amazon`). It is a named member of the backend
+  // module allowlist and must be adopted, not classified foreign (issue #15390).
+  // The observed launchd form prefixes `-s -P` flags, which are skipped like any
+  // option.
+  assert.ok(isKirocrewCommand("python -m kirocrew_amazon gateway"));
+  assert.ok(isKirocrewCommand("/res/backend-dist/bin/python3.12 -s -P -m kirocrew_amazon gateway --no-open"));
+  // The module name is an exact allowlist, not a prefix: a module not named in
+  // it stays foreign, so a same-user rival cannot claim ownership via `-m` — not
+  // an unrelated stdlib module, and not an unshipped `kirocrew`-prefixed name.
+  assert.ok(!isKirocrewCommand("python -m http.server 5476"));
+  assert.ok(!isKirocrewCommand("python -m evil gateway"));
+  assert.ok(!isKirocrewCommand("python -m kirocrew_evil gateway"));
   assert.ok(isKirocrewCommand("/Applications/KiroCrew.app/.../kirocrew"));
   assert.ok(!isKirocrewCommand("ssh -NL 5476:localhost:5476 host"));
   assert.ok(!isKirocrewCommand("ssh -NL 5476:localhost:5476 kirocrew"));

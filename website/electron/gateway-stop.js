@@ -17,6 +17,15 @@ const path = require("path");
 const KIROCREW_EXE_NAMES = new Set(["kirocrew", "kirocrew-backend"]);
 const PYTHON_EXE_RE = /^(?:python(?:\d+(?:\.\d+)*)?w?|py)$/i;
 
+// The backend modules a `python -m <module>` selector may name and still be ours.
+// The open-source build runs `-m kiro_crew`; a repackaged distribution runs a
+// distribution-scoped module. This is an exact-name allowlist, not a prefix
+// pattern: only a module named here authorises adoption or a force-stop, so an
+// unrelated `-m http.server`, `-m evil`, or any other `kirocrew`-prefixed module
+// nobody ships stays foreign. Add a distribution's module by name when it ships,
+// mirroring the KIROCREW_EXE_NAMES idiom above.
+const KIROCREW_MODULE_NAMES = new Set(["kiro_crew", "kirocrew_amazon"]);
+
 function commandLineTokens(commandLine) {
   const tokens = [];
   const input = String(commandLine || "").replace(/^\s*CommandLine=/i, "").trim();
@@ -127,7 +136,7 @@ function isKirocrewCommand(
 
   while (index < tokens.length) {
     const token = tokens[index];
-    if (token === "-m") return tokens[index + 1] === "kiro_crew";
+    if (token === "-m") return KIROCREW_MODULE_NAMES.has(tokens[index + 1]);
     if (token === "-c" || token === "-") return false;
     if (token === "--") {
       index += 1;
