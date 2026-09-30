@@ -259,7 +259,6 @@ export default function MembersPageTabBar({
               {section.items.map(item => (
                 <DropdownMenuItem
                   key={item.kind}
-                  className="gap-2.5 py-2"
                   onSelect={() => openMenuItem(item.kind)}
                 >
                   <span className="text-muted shrink-0">{item.icon}</span>
@@ -274,7 +273,6 @@ export default function MembersPageTabBar({
               {panelTabDescriptors.map((d: PanelTabDescriptor) => (
                 <DropdownMenuItem
                   key={d.kind}
-                  className="gap-2.5 py-2"
                   onSelect={() => guardLeave(() => openPanelTab(d))}
                 >
                   <span className="text-muted shrink-0">{appIcon(d.icon)}</span>
