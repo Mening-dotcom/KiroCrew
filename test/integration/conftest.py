@@ -128,6 +128,9 @@ cross-home flake three tests later.
      ``auto_update_effect``, read from the boot's install root and policy; a
      stale one is served on the next boot's status frames, and it is also what
      arms the status path's background re-derivation.
+   * ``image_ledger._STORE`` -- the live ``SessionMap`` the session manager
+     registers as the prompt path's durable image-ledger store; a stale one
+     would persist the next boot's ledgers into the previous home's map.
    * ``browser_cli.launch._warned_lifecycle_losses`` -- the warn-once set for
      browser-socket lifecycle losses; carried across boots it would silence
      the second boot's first diagnostic.
@@ -218,6 +221,7 @@ from kiro_crew import (
     autonudge,
     crash_guard,
     embeddings,
+    image_ledger,
     memory_startup,
     safety_override,
     sandbox,
@@ -718,6 +722,7 @@ def _reset_home_bound_globals() -> None:
     dashboard_updates._auto_effect = None
     dashboard_updates._auto_effect_task = None
     browser_launch._warned_lifecycle_losses.clear()
+    image_ledger.set_image_ledger_store(None)
     live_nudge = autonudge._INSTANCE
     if live_nudge is not None:
         with contextlib.suppress(Exception):
@@ -743,6 +748,7 @@ def home_bound_globals_are_clear() -> bool:
         and not sandbox._SHIM_ARGV_CACHE
         and dashboard_updates._auto_effect is None
         and not browser_launch._warned_lifecycle_losses
+        and image_ledger._STORE is None
     )
 
 
