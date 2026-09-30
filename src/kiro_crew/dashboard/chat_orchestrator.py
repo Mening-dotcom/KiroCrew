@@ -15,6 +15,7 @@ from aiohttp import web
 
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.config.sections import OrchestratorConfig
+from kiro_crew.constants import OPTIONS_RE_TRAILER
 from kiro_crew.context_management import MAX_STAGE_ROUNDS, OrchestrationTracker
 from kiro_crew.dashboard.chat_runner import (
     _deliver_cross_surface_reply,
@@ -235,6 +236,43 @@ def _collect_stage_result_parts(slot: "_ChatSlot") -> tuple[str, ...]:
             result_parts.append(m.get("content", ""))
     result_parts.reverse()
     return tuple(result_parts)
+
+
+def _stage_awaits_user_input(slot: "_ChatSlot") -> bool:
+    """True when a consumed stage turn ended by asking the user, not by finishing.
+
+    A stage turn is CONSUMED once its prompt reached the model and produced a
+    turn (see ``_report_consumed`` in ``chat_runner``); that says nothing about
+    whether the turn concluded the stage's work or handed it back to the user.
+    A turn that ends by posing a question consumes its prompt exactly as a turn
+    that finishes the work does, so capturing on consumption alone counts a
+    question turn as a completed stage and (under Go All) silently rolls past
+    it. This is the orchestrator half of the harness-side "don't yield with work
+    unfinished" contract: don't COUNT a blocked / question turn as completed.
+
+    Two machine signals, both read off live slot state on the loop:
+
+    * ``slot._question_pending`` — a non-empty ask_question round-trip. The card
+      is on screen and its answer arrives as the user's next message, so the
+      stage is waiting on that answer, not done.
+    * A trailing ``[OPTIONS: ...]`` marker on the stage's own newest assistant
+      output — the agent posed a choice. Parsed by the canonical
+      :data:`OPTIONS_RE_TRAILER`, which anchors the marker at the message end.
+      The plan's own control row is ``[OPTION: Go | Go All | Cancel]``
+      (singular ``OPTION``, no labels list), so it never matches this ``OPTIONS``
+      trailer and a plan boundary is not mistaken for a stage question.
+
+    Only the stage's OWN output is inspected (``_collect_stage_result_parts``
+    stops at this stage's separator), so an ``[OPTIONS:]`` an earlier stage left
+    in the transcript cannot pause a later one.
+    """
+    if slot._question_pending:
+        return True
+    for text in reversed(_collect_stage_result_parts(slot)):
+        if not text.strip():
+            continue
+        return OPTIONS_RE_TRAILER.search(text) is not None
+    return False
 
 
 def _write_stage_result(
@@ -1625,6 +1663,26 @@ async def _stage_loop(
                 # re-enters this same stage with a fresh boundary generation.
                 stage_boundary_for(slot).clear()
                 slot._last_turn_auth_required = False
+            elif _stage_awaits_user_input(slot):
+                # Re-entry (a later Go) on a stage this run paused for a pending
+                # question. If the user has not resolved it — the ask_question
+                # card is still up, or the newest stage output still ends with an
+                # [OPTIONS:] question — Go must not capture it as complete. Pause
+                # again, keeping the consumed boundary for the next Go, so the
+                # question can only be advanced past once it is actually answered.
+                slot._auto_run = False
+                _halt_plan(
+                    state,
+                    slot,
+                    f"⏸️ Stage {pending_stage} is still waiting for your input — "
+                    "answer its question, then send Go to continue the plan.",
+                    event_type="auto_run_stage_awaiting_input",
+                    operation="stage_awaiting_user_input",
+                    stage_num=pending_stage,
+                )
+                _paused = True
+                # stage-boundary-exit: pending-awaits-input owned
+                return
             else:
                 captured, can_continue = await _settle_and_capture_stage(
                     state,
@@ -1981,6 +2039,32 @@ async def _stage_loop(
                 _preserve_interrupted_stage()
                 # stage-boundary-exit: stopped-before-capture owned
                 break
+
+            if _stage_awaits_user_input(slot):
+                # The stage turn ran but handed the work back to the user: it
+                # posed an ask_question card or ended with an [OPTIONS:]
+                # question. Capturing here would count that as a completed
+                # stage and, under Go All, advance past it in silence. Pause
+                # instead, preserving the (consumed) boundary so the user's
+                # answer continues THIS stage; a later Go re-enters, re-reads
+                # the newest output, and only advances once the question is
+                # resolved. Applies to manual Go too — a blocked stage is not
+                # complete regardless of how the plan is being stepped.
+                slot._auto_run = False
+                _preserve_interrupted_stage()
+                _halt_plan(
+                    state,
+                    slot,
+                    f"⏸️ Stage {stage_num} is waiting for your input — it ended "
+                    "with a question rather than finishing. Answer it, then send "
+                    "Go to continue the plan.",
+                    event_type="auto_run_stage_awaiting_input",
+                    operation="stage_awaiting_user_input",
+                    stage_num=stage_num,
+                )
+                _paused = True
+                # stage-boundary-exit: stage-awaits-input owned
+                return
 
             captured, can_continue = await _settle_and_capture_stage(
                 state,

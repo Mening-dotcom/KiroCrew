@@ -2129,6 +2129,7 @@ def test_stage_loop_exit_paths_declare_boundary_ownership():
         ("return", "expired-plan clear"),
         ("return", "budget-load-aborted owned"),
         ("return", "pending-retry-settle-failed owned"),
+        ("return", "pending-awaits-input owned"),
         ("return", "pending-round-cap clear"),
         ("return", "pending-capture-failed owned"),
         ("break", "slot-unregistered clear"),
@@ -2142,6 +2143,7 @@ def test_stage_loop_exit_paths_declare_boundary_ownership():
         ("return", "retry-settle-failed owned"),
         ("return", "unconsumed-stage-paused owned"),
         ("break", "stopped-before-capture owned"),
+        ("return", "stage-awaits-input owned"),
         ("break", "stage-round-cap clear"),
         ("break", "stage-capture-failed owned"),
         ("return", "manual-stage-pause clear"),
@@ -2566,3 +2568,208 @@ async def test_settlement_wait_exhaustion_halt_is_not_held_by_a_slow_cancel(tmp_
     for _ in range(20):
         await asyncio.sleep(0)
     assert manager.cancel_for_boundary.await_count == 1
+
+
+def test_stage_awaits_user_input_detects_question_signals(tmp_path):
+    """A pending ask_question card or a trailing [OPTIONS:] marks a stage unfinished."""
+    from kiro_crew.dashboard.chat_orchestrator import _stage_awaits_user_input
+
+    state = _make_state(tmp_path)
+    slot = state.get_or_create_slot("awaits-input-detect", mode="orchestrator")
+    slot.append("assistant", "\n───── Stage 1 ─────\n", "msg msg-a stage-sep")
+
+    # A finished stage: plain output, no pending card, no trailing marker.
+    slot.append("assistant", "Collected the data and wrote the summary.", "msg msg-a")
+    assert _stage_awaits_user_input(slot) is False
+
+    # The agent posed a choice — the marker is the stage's newest output.
+    slot.append(
+        "assistant",
+        "Two backends fit. Which one?\n\n[OPTIONS: Use Postgres | Use SQLite]",
+        "msg msg-a",
+    )
+    assert _stage_awaits_user_input(slot) is True
+
+    # A later plain line resolves the question again.
+    slot.append("assistant", "Going with Postgres.", "msg msg-a")
+    assert _stage_awaits_user_input(slot) is False
+
+    # A pending ask_question card is the other awaiting-human signal.
+    slot._question_pending = {"card-1": {"blocking": False}}
+    assert _stage_awaits_user_input(slot) is True
+
+
+def test_stage_awaits_user_input_ignores_plan_control_row(tmp_path):
+    """The plan's own [OPTION: Go | Go All | Cancel] row is not a stage question."""
+    from kiro_crew.dashboard.chat_orchestrator import _stage_awaits_user_input
+
+    state = _make_state(tmp_path)
+    slot = state.get_or_create_slot("awaits-input-plan-row", mode="orchestrator")
+    slot.append("assistant", "\n───── Stage 1 ─────\n", "msg msg-a stage-sep")
+    slot.append(
+        "assistant",
+        "✅ Stage 1 complete. Click **Go** to proceed.\n\n[OPTION: Go | Go All | Cancel]",
+        "msg msg-a",
+    )
+    assert _stage_awaits_user_input(slot) is False
+
+
+def test_stage_awaits_input_ignores_earlier_stage_marker(tmp_path):
+    """An [OPTIONS:] left by an earlier stage cannot pause a later stage."""
+    from kiro_crew.dashboard.chat_orchestrator import _stage_awaits_user_input
+
+    state = _make_state(tmp_path)
+    slot = state.get_or_create_slot("awaits-input-earlier", mode="orchestrator")
+    slot.append("assistant", "\n───── Stage 1 ─────\n", "msg msg-a stage-sep")
+    slot.append("assistant", "Q?\n\n[OPTIONS: A | B]", "msg msg-a")
+    # Stage 2's separator ends the window; its own output is a plain finish.
+    slot.append("assistant", "\n───── Stage 2 ─────\n", "msg msg-a stage-sep")
+    slot.append("assistant", "Verified everything, no open questions.", "msg msg-a")
+    assert _stage_awaits_user_input(slot) is False
+
+
+@pytest.mark.asyncio
+async def test_go_all_pauses_on_question_stage_instead_of_advancing(tmp_path, monkeypatch):
+    """A stage ending with an [OPTIONS:] question must pause Go All, not count as done."""
+    from kiro_crew.dashboard.chat import _stage_loop
+
+    state = _make_state(tmp_path)
+    state.subagents = _StageDeliveryManager()
+    slot = state.get_or_create_slot("go-all-question-pause", mode="orchestrator")
+    slot._stage_titles = ["Collect", "Verify"]
+    slot._plan_goal = "Collect then verify"
+    slot._auto_run = True
+    order: list[str] = []
+
+    async def _mock_run_chat(_state, _slot, message, **kwargs):
+        _mark_consumed(kwargs, _slot)
+        if "Execute Stage 1 of 2 now" in message:
+            order.append("stage-1")
+            # A consumed turn that hands the work back to the user.
+            _slot.append(
+                "assistant",
+                "Which store?\n\n[OPTIONS: Postgres | SQLite]",
+                "msg msg-a",
+            )
+            return
+        if "Execute Stage 2 of 2 now" in message:
+            order.append("stage-2")
+            return
+        raise AssertionError(f"unexpected turn: {message[:80]}")
+
+    monkeypatch.setattr("kiro_crew.dashboard.chat_orchestrator._run_chat", _mock_run_chat)
+
+    await asyncio.wait_for(_stage_loop(state, slot, auto_run=True), timeout=5)
+
+    # Stage 2 never runs; Stage 1 is preserved (consumed) for the next Go.
+    assert order == ["stage-1"]
+    assert slot._auto_run is False
+    assert slot.stage_boundary.stage == 1
+    assert slot.stage_boundary.consumed is True
+    text = "\n".join(
+        str(m.get("content", "")) for m in slot.messages if m.get("role") == "assistant"
+    )
+    assert "waiting for your input" in text
+    assert not any("All 2 stages complete" in str(m.get("content", "")) for m in slot.messages)
+
+
+@pytest.mark.asyncio
+async def test_go_all_pauses_on_pending_ask_question_card(tmp_path, monkeypatch):
+    """A stage that left an ask_question card up must pause, not advance."""
+    from kiro_crew.dashboard.chat import _stage_loop
+
+    state = _make_state(tmp_path)
+    state.subagents = _StageDeliveryManager()
+    slot = state.get_or_create_slot("go-all-card-pause", mode="orchestrator")
+    slot._stage_titles = ["Collect", "Verify"]
+    slot._plan_goal = "Collect then verify"
+    slot._auto_run = True
+    order: list[str] = []
+
+    async def _mock_run_chat(_state, _slot, message, **kwargs):
+        _mark_consumed(kwargs, _slot)
+        if "Execute Stage 1 of 2 now" in message:
+            order.append("stage-1")
+            _slot.append("assistant", "I need a decision from you.", "msg msg-a")
+            _slot._question_pending = {"card-1": {"blocking": False}}
+            return
+        if "Execute Stage 2 of 2 now" in message:
+            order.append("stage-2")
+            return
+        raise AssertionError(f"unexpected turn: {message[:80]}")
+
+    monkeypatch.setattr("kiro_crew.dashboard.chat_orchestrator._run_chat", _mock_run_chat)
+
+    await asyncio.wait_for(_stage_loop(state, slot, auto_run=True), timeout=5)
+
+    assert order == ["stage-1"]
+    assert slot._auto_run is False
+    assert slot.stage_boundary.stage == 1
+
+
+@pytest.mark.asyncio
+async def test_go_reentry_on_unanswered_question_pauses_again(tmp_path, monkeypatch):
+    """A later Go on a still-pending question stage re-pauses instead of capturing."""
+    from kiro_crew.dashboard.chat import _stage_loop
+
+    state = _make_state(tmp_path)
+    state.subagents = _StageDeliveryManager()
+    slot = state.get_or_create_slot("go-reentry-unanswered", mode="orchestrator")
+    slot._stage_titles = ["Collect", "Verify"]
+    slot._plan_goal = "Collect then verify"
+    # Re-entry: Stage 1 was consumed and paused for a question that is STILL open.
+    slot.stage_boundary.arm(1, consumed=True)
+    slot.append("assistant", "\n───── Stage 1 ─────\n", "msg msg-a stage-sep")
+    slot.append("assistant", "Still need your call.\n\n[OPTIONS: A | B]", "msg msg-a")
+    order: list[str] = []
+
+    async def _mock_run_chat(_state, _slot, message, **kwargs):
+        _mark_consumed(kwargs, _slot)
+        order.append(message[:40])
+
+    monkeypatch.setattr("kiro_crew.dashboard.chat_orchestrator._run_chat", _mock_run_chat)
+
+    await asyncio.wait_for(_stage_loop(state, slot, auto_run=False), timeout=5)
+
+    # No stage ran; the boundary stays preserved for the next Go.
+    assert order == []
+    assert slot.stage_boundary.stage == 1
+    assert slot.stage_boundary.consumed is True
+    text = "\n".join(
+        str(m.get("content", "")) for m in slot.messages if m.get("role") == "assistant"
+    )
+    assert "still waiting for your input" in text
+
+
+@pytest.mark.asyncio
+async def test_go_reentry_after_answer_captures_and_advances(tmp_path, monkeypatch):
+    """Once the question is resolved, the next Go captures the stage and advances."""
+    from kiro_crew.dashboard.chat import _stage_loop
+
+    state = _make_state(tmp_path)
+    state.subagents = _StageDeliveryManager()
+    slot = state.get_or_create_slot("go-reentry-answered", mode="orchestrator")
+    slot._stage_titles = ["Collect", "Verify"]
+    slot._plan_goal = "Collect then verify"
+    # Re-entry: Stage 1 was consumed; the user has since answered, so the newest
+    # stage output is a plain resolution with no trailing marker and no card.
+    slot.stage_boundary.arm(1, consumed=True)
+    slot.append("assistant", "\n───── Stage 1 ─────\n", "msg msg-a stage-sep")
+    slot.append("assistant", "Q?\n\n[OPTIONS: A | B]", "msg msg-a")
+    slot.append("assistant", "You chose A; proceeding with A.", "msg msg-a")
+    order: list[str] = []
+
+    async def _mock_run_chat(_state, _slot, message, **kwargs):
+        _mark_consumed(kwargs, _slot)
+        if "Execute Stage 2 of 2 now" in message:
+            order.append("stage-2")
+            _slot.append("assistant", "verified", "msg msg-a")
+            return
+        raise AssertionError(f"unexpected turn: {message[:80]}")
+
+    monkeypatch.setattr("kiro_crew.dashboard.chat_orchestrator._run_chat", _mock_run_chat)
+
+    await asyncio.wait_for(_stage_loop(state, slot, auto_run=True), timeout=5)
+
+    # Stage 1 captured (no re-pause), Stage 2 ran.
+    assert order == ["stage-2"]
