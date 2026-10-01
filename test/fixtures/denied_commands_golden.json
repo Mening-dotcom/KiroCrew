@@ -409,37 +409,37 @@
   },
   {
     "id": "local-destructive-chmod-usr",
-    "pattern": "chmod.*/usr/.*",
+    "pattern": "chmod.*(?:(?<![\\w~-])(?<![^./]\\.)|\\$\\w+|/proc/[^/\\s]+/root)/usr(?![\\w.-])",
     "category": "local-destructive",
     "description": "Blocks chmod changes to /usr, which can corrupt permissions on system binaries and break the OS."
   },
   {
     "id": "local-destructive-chmod-etc",
-    "pattern": "chmod.*/etc/.*",
+    "pattern": "chmod.*(?:(?<![\\w~-])(?<![^./]\\.)|\\$\\w+|/proc/[^/\\s]+/root)/etc(?![\\w.-])",
     "category": "local-destructive",
     "description": "Blocks chmod changes to /etc, which can corrupt permissions on critical system config files and break the OS."
   },
   {
     "id": "local-destructive-chmod-sbin",
-    "pattern": "chmod.*/sbin/.*",
+    "pattern": "chmod.*(?:(?<![\\w~-])(?<![^./]\\.)|\\$\\w+|/proc/[^/\\s]+/root)/sbin(?![\\w.-])",
     "category": "local-destructive",
     "description": "Blocks chmod changes to /sbin, which can corrupt permissions on privileged system binaries and break the OS."
   },
   {
     "id": "local-destructive-chmod-boot",
-    "pattern": "chmod.*/boot/.*",
+    "pattern": "chmod.*(?:(?<![\\w~-])(?<![^./]\\.)|\\$\\w+|/proc/[^/\\s]+/root)/boot(?![\\w.-])",
     "category": "local-destructive",
     "description": "Blocks chmod changes to /boot, which can corrupt permissions on boot/kernel files and render the system unbootable."
   },
   {
     "id": "local-destructive-chmod-lib",
-    "pattern": "chmod.*/lib/.*",
+    "pattern": "chmod.*(?:(?<![\\w~-])(?<![^./]\\.)|\\$\\w+|/proc/[^/\\s]+/root)/lib(?![\\w.-])",
     "category": "local-destructive",
     "description": "Blocks chmod changes to /lib, which can corrupt permissions on shared system libraries and break the OS."
   },
   {
     "id": "local-destructive-chmod-lib64",
-    "pattern": "chmod.*/lib64/.*",
+    "pattern": "chmod.*(?:(?<![\\w~-])(?<![^./]\\.)|\\$\\w+|/proc/[^/\\s]+/root)/lib64(?![\\w.-])",
     "category": "local-destructive",
     "description": "Blocks chmod changes to /lib64, which can corrupt permissions on 64-bit shared system libraries and break the OS."
   },

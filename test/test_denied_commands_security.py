@@ -418,15 +418,22 @@ class TestSelfProtectionFlagInterposition:
         force back on. Both spellings must resolve to ``None`` (reported by
         ``_resolved_pin_ids`` as pinning nothing) rather than to an id the
         catalog cannot display or toggle, and the alias map is pinned to its EXACT
-        contents -- the one prior spelling of ``reverse-shell-nc`` -- so it cannot
-        quietly re-acquire an entry for a deleted row (a ratchet may only
-        tighten); the row that entry names must also EXIST.
+        contents -- the prior spellings of ``reverse-shell-nc`` and the six chmod
+        system-root rows -- so it cannot quietly re-acquire an entry for a deleted
+        row (a ratchet may only tighten); every row an entry names must also
+        EXIST.
         """
         from kiro_crew import security
 
         # Exact set, not a per-entry property: an alias for a deleted row (or any
         # other addition) fails here until this line is changed on purpose.
-        assert security._LEGACY_RULE_ID_BY_PATTERN == {"nc -e" + ".*": "reverse-shell-nc"}
+        assert security._LEGACY_RULE_ID_BY_PATTERN == {
+            "nc -e" + ".*": "reverse-shell-nc",
+            **{
+                f"{_CM}.*/{root}/.*": f"local-destructive-{_CM}-{root}"
+                for root in ("usr", "etc", "sbin", "boot", "lib", "lib64")
+            },
+        }
         live_ids = {r.id for r in BUILTIN_DENIED_RULES}
         for legacy, rule_id in security._LEGACY_RULE_ID_BY_PATTERN.items():
             assert rule_id in live_ids, legacy
@@ -2897,8 +2904,9 @@ class TestPermissionVerbMentionNarrowing:
             # ``NAME.mgc``.  The destination is the ``-m`` flag's argument plus a
             # suffix the operand never spells, so neither operand counting nor a
             # sink-token check reaches it.  Measured ALLOWED before ``file`` was
-            # excluded, and DENIED on ``origin/main``.
-            f"file -C -F {_CM} -m ./usr/custom.magic",
+            # excluded, and DENIED on ``origin/main``.  The magic file sits under
+            # the ROOT ``/usr``: a relative ``./usr`` no longer reads as it.
+            f"file -C -F {_CM} -m /usr/custom.magic",
             f"file -C -F {_CM} -m /usr/share/misc/magic",
             f"file -C -F {_CO} -m /etc/magic",
             f"file --compile --separator {_CM} --magic-file /usr/local/share/magic",
@@ -3032,9 +3040,6 @@ class TestPermissionVerbMentionNarrowing:
             f"xxd {_CO} /usr/local/bin/git",
             f"uniq {_CM} /usr/local/bin/git",
             f"uniq -c {_CM} /usr/local/bin/git",
-            # A bare ``-`` names stdin as the INPUT, so the next word is still
-            # the sink and must count as an operand.
-            f"xxd - {_CM}/etc/shadow",
             # ... and the writer is equally reachable as a later pipeline stage
             # or from inside a nested payload.
             f"grep -h '{_CM} 600 /etc/shadow' f | xxd a b",
@@ -3498,6 +3503,75 @@ class TestPermissionVerbMentionNarrowing:
         they are today.
         """
         assert _perm_verb_mention._perm_verb_mention_only(f"grep foo{_CM}bar /etc/x") is False
+
+
+class TestChmodSystemRootRowsMatchTheRootNotAMidPathSubstring:
+    """The six chmod system-root rows fire on the ROOT, not on ``.../lib/`` anywhere.
+
+    They were ``chmod.*/lib/.*``: the verb anywhere, then the root as a substring
+    anywhere after it, so a project path such as ``node_modules/foo/lib/`` read as
+    the system ``/lib``.  Each row now skips the root only when a path component
+    sits right before it -- a word character, ``~``, ``-``, or a lone ``./`` --
+    and needs it to END at a component boundary.  ``//usr``, ``/tmp/../usr``,
+    ``/./usr``, ``$r/usr`` and ``/proc/self/root/usr`` can still reach the root,
+    so they are still refused, as is every real chmod of a system root, each by
+    its own row.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # Already allowed by the search-tool narrowing; kept as a regression.
+            f"grep -rn {_CM} node_modules/foo/lib/",
+            # Each of these was refused on the mid-path spelling.
+            f"sed -i s/{_CM}/x/ dist/lib/a.js",
+            f'python3 -c "import os"  # {_CM} ~/venv/usr/lib/python3/site-packages/x',
+            f"cat ~/project/{_CM}_notes/lib/a.md",
+            f"{_CM} +x node_modules/foo/lib/cli.js",
+            f"{_CM} +x site-packages/foo/lib/run.py",
+            f"{_CM} 755 ./usr/local/bin/tool",
+            f"{_CM} -R u+w ~/proj/etc/conf",
+            f"{_CM} 644 build/lib64/x.so",
+            f"{_CM} 600 dist/boot/a.img",
+            f"{_CM} 600 vendor/sbin/tool",
+            f"{_CM} +x $HOME/proj/lib/cli.js",
+        ],
+    )
+    def test_mid_path_substring_is_allowed(self, cmd):
+        assert _denied_by(cmd) is None
+
+    @pytest.mark.parametrize(
+        ("cmd", "rule_id"),
+        [
+            (f"{_CM} -R 777 /usr/lib", "local-destructive-chmod-usr"),
+            (f"sudo {_CM} 000 /etc", "local-destructive-chmod-etc"),
+            (f"cd /tmp && {_CM} 600 /boot/grub", "local-destructive-chmod-boot"),
+            (f"{_CM} +x /lib64/ld-linux-x86-64.so.2", "local-destructive-chmod-lib64"),
+            (f"{_CM} 755 /sbin", "local-destructive-chmod-sbin"),
+            (f"{_CM} 755 /lib", "local-destructive-chmod-lib"),
+            (f"{_CM} 700 /lib/", "local-destructive-chmod-lib"),
+            (f"{_CM} -R 755 /usr/local/bin", "local-destructive-chmod-usr"),
+            (f'{_CM} 644 "/etc/shadow"', "local-destructive-chmod-etc"),
+            (f"/bin/{_CM} 4755 /sbin/mount", "local-destructive-chmod-sbin"),
+            (f"{_CM} g+w /boot", "local-destructive-chmod-boot"),
+            (f"{_CM} +x ~/x /lib64", "local-destructive-chmod-lib64"),
+            (f"bash -c '{_CM} 000 /etc/passwd'", "local-destructive-chmod-etc"),
+            (f"{_CM} 755 //usr/local/bin/tool", "local-destructive-chmod-usr"),
+            (f"{_CM} 755 /tmp/../usr/local/bin/tool", "local-destructive-chmod-usr"),
+            (f"{_CM} 600 /./etc/passwd", "local-destructive-chmod-etc"),
+            (f"r=/; {_CM} -R 000 $r/usr/lib", "local-destructive-chmod-usr"),
+            (f"{_CM} -R 000 /proc/self/root/lib64", "local-destructive-chmod-lib64"),
+        ],
+    )
+    def test_chmod_of_a_system_root_is_still_denied_by_its_row(self, cmd, rule_id):
+        assert _denied_by(cmd) == rule_id
+
+    def test_mid_path_spellings_still_resolve_a_governance_pin(self):
+        from kiro_crew import security
+
+        for root in ("usr", "etc", "sbin", "boot", "lib", "lib64"):
+            old = f"{_CM}.*/{root}/.*"
+            assert security._rule_id_for_pattern(old) == f"local-destructive-{_CM}-{root}"
 
 
 class TestSelfProtectionCommandBoundaries:

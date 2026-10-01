@@ -248,6 +248,15 @@ _NETCAT_EXEC_PATTERN = r"(?<![\w.-])(?<!\w=)nc\s+-e"
 # enumerable, which is why a name-based rule is defensible there and not here.
 
 
+# The left half of the six chmod system-root rows (``/usr`` ``/etc`` ``/sbin``
+# ``/boot`` ``/lib`` ``/lib64``).  The root is skipped only when a literal path
+# component sits right before it (a word character, ``~``, ``-``, or a lone
+# ``./``), so ``node_modules/foo/lib/`` is not ``/lib``.  Anything else keeps the
+# deny, including the spellings that still reach the root: ``//usr``,
+# ``/tmp/../usr``, ``/./usr``, a ``$var`` expansion, ``/proc/<pid>/root``.
+_CHMOD_AT_SYSTEM_ROOT = r"chmod.*(?:(?<![\w~-])(?<![^./]\.)|\$\w+|/proc/[^/\s]+/root)"
+
+
 BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     DeniedCommandRule(
         id="credential-exfil-s3-cp",
@@ -1011,7 +1020,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-chmod-usr",
-        pattern="chmod.*/usr/.*",
+        pattern=_CHMOD_AT_SYSTEM_ROOT + r"/usr(?![\w.-])",
         category="local-destructive",
         description=(
             "Blocks chmod changes to /usr, which can corrupt permissions on system binaries and "
@@ -1020,7 +1029,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-chmod-etc",
-        pattern="chmod.*/etc/.*",
+        pattern=_CHMOD_AT_SYSTEM_ROOT + r"/etc(?![\w.-])",
         category="local-destructive",
         description=(
             "Blocks chmod changes to /etc, which can corrupt permissions on critical system "
@@ -1029,7 +1038,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-chmod-sbin",
-        pattern="chmod.*/sbin/.*",
+        pattern=_CHMOD_AT_SYSTEM_ROOT + r"/sbin(?![\w.-])",
         category="local-destructive",
         description=(
             "Blocks chmod changes to /sbin, which can corrupt permissions on privileged system "
@@ -1038,7 +1047,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-chmod-boot",
-        pattern="chmod.*/boot/.*",
+        pattern=_CHMOD_AT_SYSTEM_ROOT + r"/boot(?![\w.-])",
         category="local-destructive",
         description=(
             "Blocks chmod changes to /boot, which can corrupt permissions on boot/kernel files "
@@ -1047,7 +1056,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-chmod-lib",
-        pattern="chmod.*/lib/.*",
+        pattern=_CHMOD_AT_SYSTEM_ROOT + r"/lib(?![\w.-])",
         category="local-destructive",
         description=(
             "Blocks chmod changes to /lib, which can corrupt permissions on shared system "
@@ -1056,7 +1065,7 @@ BUILTIN_DENIED_RULES: list[DeniedCommandRule] = [
     ),
     DeniedCommandRule(
         id="local-destructive-chmod-lib64",
-        pattern="chmod.*/lib64/.*",
+        pattern=_CHMOD_AT_SYSTEM_ROOT + r"/lib64(?![\w.-])",
         category="local-destructive",
         description=(
             "Blocks chmod changes to /lib64, which can corrupt permissions on 64-bit shared "
@@ -1803,6 +1812,14 @@ _LEGACY_RULE_ID_BY_PATTERN: dict[str, str] = {
     # against an older catalog pins; the row itself is anchored to the command
     # token (``_NETCAT_EXEC_PATTERN``) and stays force-pinnable under that pin.
     "nc -e.*": "reverse-shell-nc",
+    # The mid-path spellings of the six chmod system-root rows; the rows now
+    # require the root to START a path, so ``node_modules/x/lib/`` is not ``/lib``.
+    "chmod.*/usr/.*": "local-destructive-chmod-usr",
+    "chmod.*/etc/.*": "local-destructive-chmod-etc",
+    "chmod.*/sbin/.*": "local-destructive-chmod-sbin",
+    "chmod.*/boot/.*": "local-destructive-chmod-boot",
+    "chmod.*/lib/.*": "local-destructive-chmod-lib",
+    "chmod.*/lib64/.*": "local-destructive-chmod-lib64",
 }
 
 
