@@ -90,7 +90,14 @@ Kiro Crew doesn't hard-code how much an agent costs — it measures it:
   in flight**, captured once and held. The no-tool-in-flight condition matters —
   a sweep that lands while a `bash`/build/test tool call runs would read the
   workload's subtree, not the runtime, so such a sweep is skipped and the first
-  genuinely quiet one is recorded. At that quiet instant the subtree is the
+  genuinely quiet one is recorded. For a **session-shared** run the condition
+  spans every co-tenant on the same runtime PID, not just this agent: the
+  subtree read is the whole shared process, so a co-tenant mid-build makes the
+  reading the workload's even while this session sits idle. The quiet check
+  snapshots every same-PID co-tenant's tool state and `_stall_gen` before the
+  off-loop read and requires all of them still idle and unchanged after, so a
+  tool that started (or started and finished) on any co-tenant during the read
+  invalidates the sample. At that quiet instant the subtree is the
   agent's own runtime — kiro-cli plus the MCP servers running then — so the
   reading approximates the agent's own footprint rather than whatever workload a
   tool later launches. The whole-run RSS high-water mark is still tracked, but
@@ -115,12 +122,20 @@ Kiro Crew doesn't hard-code how much an agent costs — it measures it:
   of not floor-pinning the cap.
 - At exit, one sample `{agent, mem_gb, cpu_cores, ts}` is appended to
   `~/.kiro/crew/subagents/cost_samples.jsonl`, where `mem_gb` is that
-  settled reading. The CPU figure is telemetry only; sizing reads `mem_gb`. A
-  run that finished before any clean post-startup sweep took a settled reading
-  records its peak instead — a short run whose peak is its own runtime anyway. A
-  cancel-recovery respawn keeps the dead process's settled reading (a valid
-  per-agent figure) until the fresh process captures its own clean one, rather
-  than reverting to the whole-subtree peak in the window before that lands.
+  settled reading. A run that never took a quiet settled reading — every sweep
+  landed with a tool in flight, e.g. one long build or test call spanning the
+  whole run — records **nothing at all**: no row is appended. It is not reduced
+  to a CPU-only row either, because `compact_cost_log` FIFO-keeps the last N
+  records per `(agent, shared)` bucket regardless of `mem_gb`, so a run of
+  tool-busy CPU-only rows would evict valid memory history from the window and
+  force the cap to re-learn from scratch; and the run's CPU figure is the
+  whole-subtree CPU anyway (the workload's, not the runtime's). Dropping the row
+  entirely, rather than falling back to `peak_rss_gb`, is deliberate — for such
+  a run the peak IS that workload and recording it would re-introduce the
+  floor-pinning this change removes. A cancel-recovery
+  respawn keeps the dead process's settled reading (a valid per-agent figure)
+  until the fresh process captures its own clean one, rather than reverting to
+  the whole-subtree peak in the window before that lands.
 - At the next startup, Kiro Crew takes the **p90 of the last N memory samples
   per agent name** (robust to the occasional outlier run), then the worst case
   across agent types, as the divisor.

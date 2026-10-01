@@ -1006,6 +1006,69 @@ class TestSettledRuntimeCost:
         m._sample_live_costs()
         assert info.settled_rss_gb == pytest.approx(0.5, abs=0.01)  # clean sweep taken
 
+    def test_settled_not_captured_if_a_tool_cleared_during_the_read(self, monkeypatch) -> None:
+        """A tool in flight at the START of the subtree read must invalidate the
+        sample even if ``_inflight_tool`` reads None by guard time — the subtree
+        the read saw included the workload. The both-ended quiet check (the
+        snapshot taken before the read AND the live re-check after) is what
+        catches a tool that cleared mid-read."""
+        import kiro_crew.subagent as sub
+        from kiro_crew.acp.liveness import ToolCallState
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent(_first_stream_started=1.0)
+        info._inflight_tool = ToolCallState(
+            title="bash", command="pytest", dispatch_ts=0.0, dispatch_boot_ts=0.0
+        )
+        m._agents = {"a1": info}
+
+        # The off-loop read observes the workload subtree AND the tool clears
+        # during it (so the guard would see _inflight_tool None), but the sample
+        # must still be rejected because a tool was in flight when the read began.
+        def _read(pid, **kw):
+            info._inflight_tool = None
+            return self._sample(rss_kb=int(132.3 * 1024 * 1024))
+
+        monkeypatch.setattr(sub, "_proc_subtree_sample", _read)
+        m._sample_live_costs()
+        assert info.settled_rss_gb == 0.0  # not captured despite None at guard time
+
+    def test_settled_not_captured_while_a_shared_cotenant_runs_a_tool(self, monkeypatch) -> None:
+        """A session-shared run reads the WHOLE shared runtime's subtree, so a
+        co-tenant on the same PID running a build makes that subtree the
+        workload's even while this agent is idle. The quiet guard spans every
+        same-PID co-tenant: agent A must not settle while co-tenant B has a tool
+        in flight, and settles only once B is idle too."""
+        import kiro_crew.subagent as sub
+        from kiro_crew.acp.liveness import ToolCallState
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        # Two shared sessions on the SAME runtime PID; A idle, B mid-build.
+        a = self._agent(id="a", _first_stream_started=1.0, _session_sharing=True)
+        b = self._agent(id="b", _first_stream_started=1.0, _session_sharing=True)
+        b._inflight_tool = ToolCallState(
+            title="bash", command="pytest", dispatch_ts=0.0, dispatch_boot_ts=0.0
+        )
+        m._agents = {"a": a, "b": b}
+        # Whole shared subtree is the 20 GB build; divided by 2 live sharers.
+        monkeypatch.setattr(
+            sub,
+            "_proc_subtree_sample",
+            lambda pid, **kw: self._sample(rss_kb=int(20.0 * 1024 * 1024)),
+        )
+        m._sample_live_costs()
+        assert a.settled_rss_gb == 0.0  # B's workload must not settle as A's cost
+
+        # B finishes its build; now the whole runtime is quiet (1 GB / 2 sharers).
+        b._inflight_tool = None
+        monkeypatch.setattr(
+            sub,
+            "_proc_subtree_sample",
+            lambda pid, **kw: self._sample(rss_kb=int(1.0 * 1024 * 1024)),
+        )
+        m._sample_live_costs()
+        assert a.settled_rss_gb == pytest.approx(0.5, abs=0.01)  # 1 GB / 2 sharers
+
     @pytest.mark.asyncio
     async def test_respawn_preserves_the_settled_sample_until_a_replacement(
         self, monkeypatch
@@ -1092,21 +1155,44 @@ class TestSettledRuntimeCost:
         # CPU is telemetry only and keeps its whole-run peak.
         assert captured["cpu_cores"] == pytest.approx(4.0, abs=0.01)
 
-    def test_record_cost_falls_back_to_peak_when_never_settled(self, monkeypatch) -> None:
-        """A run that finished before any clean post-startup sweep (settled == 0)
-        records its peak — a short run whose peak is its own runtime anyway."""
+    def test_record_cost_records_nothing_when_never_settled_even_with_cpu(
+        self, monkeypatch
+    ) -> None:
+        """A run that never took a quiet settled reading (settled == 0) records
+        NOTHING — not the whole-subtree peak (which for such a run is the
+        workload), and not a CPU-only row either. A CPU-only row would FIFO-evict
+        valid memory history from the compaction window, so the run teaches the
+        cap nothing rather than costing it its learned memory."""
         import kiro_crew.subagent as sub
 
         m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
-        info = self._agent(peak_rss_gb=0.42, settled_rss_gb=0.0)
-        captured: dict = {}
+        # A long build spanned every sweep: peak is the 132.3 GB workload, no
+        # quiet reading was ever captured. CPU is present (the workload's CPU).
+        info = self._agent(peak_rss_gb=132.3, settled_rss_gb=0.0, peak_cpu_cores=4.0)
+        calls: list = []
         monkeypatch.setattr(
             sub,
             "append_cost_sample",
-            lambda agent, mem_gb, cpu_cores, shared=False: captured.update(mem_gb=mem_gb),
+            lambda *a, **k: calls.append((a, k)),
         )
         m._record_cost(info)
-        assert captured["mem_gb"] == pytest.approx(0.42, abs=0.01)
+        assert calls == []  # nothing recorded: not the peak, not a CPU-only row
+
+    def test_record_cost_omits_everything_when_nothing_sampled(self, monkeypatch) -> None:
+        """A run with neither a settled reading nor any CPU sample records
+        nothing at all (no append)."""
+        import kiro_crew.subagent as sub
+
+        m = _mgr(running=1, max_concurrent=16, last_ts=0.0)
+        info = self._agent(peak_rss_gb=0.42, settled_rss_gb=0.0, peak_cpu_cores=0.0)
+        calls: list = []
+        monkeypatch.setattr(
+            sub,
+            "append_cost_sample",
+            lambda *a, **k: calls.append((a, k)),
+        )
+        m._record_cost(info)
+        assert calls == []  # the peak is never recorded on its own
 
     def test_settled_runtime_cost_does_not_floor_the_cap(
         self, patch_host, monkeypatch, tmp_path

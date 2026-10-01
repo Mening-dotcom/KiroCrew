@@ -97,12 +97,22 @@ def test_cost_samples_are_written_under_the_bucket_the_gate_reads(monkeypatch, t
             template_id="heavy",
         )
         inherited = SubagentInfo(
-            id="a", task="w", agent="", peak_rss_gb=6.0, execution_context=heavy
+            id="a",
+            task="w",
+            agent="",
+            settled_rss_gb=6.0,
+            peak_rss_gb=6.0,
+            execution_context=heavy,
         )
-        named = SubagentInfo(id="b", task="w", agent="light", peak_rss_gb=1.0)
-        bare = SubagentInfo(id="c", task="w", agent="", peak_rss_gb=0.4)
+        named = SubagentInfo(id="b", task="w", agent="light", settled_rss_gb=1.0, peak_rss_gb=1.0)
+        bare = SubagentInfo(id="c", task="w", agent="", settled_rss_gb=0.4, peak_rss_gb=0.4)
         shared = SubagentInfo(
-            id="d", task="w", agent="light", peak_rss_gb=0.2, _session_sharing=True
+            id="d",
+            task="w",
+            agent="light",
+            settled_rss_gb=0.2,
+            peak_rss_gb=0.2,
+            _session_sharing=True,
         )
         for info in (inherited, named, bare, shared):
             mgr._record_cost(info)

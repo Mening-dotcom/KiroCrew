@@ -754,6 +754,61 @@ class OrphanStallMonitor(ManagerComponent):
         n = sum(1 for a in agents if not a.done and a._session_sharing and a._pid == pid)
         return n if n > 0 else 1
 
+    def _cotenants(
+        self, info: "SubagentInfo", agents: "list[SubagentInfo]"
+    ) -> "list[SubagentInfo]":
+        """Live agents whose subtree the sampling read of *info* observes.
+
+        For a sole tenant that is just ``info`` itself; for a session-shared run
+        it is every live agent on the same runtime PID, because the subtree read
+        is the whole shared process. *agents* is the caller's registry snapshot
+        (the body runs on a worker thread — see ``_sample_live_costs_impl``).
+        """
+        if not info._session_sharing or not info._pid:
+            return [info]
+        return [a for a in agents if not a.done and a._session_sharing and a._pid == info._pid]
+
+    def _cotenant_quiet_snapshot(
+        self, info: "SubagentInfo", agents: "list[SubagentInfo]"
+    ) -> "dict[str, int] | None":
+        """Per-co-tenant ``_stall_gen`` iff every co-tenant is tool-idle, else None.
+
+        A settled reading is only clean when NO tool is in flight anywhere in the
+        subtree being read. Returning None when any co-tenant has a tool in
+        flight makes the caller reject the sample outright; otherwise it keeps
+        each co-tenant's ``_stall_gen`` so :meth:`_cotenant_still_quiet` can tell
+        that none of them started (or started and cleared) a tool across the
+        off-loop read.
+        """
+        snap: "dict[str, int]" = {}
+        for a in self._cotenants(info, agents):
+            if a._inflight_tool is not None:
+                return None
+            snap[a.id] = a._stall_gen
+        return snap
+
+    def _cotenant_still_quiet(
+        self,
+        info: "SubagentInfo",
+        agents: "list[SubagentInfo]",
+        before: "dict[str, int]",
+    ) -> bool:
+        """True iff the same co-tenants are still idle and unchanged since *before*.
+
+        Each must still be tool-idle, its ``_stall_gen`` unmoved (so a tool that
+        started and finished entirely within the read window is caught), and the
+        co-tenant set itself unchanged — a co-tenant that appeared or vanished
+        during the read means the subtree the reading describes is not the set we
+        validated as quiet.
+        """
+        now = self._cotenants(info, agents)
+        if {a.id for a in now} != set(before):
+            return False
+        for a in now:
+            if a._inflight_tool is not None or a._stall_gen != before.get(a.id):
+                return False
+        return True
+
     def _sample_live_costs_impl(self) -> None:
         """Sample high-water RSS/CPU for each live agent (reaper-loop piggyback).
 
@@ -793,6 +848,23 @@ class OrphanStallMonitor(ManagerComponent):
                 self._manager._live_shared_count(info._pid, agents) if info._session_sharing else 1
             )
             generation = info._rss_generation
+            # Snapshot the quiet condition BEFORE the off-loop subtree read: it
+            # must hold ACROSS the whole sampling window, not merely at the guard
+            # below. A tool that starts, or starts and clears, during the
+            # ``_proc_subtree_sample`` read grows the subtree the read sees while
+            # ``_inflight_tool`` could read None again by the time the guard runs
+            # — so require idle before AND unchanged after.
+            #
+            # For a SHARED run the subtree read is the whole shared runtime (then
+            # divided by the sharer count), so the quiet condition is NOT just
+            # this agent's own tool state: a co-tenant on the same PID running a
+            # build makes the subtree reflect that workload even while this agent
+            # sits idle. Snapshot EVERY live same-PID agent (just this run for a
+            # sole tenant) and require all of them idle. ``_stall_gen`` is bumped
+            # on every tool start and clear, so capturing it per co-tenant
+            # catches a tool that started and finished entirely within the read
+            # window (``_inflight_tool`` back to None, ``_stall_gen`` moved).
+            quiet_before = self._cotenant_quiet_snapshot(info, agents)
             sample = _proc_subtree_sample(info._pid)
             if info._rss_generation != generation:
                 # The run was respawned while this off-loop read was in flight:
@@ -823,17 +895,24 @@ class OrphanStallMonitor(ManagerComponent):
                 # generation, not on ``<= 0.0``, so a respawn re-captures for the
                 # fresh process without discarding the dead one's valid reading
                 # in the window before the fresh process is sampled. A run in
-                # startup, or one with a tool in flight at every post-startup
-                # sweep, records nothing and ``_record_cost`` falls back to the
-                # peak. The guard and the tag use the LOCAL ``generation`` read
-                # before the off-loop sample (and proven current by the recheck
-                # above), never a fresh ``info._rss_generation``: a respawn after
-                # the recheck must not let this reading be stamped as the new
-                # process's.
+                # startup, or one with a tool in flight at (or across) every
+                # post-startup sweep, records no settled reading and
+                # ``_record_cost`` records no memory sample for it — it must NOT
+                # fall back to the whole-subtree peak, which for such a run IS
+                # the workload. The guard and the tag use the LOCAL ``generation``
+                # read before the off-loop sample (and proven current by the
+                # recheck above), never a fresh ``info._rss_generation``: a
+                # respawn after the recheck must not let this reading be stamped
+                # as the new process's. The quiet check is both-ended and spans
+                # every same-PID co-tenant — all idle in ``quiet_before`` and
+                # still idle+unchanged now — so a tool that started (or started
+                # and cleared) on THIS agent or on any co-tenant sharing the
+                # runtime during the subtree read cannot pass as a quiet sample.
                 if (
                     info._settled_rss_generation != generation
                     and info._first_stream_started is not None
-                    and info._inflight_tool is None
+                    and quiet_before is not None
+                    and self._cotenant_still_quiet(info, agents, quiet_before)
                 ):
                     info.settled_rss_gb = gb
                     info._settled_rss_generation = generation
@@ -855,17 +934,33 @@ class OrphanStallMonitor(ManagerComponent):
 
         The recorded ``mem_gb`` is the SETTLED-runtime reading
         (``settled_rss_gb``: the agent's own kiro-cli + MCP-server footprint,
-        sampled once after startup with no tool in flight), NOT the whole-subtree
-        ``peak_rss_gb``. The cap divides available memory by
-        ``read_learned_cost("mem_gb")``, so recording the peak would price a run's
-        build or test subtree as the agent's own cost and hold the cap at the
-        floor. The peak is the divisor only when a run finished before any clean
-        post-startup sweep took a settled reading — a short run whose peak is its
-        own runtime anyway. CPU is telemetry only and keeps its whole-run peak.
+        sampled once after startup with no tool in flight). When no such verified
+        quiet sample was ever taken — ``settled_rss_gb`` is 0.0 — the whole row
+        is OMITTED rather than falling back to ``peak_rss_gb``. The peak
+        is the whole process subtree, so for a run whose every sweep landed with
+        a tool in flight (one long build or test call spanning the whole run) the
+        peak IS that workload's RSS; recording it as the learned cost would price
+        the workload as the agent's own footprint and pin the auto cap at the
+        floor — the exact defect this change removes. A run with no quiet sample
+        is dropped ENTIRELY, not reduced to a CPU-only row: ``compact_cost_log``
+        FIFO-keeps the last N records per (agent, shared) bucket regardless of
+        ``mem_gb``, so a run of tool-busy CPU-only rows would evict valid memory
+        history from the window and force the cap to re-learn from scratch. The
+        run's CPU figure is the whole-subtree CPU anyway (the workload's, not the
+        runtime's), so there is nothing worth keeping. A run with no quiet sample
+        teaches the cap nothing rather than teaching it the workload peak or
+        costing it its memory history.
         """
-        mem_gb = info.settled_rss_gb if info.settled_rss_gb > 0.0 else info.peak_rss_gb
-        if mem_gb <= 0 and info.peak_cpu_cores <= 0:
-            return  # never sampled (e.g. finished before the first reaper sweep)
+        mem_gb = info.settled_rss_gb if info.settled_rss_gb > 0.0 else 0.0
+        if mem_gb <= 0:
+            # No verified quiet sample: record NOTHING. A CPU figure here is the
+            # whole-subtree CPU — the workload's, not the runtime's — and even a
+            # harmless CPU-only row is a problem: ``compact_cost_log`` FIFO-keeps
+            # the last N records per (agent, shared) bucket with no regard for
+            # ``mem_gb``, so a run of tool-busy CPU-only rows would evict valid
+            # memory history and force the cap to re-learn from scratch. A run
+            # with no quiet sample teaches the cap nothing.
+            return
         try:
             append_cost_sample(
                 _cost_bucket(info.agent, info.execution_context),

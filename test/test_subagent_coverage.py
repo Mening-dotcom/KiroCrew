@@ -960,19 +960,31 @@ class TestRecordCost:
             mgr._record_cost(_info())
         append.assert_not_called()
 
-    def test_sampled_run_appends(self) -> None:
+    def test_sampled_run_appends_the_settled_reading(self) -> None:
         mgr = _manager()
         info = _info(agent="scout")
+        info.settled_rss_gb = 0.5
         info.peak_rss_gb = 1.5
         info.peak_cpu_cores = 0.75
         with patch.object(sa, "append_cost_sample") as append:
             mgr._record_cost(info)
-        append.assert_called_once_with("scout", 1.5, 0.75, shared=False)
+        append.assert_called_once_with("scout", 0.5, 0.75, shared=False)
+
+    def test_peak_only_run_records_nothing(self) -> None:
+        mgr = _manager()
+        info = _info(agent="scout")
+        info.peak_rss_gb = 1.5  # whole-subtree peak, no quiet settled sample
+        info.peak_cpu_cores = 0.75
+        with patch.object(sa, "append_cost_sample") as append:
+            mgr._record_cost(info)
+        # No quiet sample -> nothing is recorded: not the workload peak, and not
+        # a CPU-only row (which would FIFO-evict valid memory history).
+        append.assert_not_called()
 
     def test_store_failure_is_swallowed(self) -> None:
         mgr = _manager()
         info = _info()
-        info.peak_rss_gb = 1.0
+        info.settled_rss_gb = 1.0
         with patch.object(sa, "append_cost_sample", side_effect=OSError):
             mgr._record_cost(info)  # must not raise
 
