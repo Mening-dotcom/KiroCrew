@@ -414,6 +414,28 @@ def _run_belongs_to_caller(caller: str, run_id: str, parent: object) -> bool:
     return parent_key == caller
 
 
+async def _is_host_cli_spawn(request: web.Request, parent_session: str) -> bool:
+    """Whether a ``POST /api/spawn`` is the host operator's ``kirocrew spawn run``.
+
+    The CLI sends the internal secret and nothing else: no ``X-Session-Key``, no
+    ``parent_session`` and no ``X-Internal-Caller``. Every MCP stdio server names
+    itself in that header, so a server that lost its session is not mistaken for
+    the CLI. The header is attribution, not proof, and an agent's shell can run the
+    CLI too. So the peer must also be a host process, the provenance the local
+    owner-token bootstrap requires. A sandboxed agent's shell fails that check.
+    """
+    if (
+        request.get("internal_auth") is not True
+        or parent_session
+        or request.headers.get("X-Session-Key", "")
+        or request.headers.get("X-Internal-Caller", "")
+    ):
+        return False
+    from kiro_crew.member_memory_auth import local_owner_bootstrap_allowed
+
+    return await asyncio.to_thread(local_owner_bootstrap_allowed, request)
+
+
 async def _spawn_scope_refusal(
     request: web.Request, *, claimed_session: str | None = None
 ) -> web.Response | None:
@@ -633,8 +655,10 @@ async def api_spawn(request: web.Request) -> web.Response:
             {"error": "parent_session must be a string", "code": "invalid_parent_session"},
             status=400,
         )
+    # Only the host operator's CLI claims no session; see ``_is_host_cli_spawn``.
+    host_cli = await _is_host_cli_spawn(request, parent_session)
     _, refusal = await internal_memory_scope(
-        request, "spawn.create", claimed_session=parent_session
+        request, "spawn.create", claimed_session=None if host_cli else parent_session
     )
     if refusal is not None:
         return refusal
