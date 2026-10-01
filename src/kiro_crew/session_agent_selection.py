@@ -8,6 +8,7 @@ import uuid
 from dataclasses import replace as dataclass_replace
 from typing import Any
 
+from kiro_crew.agent_spec_format import NATIVE_SKILL_ALIAS_PREFIX
 from kiro_crew.config.loader import ResolvedBindings, resolve_agent_bindings
 from kiro_crew.execution_context import (
     ExecutionContext,
@@ -44,6 +45,52 @@ def session_agent_selection_kind(session_key: str, agent_name: str) -> str:
     )
 
 
+def _source_of_view(name: str) -> str:
+    """The agent a stored skill-view name was built from, or *name* unchanged.
+
+    A conversation recorded while the native skill projection was on can hold a
+    generated ``kirocrew-skill-view-<digest>`` name as its agent. That name is a
+    file the projection wrote, and a boot drain or an operator may have removed
+    it since, so resolving it by name finds nothing and the turn is refused.
+    The projection records which agent each view was built from (its ownership
+    sidecar, or the view ledger), and :func:`source_agent_name` reads that record
+    even after the view file is gone. A view nothing records stays as it is, so
+    it resolves to nothing and is refused rather than guessed.
+
+    Blocking: it may read one sidecar. Every caller of
+    :func:`resolve_session_agent_bindings` runs it off the event loop.
+    """
+    if not name.startswith(NATIVE_SKILL_ALIAS_PREFIX):
+        return name
+    # Deferred: the projection module pulls in the ACP stack, which a plain agent
+    # name never needs.
+    from kiro_crew.acp.skill_projection import RetiredSkillView, source_agent_name
+
+    try:
+        return source_agent_name(name)
+    except RetiredSkillView:
+        return name
+
+
+def _is_removed_synced_crewmate(config, execution: ExecutionContext, selected: str) -> bool:
+    """Whether *execution* names an identity-less crewmate whose row is gone.
+
+    ``crewmate_prune_migration`` removes rows an older agent sync generated: no
+    ``member_id``, the shared ``default`` store, and a name equal to its
+    ``kiro_agent``. A chat that picked one recorded exactly that shape. Only that
+    shape qualifies -- a member with an identity or its own store is never
+    re-read as a template, so its refusal stands.
+    """
+    return (
+        execution.selection_kind == "member"
+        and execution.member_id is None
+        and execution.store.store_id == "default"
+        and bool(selected)
+        and selected == _source_of_view(execution.template_id)
+        and selected not in config.agents
+    )
+
+
 def resolve_session_agent_bindings(
     resolver, config, session_key: str, agent_name: str | None, *project_dir
 ) -> ResolvedBindings:
@@ -58,6 +105,15 @@ def resolve_session_agent_bindings(
                 selected = execution.selection_name or execution.member_id
         else:
             selected = execution.selection_name or execution.template_id
+    selected = _source_of_view(selected)
+    selection_kind = execution.selection_kind if execution else ""
+    if execution is not None and _is_removed_synced_crewmate(config, execution, selected):
+        # The startup crewmate prune deleted the ``config.agents`` row this chat
+        # was bound to, but the agent it named is still installed. That row had
+        # no identity and sat on the shared Global store, so the installed agent
+        # on that same store is the exact binding the row carried; resolving it
+        # as a template keeps the chat resumable without reaching any other store.
+        selection_kind = "template"
     try:
         bindings = resolver(
             config,
@@ -65,7 +121,7 @@ def resolve_session_agent_bindings(
             *project_dir,
             validate_memory_files=False,
             **(
-                {"selection_kind": execution.selection_kind, "execution_context": execution}
+                {"selection_kind": selection_kind, "execution_context": execution}
                 if execution
                 else {}
             ),
@@ -74,7 +130,7 @@ def resolve_session_agent_bindings(
         raise UnknownMemoryStore("Conversation agent selection is unavailable") from exc
     if execution is not None:
         bindings.memory_store_name = execution.store.store_id
-        bindings.kiro_agent = execution.template_id
+        bindings.kiro_agent = _source_of_view(execution.template_id)
         bindings.execution_context = execution
     bindings.selection_revision = _revision(execution)
     return bindings
