@@ -175,6 +175,85 @@ def test_transport_keeps_original_agent_identity_and_rejects_unprepared_modes():
         prepared.request("session/set_mode", {"modeId": "unknown"})
 
 
+def test_set_mode_activates_the_launched_agent_without_a_view_then_consumes_it():
+    """The launched agent's FIRST activation passes; it is then consumed; other
+    unprepared modes never pass.
+
+    The direct-client startup activates the agent with ``session/set_mode``. When
+    that agent has no prepared view, refusing its activation would strand a valid
+    startup, so the request path tolerates the modeId that equals the recorded
+    ``spawn_agent_name`` -- and only that one, and only ONCE. The first tolerated
+    activation consumes the exemption, so a later switch back to the same agent
+    takes the strict resolver and fails closed if its view is still absent -- no
+    reactivating a cached spec the strict resolver existed to refuse.
+    """
+    prepared = projection.NativeSkillProjection({"custom": "native-alias"})
+    prepared.spawn_agent_name = "kirocrew"
+    activated = prepared.request("session/set_mode", {"sessionId": "s", "modeId": "kirocrew"})
+    assert activated["modeId"] == "kirocrew"
+    # The exemption is spent: a second activation of the same agent fails closed.
+    assert prepared.spawn_agent_name == ""
+    with pytest.raises(ValueError, match="no prepared"):
+        prepared.request("session/set_mode", {"modeId": "kirocrew"})
+    # A prepared agent still maps to its alias.
+    assert prepared.request("session/set_mode", {"modeId": "custom"})["modeId"] == "native-alias"
+    # Any OTHER unprepared mode is still rejected, launched agent set or not.
+    with pytest.raises(ValueError, match="no prepared"):
+        prepared.request("session/set_mode", {"modeId": "some-other-agent"})
+
+
+def test_frame_advertises_the_launched_agent_mode_independently_of_the_request_exemption():
+    """A no-view launched agent's own mode stays in projected availableModes
+    whenever ``advertised_launch_name`` is set, independent of the request
+    exemption and NOT hidden after the initial set_mode is consumed.
+
+    The start reads availableModes BEFORE it sends set_mode. If the launched
+    agent has no prepared view, dropping its mode would advertise no mode the
+    process could activate and fail the start. Advertising keys on
+    ``advertised_launch_name`` -- a fixed launch fact set by BOTH the direct
+    client and the shared runtime -- not on ``spawn_agent_name``, which the
+    request path consumes and which the shared runtime leaves empty. So the
+    launch mode must survive even after the exemption is spent, and an
+    unprojected stranger is still never advertised.
+    """
+    prepared = projection.NativeSkillProjection(
+        {}, spawn_agent_name="kirocrew", advertised_launch_name="kirocrew"
+    )
+    kept = prepared.frame(
+        {"availableModes": [{"id": "kirocrew", "name": "kirocrew"}, {"id": "stranger"}]}
+    )
+    # The launched agent's mode survives; an unprojected stranger does not.
+    assert kept["availableModes"] == [{"id": "kirocrew", "name": "kirocrew"}]
+    # Consuming the request exemption does NOT hide the advertised launch mode:
+    # advertising is a fixed fact, not the one-shot request tolerance.
+    prepared.request("session/set_mode", {"modeId": "kirocrew"})
+    assert prepared.spawn_agent_name == ""
+    after = prepared.frame({"availableModes": [{"id": "kirocrew", "name": "kirocrew"}]})
+    assert after["availableModes"] == [{"id": "kirocrew", "name": "kirocrew"}]
+
+
+def test_frame_advertises_the_launch_mode_on_the_shared_runtime_with_empty_spawn_name():
+    """The shared runtime leaves ``spawn_agent_name`` empty (so request() stays
+    strict mid-session) but still sets ``advertised_launch_name``, so the no-view
+    launch agent's mode is advertised and the session open finds it.
+
+    This is the fail-closed-at-open bug the prior wiring had: keying advertising
+    on the empty ``spawn_agent_name`` dropped the shared runtime's launch mode
+    from availableModes, so ``_mode_available`` failed and the session was
+    terminated before activation.
+    """
+    prepared = projection.NativeSkillProjection({}, advertised_launch_name="kirocrew")
+    assert prepared.spawn_agent_name == ""
+    kept = prepared.frame(
+        {"availableModes": [{"id": "kirocrew", "name": "kirocrew"}, {"id": "stranger"}]}
+    )
+    assert kept["availableModes"] == [{"id": "kirocrew", "name": "kirocrew"}]
+    # A projection no spawn claimed (both fields empty) advertises neither.
+    unclaimed = projection.NativeSkillProjection({})
+    hidden = unclaimed.frame({"availableModes": [{"id": "kirocrew", "name": "kirocrew"}]})
+    assert hidden["availableModes"] == []
+
+
 @pytest.mark.parametrize(
     "command", ["/agent swap custom", {"command": "agent", "args": {"value": "swap custom"}}]
 )
@@ -251,6 +330,67 @@ def test_explicit_search_exclusion_fails_only_that_agent(native_tree):
     prepared = projection.prepare_native_skill_projection(project)
     with pytest.raises(ValueError, match="explicitly excluded"):
         prepared.agent("custom")
+
+
+def test_spawn_passes_through_a_no_view_name_when_no_spec_was_refused(native_tree, monkeypatch):
+    """With no refused spec, a genuinely-absent name spawns under its own name.
+
+    When discovery refuses nothing, an unprojected name is provably spec-less, so
+    ``spawn_agent`` returns the authored name rather than aborting an otherwise
+    valid spawn. Readable-but-unprojected files on disk (a dedup twin, a plain doc)
+    are not refusals and must not fail the spawn closed.
+    """
+    _home, agents, project = native_tree
+    monkeypatch.setattr(projection, "list_agents", lambda **kw: [])
+    # All readable, none projected (list_agents patched to []), none a refusal.
+    (agents / "foo.json").write_text(json.dumps({"name": "bar"}), encoding="utf-8")
+    (agents / "local-pkg-helper.json").write_text(json.dumps({"name": "helper"}), encoding="utf-8")
+
+    prepared = projection.prepare_native_skill_projection(project)
+
+    assert prepared.spawn_agent("genuinely-absent") == "genuinely-absent"
+    assert prepared.spawn_agent("bar") == "bar"
+
+
+def test_spawn_agent_keeps_the_authored_name_when_no_view_is_prepared():
+    """A spawn of an agent the projection never prepared uses its own name.
+
+    ``prepare_native_skill_projection`` returns a projection even when it mapped
+    no agents (a work_dir carrying no matching spec), so the spawn path asks
+    ``spawn_agent`` rather than the strict ``agent``: an unprojected agent keeps
+    its authored transport name -- the same answer a ``None`` projection gives --
+    instead of aborting the spawn. The strict ``agent`` still rejects it, because
+    that resolver guards ``session/set_mode``.
+    """
+    prepared = projection.NativeSkillProjection({"custom": "native-alias"})
+    assert prepared.spawn_agent("custom") == "native-alias"
+    assert prepared.spawn_agent("kirocrew") == "kirocrew"
+    with pytest.raises(ValueError, match="no prepared"):
+        prepared.agent("kirocrew")
+
+
+def test_spawn_agent_still_raises_an_authored_restriction():
+    """An authored refusal is a user-facing spawn refusal, not a silent skip.
+
+    A ``kirocrew-core`` exclusion or a disabled ``skill_search`` records an
+    ``errors`` entry naming the spec and the remedy; ``spawn_agent`` raises it so
+    the runtime can wrap it as ``AcpRuntimeError`` and the startup paths can
+    translate the sentence, exactly as the strict ``agent`` does.
+    """
+    prepared = projection.NativeSkillProjection(
+        {}, errors={"custom": "skill_search is explicitly excluded; ..."}
+    )
+    with pytest.raises(ValueError, match="explicitly excluded"):
+        prepared.spawn_agent("custom")
+
+
+def test_unknown_name_with_no_matching_spec_still_passes_through_on_spawn():
+    """A name that matches no alias or error is still an unprojected agent and
+    spawn keeps its own name -- a no-view launch agent spawns under its own name."""
+    prepared = projection.NativeSkillProjection({"custom": "native-alias"})
+    assert prepared.spawn_agent("unrelated") == "unrelated"
+    with pytest.raises(ValueError, match="no prepared"):
+        prepared.agent("unrelated")
 
 
 def test_unmapped_custom_agent_does_not_gain_tools_or_servers(native_tree):
@@ -3729,6 +3869,7 @@ async def test_set_mode_sends_the_fresh_alias_never_a_changed_spawn_one(
             runtime_module.AcpRuntime._adopted_skill_projection_generation
         )
         _adopt_skill_projection = runtime_module.AcpRuntime._adopt_skill_projection
+        _resolve_start_alias = runtime_module.AcpRuntime._resolve_start_alias
         _superseding_alias = runtime_module.AcpRuntime._superseding_alias
         _refuse_if_view_superseded = runtime_module.AcpRuntime._refuse_if_view_superseded
         _refuse_if_view_unverified = runtime_module.AcpRuntime._refuse_if_view_unverified
@@ -3738,6 +3879,10 @@ async def test_set_mode_sends_the_fresh_alias_never_a_changed_spawn_one(
         _unadopted_skill_projection_generation = (
             runtime_module.AcpRuntime._unadopted_skill_projection_generation
         )
+        # The launched agent is some OTHER agent, not "crew": "crew" is a prepared
+        # agent (it has an alias), so activating it must take the strict alias path
+        # this test asserts, not the launched-agent allowance.
+        _agent = "launcher"
 
         async def terminate_session(self, sid):
             terminated.append(sid)
@@ -4282,6 +4427,47 @@ def test_a_rotated_credential_names_a_new_alias_but_a_launch_nonce_does_not(
     assert projection.prepare_native_skill_projection(project).agent("custom") == first
     source.write_text(json.dumps(_credential_spec("t2", "n2")), encoding="utf-8")
     assert projection.prepare_native_skill_projection(project).agent("custom") != first
+
+
+def test_recognise_does_not_carry_the_launch_name_exemption():
+    """recognise()'s only callers are the SHARED RUNTIME, whose own contract is
+    that it must NEVER set spawn_agent_name (it activates the launch agent through
+    _activate_mode_bracketed instead; setting the field would make request()
+    tolerate the launch agent on a mid-session switch too, reactivating a cached
+    unprojected spec). So a refresh through recognise() must NOT propagate the
+    earlier projection's spawn_agent_name onto the fresh one -- only the direct
+    spawn caller sets it."""
+    earlier = projection.NativeSkillProjection({}, spawn_agent_name="kirocrew")
+    fresh = projection.NativeSkillProjection({})
+    assert fresh.spawn_agent_name == ""
+    fresh.recognise(earlier)
+    assert fresh.spawn_agent_name == ""
+
+    # A projection that already knows its own launch name is likewise untouched by
+    # recognise() -- the field is owned by the spawn caller, not this seam.
+    already = projection.NativeSkillProjection({}, spawn_agent_name="kirocrew")
+    already.recognise(projection.NativeSkillProjection({}, spawn_agent_name="other"))
+    assert already.spawn_agent_name == "kirocrew"
+
+
+def test_recognise_carries_advertised_launch_name_but_not_the_request_exemption():
+    """A projection refresh runs frame() on the fresh object, so the launch
+    identity's ADVERTISING must survive recognise() -- otherwise a no-view launch
+    agent's mode is dropped from availableModes after the refresh. This is carried
+    (advertising only), unlike ``spawn_agent_name`` (the mid-session request
+    tolerance), which recognise() must never propagate."""
+    earlier = projection.NativeSkillProjection(
+        {}, spawn_agent_name="kirocrew", advertised_launch_name="kirocrew"
+    )
+    fresh = projection.NativeSkillProjection({})
+    fresh.recognise(earlier)
+    # Advertising carried; the request exemption NOT carried.
+    assert fresh.advertised_launch_name == "kirocrew"
+    assert fresh.spawn_agent_name == ""
+    # A fresh projection that already recorded its own launch name is untouched.
+    already = projection.NativeSkillProjection({}, advertised_launch_name="own")
+    already.recognise(projection.NativeSkillProjection({}, advertised_launch_name="other"))
+    assert already.advertised_launch_name == "own"
 
 
 def test_recognise_admits_only_alias_names_and_registered_agent_names():

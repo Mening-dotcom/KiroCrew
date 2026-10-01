@@ -2075,7 +2075,7 @@ async def test_runtime_spawn_passes_installed_path_through_exact_wrappers(
         await runtime.spawn()
 
     if project_skills:
-        native_agent = runtime._native_skill_projection.agent(runtime._agent)
+        native_agent = runtime._native_skill_projection.spawn_agent(runtime._agent)
     else:
         assert runtime._native_skill_projection is None
         native_agent = runtime._agent
@@ -9690,6 +9690,175 @@ async def test_create_session_admits_spawn_agent_named_as_current_mode():
 
 
 @pytest.mark.asyncio
+async def test_activate_mode_bracketed_allows_the_launched_agent_every_start():
+    """The session-start bracket activates the launched agent (``self._agent``)
+    even with no prepared view, keyed on ``self._agent`` -- NOT on a stored
+    ``spawn_agent_name`` (the shared runtime never sets one). A shared runtime
+    starts many sessions as the same agent over its life, so the allowance holds
+    on every start and nothing is consumed."""
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    # No spawn_agent_name on the shared runtime: the allowance is keyed on
+    # self._agent alone.
+    rt._native_skill_projection = NativeSkillProjection(aliases={})
+    refreshed = NativeSkillProjection(aliases={})
+    captured: dict = {}
+
+    async def _send(method, params, *, timeout=None, **kwargs):
+        captured["method"] = method
+        captured["params"] = params
+        captured["kwargs"] = kwargs
+        return {}
+
+    rt._send_and_await = AsyncMock(side_effect=_send)  # type: ignore[method-assign]
+
+    with patch(
+        "kiro_crew.acp.skill_projection.prepare_native_skill_projection",
+        return_value=refreshed,
+    ):
+        await rt._activate_mode_bracketed(
+            "s1", "kirocrew", budget=30.0, payload_snapshot=None, wire_registered=True
+        )
+
+    # The launched agent's authored name goes on the wire (translate=False), with
+    # no spawn_agent_name needed or set anywhere.
+    assert rt._native_skill_projection is refreshed
+    assert captured["method"] == METHOD_SET_MODE
+    assert captured["params"]["modeId"] == "kirocrew"
+    assert captured["kwargs"].get("translate") is False
+    assert refreshed.spawn_agent_name == ""
+
+
+@pytest.mark.asyncio
+async def test_activate_mode_bracketed_refresh_still_rejects_a_foreign_mode():
+    """The launched-agent allowance is narrow: only ``self._agent`` passes with no
+    view. A session start naming some OTHER unprepared mode still raises through the
+    strict resolver -- an agent cannot escape its launch scope."""
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    rt._native_skill_projection = NativeSkillProjection(aliases={}, spawn_agent_name="kirocrew")
+    refreshed = NativeSkillProjection(aliases={})
+    # The strict resolver rejects a foreign mode BEFORE any send, so this must not run.
+    rt._send_and_await = AsyncMock()  # type: ignore[method-assign]
+    rt.terminate_session = AsyncMock()  # type: ignore[method-assign]
+
+    with patch(
+        "kiro_crew.acp.skill_projection.prepare_native_skill_projection",
+        return_value=refreshed,
+    ):
+        with pytest.raises(ValueError, match="no prepared skill discovery view"):
+            await rt._activate_mode_bracketed(
+                "s1",
+                "intruder",
+                budget=30.0,
+                payload_snapshot=None,
+                wire_registered=True,
+            )
+    rt._send_and_await.assert_not_called()
+    # The shared runtime does NOT set spawn_agent_name, and recognise() does not
+    # carry it, so the refreshed projection carries NO launch name -- the bracket
+    # allows the launched agent purely via self._agent, not a carried exemption.
+    assert refreshed.spawn_agent_name == ""
+
+
+@pytest.mark.asyncio
+async def test_two_shared_sessions_both_start_as_the_launched_agent():
+    """A shared runtime starts MANY sessions as self._agent. Each start brackets its
+    own set_mode, so the launched-agent allowance must hold for the second session
+    exactly as for the first: the allowance is per-start, not consumed by the first
+    start. Both back-to-back starts send set_mode for the launched agent, with no
+    prepared view, and neither raises."""
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    # The shared runtime does NOT set spawn_agent_name: the bracket allows the
+    # launched agent purely via self._agent. Projections carry no launch name.
+    rt._native_skill_projection = NativeSkillProjection(aliases={})
+    rt._spawn_skill_projection = rt._native_skill_projection
+    refreshed = NativeSkillProjection(aliases={})
+    sent: list[dict] = []
+
+    async def _send(method, params, *, timeout=None, **kwargs):
+        if method == METHOD_SET_MODE:
+            sent.append(params)
+        return {}
+
+    rt._send_and_await = AsyncMock(side_effect=_send)  # type: ignore[method-assign]
+
+    with patch(
+        "kiro_crew.acp.skill_projection.prepare_native_skill_projection",
+        return_value=refreshed,
+    ):
+        for session_id in ("s1", "s2"):
+            await rt._activate_mode_bracketed(
+                session_id,
+                "kirocrew",
+                budget=30.0,
+                payload_snapshot=None,
+                wire_registered=True,
+            )
+
+    # Both sessions sent set_mode for the launched agent; the second did NOT fail,
+    # and no spawn_agent_name was ever needed on the shared runtime.
+    assert [p["modeId"] for p in sent] == ["kirocrew", "kirocrew"]
+    assert refreshed.spawn_agent_name == ""
+
+
+def test_resolve_start_alias_keeps_the_launch_agent_and_stays_strict_otherwise():
+    """``_resolve_start_alias`` is the single launch-agent-aware resolver used at
+    the initial resolution AND both supersession re-checks. It keeps the launched
+    agent's authored name with no prepared view, and takes the strict resolver for
+    every other mode (which raises for an unprepared one)."""
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    projection = NativeSkillProjection(aliases={})
+
+    # The launched agent passes with no view, keeping its authored name.
+    assert rt._resolve_start_alias(projection, "kirocrew") == "kirocrew"
+    # A foreign unprepared mode is rejected by the strict resolver.
+    with pytest.raises(ValueError, match="no prepared skill discovery view"):
+        rt._resolve_start_alias(projection, "intruder")
+
+
+def test_refuse_if_view_superseded_keeps_an_unchanged_launch_agent():
+    """A concurrent no-view start must not be treated as superseded.
+
+    When a concurrent no-view start adopts a newer EMPTY projection, a post-send
+    supersession check that recomputes the current alias with the STRICT resolver
+    finds no entry for the no-view launch agent, so ``newest != sent_alias`` and the
+    start would raise, terminating a session that was never superseded. The
+    launch-agent-aware resolver keeps the unchanged launch agent here: the launched
+    agent's authored name is still its name in the newer view, so nothing is
+    superseded and no raise occurs."""
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    # A newer (empty) projection is adopted at a higher generation than the start
+    # used -- the concurrent-start condition under test.
+    rt._native_skill_projection = NativeSkillProjection(aliases={})
+    rt._skill_projection_generation = 7
+    rt._skill_projection_unadopted = 0
+
+    # sent_alias is the launch agent's authored name; used_generation is older than
+    # the adopted one, forcing the supersession branch. With the launch-agent-aware
+    # resolver, newest == sent_alias == "kirocrew", so this does NOT raise.
+    rt._refuse_if_view_superseded("kirocrew", "kirocrew", used_generation=3)
+
+    # A genuinely superseded FOREIGN agent (strict, no view in the newer projection)
+    # still fails closed -- the fix is scoped to the launch agent.
+    with pytest.raises(AcpRuntimeError):
+        rt._refuse_if_view_superseded("intruder", "intruder-alias", used_generation=3)
+
+
+@pytest.mark.asyncio
 async def test_create_session_spawn_agent_guard_skipped_on_kas_backend():
     """Guard (A2) is restricted to the backend whose argv carries `--agent`. On KAS
     the agent travels over the wire and is activated by set_mode, which Guard (A)
@@ -9708,6 +9877,107 @@ async def test_create_session_spawn_agent_guard_skipped_on_kas_backend():
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_verify_spawn_agent_active_accepts_a_projected_agent_via_the_framed_response():
+    """Guard (A2) accepts a projected agent because framing normalises its alias.
+
+    The spawn argv forwards the view ALIAS for a projected agent, but every inbound
+    frame passes through ``projection.frame`` before this guard reads it, and frame
+    maps ``currentModeId`` from the alias back to the declared name. So the response
+    this guard sees names the DECLARED name, and the plain ``current == spawn_agent``
+    comparison accepts it -- no alias-matching set in the guard is needed.
+    """
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    projection = NativeSkillProjection(aliases={"kirocrew": "native-alias-abc"})
+    rt._native_skill_projection = projection
+    # The backend reports the alias; framing maps it back to the declared name
+    # before the guard, which is exactly what the guard then compares against.
+    framed = projection.frame(
+        {"currentModeId": "native-alias-abc", "availableModes": [{"id": "native-alias-abc"}]}
+    )
+    assert await rt._verify_spawn_agent_active("s1", _new_resp(framed), override=None) is None
+
+
+@pytest.mark.asyncio
+async def test_verify_spawn_agent_active_accepts_a_no_view_launch_agent_under_its_own_name():
+    """Guard (A2) accepts a launch agent with NO prepared view spawned under its name.
+
+    This PR lets a launch identity with no projected view spawn and activate under
+    its own name (``spawn_agent`` returns it unchanged). The availability check
+    must mirror that exemption independently of the direct-client switch exemption
+    (``spawn_agent_name``, empty on the shared runtime): an unprojected launch
+    agent the backend advertises under its own name is a valid session, not a
+    substitution.
+    """
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kiro_default"
+    # Projection holds a view for a DIFFERENT agent; kiro_default has none.
+    rt._native_skill_projection = NativeSkillProjection(aliases={"other": "other-alias"})
+    assert (
+        await rt._verify_spawn_agent_active(
+            "s1",
+            _new_resp(
+                {"currentModeId": "kiro_default", "availableModes": [{"id": "kiro_default"}]}
+            ),
+            override=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_spawn_agent_active_still_fails_closed_on_substitution_with_a_projected_agent():
+    """A backend default still fails closed under the plain declared-name comparison.
+
+    When the backend ran its OWN default agent after refusing the spec, the
+    reported current mode matches neither the declared name nor anything framing
+    maps to it, so the guard still terminates and raises.
+    """
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "kirocrew"
+    rt._native_skill_projection = NativeSkillProjection(aliases={"kirocrew": "native-alias-abc"})
+    rt.terminate_session = AsyncMock()  # type: ignore[method-assign]
+    with pytest.raises(AcpRuntimeError, match="spawned with --agent"):
+        await rt._verify_spawn_agent_active(
+            "s1",
+            _new_resp(
+                {"currentModeId": "kiro_default", "availableModes": [{"id": "kiro_default"}]}
+            ),
+            override=None,
+        )
+    rt.terminate_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_verify_spawn_agent_active_still_fails_closed_when_declared_name_is_absent():
+    """A genuine substitution still fails closed under the declared-name comparison.
+
+    When the backend reports a DIFFERENT current mode than the launch identity, the
+    guard still terminates and raises -- the plain comparison does not loosen the
+    substitution check.
+    """
+    from kiro_crew.acp.skill_projection import NativeSkillProjection
+
+    rt, _, _ = _make_runtime()
+    rt._agent = "custom"
+    rt._native_skill_projection = NativeSkillProjection(aliases={"custom": "native-alias"})
+    rt.terminate_session = AsyncMock()  # type: ignore[method-assign]
+    with pytest.raises(AcpRuntimeError, match="spawned with --agent"):
+        await rt._verify_spawn_agent_active(
+            "s1",
+            _new_resp({"currentModeId": "default", "availableModes": [{"id": "default"}]}),
+            override=None,
+        )
+    rt.terminate_session.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -2021,10 +2021,28 @@ class AcpRuntime:
                 # lease -- and them -- out of the prune.
                 self._spawn_skill_projection = self._native_skill_projection
                 if self._native_skill_projection is not None:
+                    # Deliberately do NOT set spawn_agent_name here. The shared
+                    # runtime activates the launched agent through
+                    # _activate_mode_bracketed, which allows self._agent at every
+                    # session start explicitly (keyed on self._agent, translate
+                    # bypassing request()). Setting spawn_agent_name would ALSO make
+                    # request() -- the general outbound path a mid-session set_mode
+                    # takes -- tolerate the launch agent indefinitely, so a switch
+                    # back to it after its view vanished would reactivate a cached
+                    # unprojected spec the strict resolver exists to refuse. The
+                    # field stays empty on the shared runtime; only the direct
+                    # client (one session, no mid-session re-entry) sets it. The
+                    # launch mode must still be ADVERTISED so the session open finds
+                    # an activatable mode (frame reads advertised_launch_name, which
+                    # the shared runtime DOES set -- advertising is safe for both
+                    # runtimes; only request()'s mid-session tolerance is withheld).
+                    self._native_skill_projection.advertised_launch_name = self._agent
                     argv = list(argv)
                     agent_position = argv.index("--agent") + 1
                     try:
-                        argv[agent_position] = self._native_skill_projection.agent(self._agent)
+                        argv[agent_position] = self._native_skill_projection.spawn_agent(
+                            self._agent
+                        )
                     except ValueError as exc:
                         # The projection refused this agent's view -- a
                         # ``kirocrew-core`` restriction authored in its spec, a
@@ -2034,7 +2052,11 @@ class AcpRuntime:
                         # paths translate (``providers/acp.py`` handles
                         # ``AcpRuntimeError`` around ``spawn()``); a bare
                         # ``ValueError`` would leave ``spawn()`` as an internal
-                        # failure with the actionable text unread.
+                        # failure with the actionable text unread. ``spawn_agent``
+                        # raises for that authored refusal (a spec that projected
+                        # but excludes the search tool its view needs); an agent
+                        # with no prepared view keeps its authored name and never
+                        # lands here.
                         raise AcpRuntimeError(str(exc)) from exc
         except _KiroExecutableTrustError as exc:
             raise AcpRuntimeError(str(exc)) from exc
@@ -5955,6 +5977,22 @@ class AcpRuntime:
             f"--agent-only` to rewrite the agent config."
         )
 
+    def _resolve_start_alias(self, projection: Any, mode_agent: str) -> str:
+        """Resolve *mode_agent*'s alias for a session START, launch-agent-aware.
+
+        The launched agent's own activation is allowed at EVERY start even with
+        no prepared view (the process is already running as it, and a shared
+        runtime starts many sessions as self._agent over its life), so it takes
+        ``spawn_agent`` (which keeps the authored name) rather than the strict
+        ``agent``. Every OTHER mode_agent takes the strict resolver, so a switch
+        to a mode this view never prepared is still rejected. Used at the initial
+        resolution AND at both supersession re-checks, so a newer EMPTY projection
+        adopted by a concurrent start does not reject the unchanged launch agent
+        the strict resolver has no entry for."""
+        if mode_agent and mode_agent == self._agent:
+            return str(projection.spawn_agent(mode_agent))
+        return str(projection.agent(mode_agent))
+
     def _superseding_alias(self, projection: Any, mode_agent: str) -> str:
         """*mode_agent*'s alias in a newer view adopted while its start was pending.
 
@@ -5962,7 +6000,7 @@ class AcpRuntime:
         sent again; when the newer view does not offer the agent at all, the
         start fails rather than fall back to the older one."""
         try:
-            return str(projection.agent(mode_agent))
+            return self._resolve_start_alias(projection, mode_agent)
         except ValueError as exc:
             emit_counter(SKILL_VIEW_FALLBACKS, {"outcome": "refused_superseded"})
             raise AcpRuntimeError(
@@ -6015,7 +6053,11 @@ class AcpRuntime:
             return
         projection = getattr(self, "_native_skill_projection", None)
         try:
-            newest = projection.agent(mode_agent) if projection is not None else None
+            newest = (
+                self._resolve_start_alias(projection, mode_agent)
+                if projection is not None
+                else None
+            )
         except ValueError:
             newest = None
         if newest == sent_alias:
@@ -6192,7 +6234,21 @@ class AcpRuntime:
             sent_alias: str | None = None
             untranslated: dict[str, Any] = {}
             if projection_now is not None:
-                sent_alias = projection_now.agent(mode_agent)
+                # The launched agent's own activation is allowed at EVERY session
+                # start, even with no prepared view: the process is already running
+                # as it, and a shared runtime starts many sessions as self._agent
+                # over its life, so this is not a one-shot token to consume -- doing
+                # so would break the second shared session that legitimately starts
+                # as the same agent. _resolve_start_alias keeps the authored name
+                # for self._agent; every OTHER mode_agent takes the strict agent(),
+                # so a switch to a mode this projection never prepared is still
+                # rejected and an agent cannot escape its scope. The SAME resolver
+                # runs at both supersession re-checks below, so a newer empty
+                # projection adopted by a concurrent start does not reject the
+                # unchanged launch agent. The general (mid-session) set_mode path
+                # stays strict as before -- this allowance is scoped to the start
+                # bracket and keyed on self._agent, not on a mutable token.
+                sent_alias = self._resolve_start_alias(projection_now, mode_agent)
                 wire = {**params, "modeId": sent_alias}
                 untranslated = {"translate": False}
             retries = iter(_PROJECTED_MODE_RETRY_DELAYS_SECS)
