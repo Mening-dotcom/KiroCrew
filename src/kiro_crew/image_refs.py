@@ -145,8 +145,11 @@ _ANY_IMAGE_SUFFIX_RE = re.compile(rf"\.{_SUFFIX_GROUP}", re.IGNORECASE)
 _STANDALONE_LEAD_RE = re.compile(r"[\s(\[<\"']")
 
 
+_LINE_RE = re.compile(r"[^\n]+")
+
+
 def _mask_code_spans(text: str, iter_fence_spans) -> str:
-    """*text* with fenced blocks and inline code blanked, length preserved.
+    """*text* with every literal span (code, escaped markup) blanked, length kept.
 
     Offsets from a scan of the result therefore index straight into *text*.
     Newlines are kept so the per-line inline pass still sees the real line
@@ -160,8 +163,25 @@ def _mask_code_spans(text: str, iter_fence_spans) -> str:
     this module's scope (see the IMPORT RULE) and its caller already pays that
     deferred import once per call.
     """
+    # Deferred for the same reason as the fence scanner: see the IMPORT RULE.
+    from kiro_crew.messaging.outbound_files import (
+        IMAGE_MD_RE,
+        _literal_image_marker,
+        _walk_destination,
+    )
+
     chars = list(text)
-    for start, end in iter_fence_spans(text):
+    fenced = list(iter_fence_spans(text))
+    spans = list(fenced)
+    # Literal markup (escaped or indented) is blanked whole, judged by the same
+    # predicate ``iter_local_refs`` uses, so both passes keep the same spans.
+    for m in IMAGE_MD_RE.finditer(text):
+        dest, consumed = _walk_destination(text[m.end() :])
+        if dest and _literal_image_marker(text, m.start(), fenced):
+            spans.append((max(m.start() - 1, 0), m.end() + consumed))
+    # A bare path on a 4-space-indented line is indented code.
+    spans += [m.span() for m in _LINE_RE.finditer(text) if m.group().expandtabs(4)[:4] == "    "]
+    for start, end in spans:
         for i in range(start, end):
             if chars[i] != "\n":
                 chars[i] = " "
@@ -233,8 +253,8 @@ def strip_image_refs(text: str) -> str:
     rewrite happens only after a file was actually read while a substitution has
     no such condition:
 
-    * code is masked (:func:`_mask_code_spans`), so a fenced or inline-code
-      path is documentation and stays readable;
+    * code is masked (:func:`_mask_code_spans`), so a fenced, inline-code,
+      4-space-indented or escaped ``\\![x](...)`` path stays readable;
     * the path must stand alone (:data:`_STANDALONE_LEAD_RE`), so a path inside
       a URL query is left as part of its URL.
 
@@ -252,15 +272,11 @@ def strip_image_refs(text: str) -> str:
     BOTH grammars and only the predicate can tell a genuine URL from a stored
     UNC attachment on a roaming profile's share.
 
-    Two residues remain, both inherited and both narrower than the builder's own
-    behaviour rather than wider. ``_PATH_RE`` is platform-gated, so a bare
+    One residue remains, inherited and narrower than the builder's own
+    behaviour rather than wider: ``_PATH_RE`` is platform-gated, so a bare
     Windows path in a transcript transferred to a POSIX host is not matched --
     it is not inlined there either, and the markdown shape is matched on both
-    hosts. And escaped ``\\![x](...)`` markup and 4-space-indented code are not
-    treated as code here, so a genuine absolute path inside one is replaced by
-    the marker; the builder rewrites those same spans to ``[image: <name>]``
-    whenever the file is readable, so this is that established rewrite extended
-    to the unreadable case, on a per-build copy, with the on-disk row untouched.
+    hosts.
 
     Reads no files and mutates nothing: it returns a new string.
     """
