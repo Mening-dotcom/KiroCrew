@@ -2418,6 +2418,17 @@ class SubagentInfo:
     # finds the persisted sid and arms session/load. Empty ⇒ the default
     # ``subagent:{id}``.
     conversation_key: str = ""
+    # The run that ADOPTED this run's conversation through ``spawn_continue``
+    # (its id), or "" while no continuation exists. Set on the ORIGINAL by
+    # ``_note_adoption`` the moment a continuation on ``subagent:<this id>`` is
+    # accepted, and never cleared: once a continuation has taken the work
+    # forward, this record is history, not retryable work -- the dashboard's
+    # Retry failed control re-spawns a failed run's original prompt with no
+    # conversation key, which for a continued run is a fresh writer on the
+    # same worktree. ``continuation_of`` reads it first and falls back to
+    # the registry scan, so a continuation dismissed from the panel still
+    # counts.
+    superseded_by: str = ""
     # Optional subprocess cwd override. When set, the subagent kiro-cli/claude-code
     # process launches here instead of the default ``subagent_<id>`` sandbox, so
     # cwd-relative resource globs (``.kiro/steering/**/*.md``, ``AGENTS.md``,
@@ -2687,6 +2698,51 @@ def _truncate_report_failure_text(text: str) -> str:
             break
         omitted = next_omitted
     return prefix + marker
+
+
+@dataclass(slots=True)
+class _ConversationAdmissionLock:
+    """One conversation's admission lock and the number of coroutines holding
+    or awaiting it.
+
+    :class:`_ConversationAdmission` counts a user in BEFORE awaiting the lock
+    and counts it out after releasing, so the record is dropped from the
+    manager's map exactly when nobody holds or waits on it -- never under a
+    waiter, which a fresh lock for the same conversation would otherwise run
+    beside.
+    """
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+class _ConversationAdmission:
+    """The ``async with`` handle on one conversation's admission lock -- the
+    ONLY way the lock is taken, so it is never held outside a scope that
+    releases it.
+
+    Entering counts the user in, acquires, then settles a stale retry hold
+    against its run's durable row; a cancellation or error landing anywhere in
+    that entry -- the follow-up watcher is cancelled at arbitrary awaits by a
+    parent teardown or a stage boundary -- releases what was taken and counts
+    the user out before it propagates, so the map is left as it was found and
+    the next claimant is admitted. Leaving releases and counts out; the record
+    goes with the last user. The coordinator owns both steps
+    (``_enter_conversation_admission`` / ``_exit_conversation_admission``);
+    this object only binds them to one scope.
+    """
+
+    __slots__ = ("_coordinator", "_conv_id")
+
+    def __init__(self, coordinator: ContinuationCoordinator, conv_id: str) -> None:
+        self._coordinator = coordinator
+        self._conv_id = conv_id
+
+    async def __aenter__(self) -> None:
+        await self._coordinator._enter_conversation_admission(self._conv_id)
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self._coordinator._exit_conversation_admission(self._conv_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3255,6 +3311,28 @@ class SubagentManager:
         # prunes completed runs out of `_agents` and an eviction must not silently
         # release the hold.
         self._abandoned_state_writers: set[str] = set()
+        # Admission claims on a finished run's CONVERSATION, keyed by that run's
+        # id: ``("retry", <run id or "">)`` from the retry route's gate read until
+        # the fresh run of its prompt has left every registry, ``("continuation",
+        # <preassigned id or "">)`` from a ``spawn_continue``'s first check until
+        # its accept has settled. Each side claims BEFORE its first await and the
+        # other side's gate reads the claim, so a retry and a continuation of one
+        # run are never both admitted into its worktree. A settled continuation
+        # turns its claim into ``SubagentInfo.superseded_by`` on the original; a
+        # refused one, or a refused retry, rolls its claim back. On the MANAGER
+        # for the reason the set above is: the original's card can be cleared
+        # from the panel while its retry still runs.
+        self._conversation_admissions: dict[str, tuple[str, str]] = {}
+        # The lock the two event-loop admission paths (the retry route, the
+        # async continuation entry) hold from their gate read through their
+        # spawn and the claim's settle, keyed the same way. The claim above is
+        # what a reader WITHOUT the lock sees (the sync continuation entry, a
+        # ``continuation_of`` read); the lock is what makes a concurrent
+        # claimant wait for the definitive answer -- the published mark or the
+        # admitted retry -- instead of a provisional one. Records are counted
+        # in and out, so an entry lives exactly while someone holds or awaits
+        # it (``_ConversationAdmissionLock``).
+        self._conversation_admission_locks: dict[str, _ConversationAdmissionLock] = {}
         # state.json is the source of truth for retention: give the
         # SessionManager's in-memory continuable cache a disk fallback so a
         # cache miss (restart window) cannot demote a promoted conversation.
@@ -5122,6 +5200,50 @@ class SubagentManager:
 
     def _scan_keep_states(self) -> list[tuple[str, str, str, str, str, float]]:
         return self._continuation._scan_keep_states_impl()
+
+    def continuation_of(self, agent_id: str) -> str:
+        """Id of the run that adopted *agent_id*'s conversation, or ``""``.
+
+        The read side of the adoption mark: a retry of a run whose work a
+        continuation has taken forward is a second writer on the same work,
+        so the dashboard's retry route refuses when this answers non-empty.
+        """
+        return self._continuation.continuation_of_impl(agent_id)
+
+    def reserve_conversation_admission(
+        self, conv_id: str, kind: str, run_id: str = ""
+    ) -> tuple[str, str] | None:
+        """Claim the admission of a *kind* (``"retry"`` or ``"continuation"``)
+        run on *conv_id*'s conversation, or return the ``(kind, run id)`` of the
+        claim that refuses it. *run_id* is the claimant's preassigned id, if
+        it has one.
+
+        Taken BEFORE the claimant's first await and settled with
+        :meth:`settle_conversation_admission`, so a retry and a continuation of
+        one run are never both admitted into its worktree.
+        """
+        return self._continuation.reserve_conversation_admission_impl(conv_id, kind, run_id)
+
+    def settle_conversation_admission(
+        self, conv_id: str, kind: str, run: SubagentInfo | None
+    ) -> None:
+        """Publish or roll back the *kind* claim on *conv_id*: an admitted
+        continuation marks the original (``superseded_by``) and releases, an
+        admitted retry holds while its run is in flight, a refusal releases."""
+        return self._continuation.settle_conversation_admission_impl(conv_id, kind, run)
+
+    def conversation_admission(self, conv_id: str) -> _ConversationAdmission:
+        """The ``async with`` handle on *conv_id*'s admission lock: the retry
+        route and the async continuation entry hold it from their gate read
+        through their spawn and the claim's settle, so a concurrent claimant
+        waits for the definitive answer. The lock is taken no other way."""
+        return self._continuation.conversation_admission_impl(conv_id)
+
+    def _run_in_flight(self, run_id: str) -> SubagentInfo | None:
+        return self._continuation._run_in_flight_impl(run_id)
+
+    def _note_adoption(self, conv_id: str, child: SubagentInfo | None) -> None:
+        return self._continuation._note_adoption_impl(conv_id, child)
 
     async def _rebuild_conversation_registry(self) -> None:
         return await self._continuation._rebuild_conversation_registry_impl()

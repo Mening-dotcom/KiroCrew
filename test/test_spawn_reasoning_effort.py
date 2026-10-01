@@ -479,6 +479,9 @@ class TestRecordAndRetry:
         )
         mgr = MagicMock()
         mgr.get.return_value = old
+        mgr.continuation_of.return_value = ""  # nobody continued this run
+        mgr.reserve_conversation_admission.return_value = None  # the claim is the route's
+        mgr.conversation_admission = MagicMock()  # the lock: an async-with handle
         mgr.spawn.return_value = SimpleNamespace(id="a2", done=False, error="")
         state = SimpleNamespace(subagents=mgr)
         request = MagicMock()

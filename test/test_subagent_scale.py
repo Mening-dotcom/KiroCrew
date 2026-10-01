@@ -542,9 +542,9 @@ class TestBatchIdentity:
         from types import SimpleNamespace
 
         from kiro_crew.dashboard.handlers.messaging import (
+            _spawn_retry_admitted,
             _stage_boundary_owner_for_parent,
             _stage_boundary_slot_for_parent,
-            api_spawn_retry,
         )
         from kiro_crew.dashboard.state import StageBoundary
         from kiro_crew.subagent_manager.admission.gate import _GateMixin
@@ -561,8 +561,10 @@ class TestBatchIdentity:
                 _GateMixin.spawn_impl,
                 '"_stage_boundary_owner": _stage_boundary_owner',
             ),
+            # The retry route's spawn, past its gates and under the
+            # conversation's admission claim.
             "retry": (
-                api_spawn_retry,
+                _spawn_retry_admitted,
                 "_stage_boundary_owner_for_parent(state, old.parent_session_key)",
             ),
             "respawn": (
@@ -2441,6 +2443,9 @@ class TestRetryGating:
     def _mgr_with(self, info: SubagentInfo) -> MagicMock:
         mgr = MagicMock()
         mgr.get = MagicMock(return_value=info)
+        mgr.continuation_of = MagicMock(return_value="")  # nobody continued it
+        mgr.reserve_conversation_admission = MagicMock(return_value=None)  # the route's claim
+        mgr.conversation_admission = MagicMock()  # the lock: an async-with handle
         return mgr
 
     def _request(self, mgr, agent_id: str):

@@ -346,6 +346,11 @@ class TestApiServerSpawn:
         )
         mock_mgr = MagicMock()
         mock_mgr.get.return_value = old
+        # Nobody continued this run; a MagicMock's default answer is truthy and
+        # would read as "adopted" to the route's continuation check.
+        mock_mgr.continuation_of.return_value = ""
+        mock_mgr.reserve_conversation_admission.return_value = None  # the claim is the route's
+        mock_mgr.conversation_admission = MagicMock()  # the lock: an async-with handle
         mock_mgr.spawn.return_value = MagicMock(id="retry-1", done=False, error="")
         state = _make_state(tmp_path, subagents=mock_mgr)
         app = web.Application(middlewares=[_owner_identity])

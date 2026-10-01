@@ -3945,6 +3945,9 @@ class TestSubagentDone:
         )
         retry = SubagentInfo(id="retry", task="failed", parent_session_key=parent)
         manager.get.return_value = old
+        manager.continuation_of.return_value = ""  # nobody continued this run
+        manager.reserve_conversation_admission.return_value = None  # the claim is the route's
+        manager.conversation_admission = MagicMock()  # the lock: an async-with handle
         manager.spawn.return_value = retry
         request = MagicMock()
         request.app = {"state": orch.dashboard_state}

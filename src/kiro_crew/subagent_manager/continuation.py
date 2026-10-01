@@ -19,6 +19,8 @@ if TYPE_CHECKING:
         Any,
         SubagentInfo,
         _cleanup_session_files_sync,
+        _ConversationAdmission,
+        _ConversationAdmissionLock,
         _redact,
         _subagents_dir,
         agent_dir_for_display,
@@ -163,6 +165,348 @@ class ContinuationCoordinator(ManagerComponent):
             if held in self._manager._abandoned_state_writers:
                 return SubagentInfo(id=held, task="", _state_writer_abandoned=True)
         return None
+
+    def _note_adoption_impl(self, conv_id: str, child: SubagentInfo | None) -> None:
+        """Mark run *conv_id* as superseded by *child*, the continuation that
+        just took its conversation forward.
+
+        Reached through ``settle_conversation_admission`` from both
+        ``continue_conversation`` entries once ``spawn`` has returned, so every
+        accepted continuation -- started or queued behind the stagger -- lands
+        the mark, and a REFUSED one leaves the original exactly as retryable
+        as it was. Refused means any TERMINAL answer: a typed refusal
+        (``conversation_busy``, ``conversation_gone``, a store refusal: ``done``
+        with an ``error``) and equally a row cancelled before it started (a
+        parent Stop-all while the spawn awaited its claim answers ``done`` and
+        ``user_stopped`` with no error); only a run that is live or queued
+        has taken the work forward. The mark lives on the original's own
+        record rather than on the child because the child can be dismissed
+        from the panel or evicted while the original's failed card stays; it
+        is never cleared, since the work has moved on whatever the
+        continuation then does. An original already evicted from ``_agents``
+        cannot carry it, and needs none: the retry route cannot find such a
+        run either.
+        """
+        if child is None or not child.id or child.done:
+            return
+        original = self._manager._agents.get(conv_id)
+        if original is None or original.id == child.id:
+            return
+        original.superseded_by = child.id
+
+    def _run_in_flight_impl(self, run_id: str) -> SubagentInfo | None:
+        """Run *run_id* while the LOOP can see it ahead of its completion, or
+        None.
+
+        The evidence ``_conversation_busy`` reads for a conversation, read for
+        one run: its live registry record, or the unstarted queue entry
+        carrying its id -- plus the pump's popped-row set
+        (``_dispatching_ids``), which holds a window row between its pop and
+        the registration of its run. None means the run is in no in-memory
+        registry: ended, or waiting in the task store outside the dispatch
+        window -- the observers (``_observe_retry_hold``) read the durable row
+        to tell those apart before a retry's claim is dropped.
+        """
+        live = self._manager._agents.get(run_id)
+        if live is not None:
+            return None if live.done else live
+        for params in self._manager._queue:
+            if params.get("_resume_id"):
+                continue
+            if str(params.get("_preassigned_id") or "") == run_id:
+                return SubagentInfo(id=run_id, task="", queued=True)
+        if run_id in (getattr(self._manager, "_dispatching_ids", None) or ()):
+            return SubagentInfo(id=run_id, task="", queued=True)
+        return None
+
+    def _held_admission(self, conv_id: str) -> tuple[str, str] | None:
+        """The claim held on *conv_id*'s conversation, or None. A pure read:
+        a retry's claim is dropped only by :meth:`_observe_retry_hold` /
+        :meth:`_observe_retry_hold_async`, which every claimant runs first."""
+        return self._manager._conversation_admissions.get(conv_id)
+
+    def _retry_hold_to_observe(self, conv_id: str) -> str:
+        """The run id a retry's claim on *conv_id* names when that run is in no
+        registry the loop can see, else ``""``: a claim with no run yet, a
+        continuation's claim, or a retry run still live, queued or being
+        dispatched needs no further observation."""
+        held = self._manager._conversation_admissions.get(conv_id)
+        if held is None or held[0] != "retry" or not held[1]:
+            return ""
+        return "" if self._run_in_flight_impl(held[1]) is not None else held[1]
+
+    def _retry_hold_lapses(self, conv_id: str, run_id: str, row_state: str | None) -> None:
+        """Drop the retry claim on *conv_id* unless *row_state*, the durable
+        row's state, says run *run_id* is still ahead of its end.
+
+        A run in no in-memory registry has either ended or is waiting in the
+        task store OUTSIDE the dispatch window (a saturated window keeps a
+        just-accepted row store-only until the refill brings it in), and the
+        two are told apart only by the row: a non-terminal state keeps the
+        hold, a terminal or absent row -- or no store at all, where nothing
+        durable can carry a run -- releases it. The hold therefore lasts
+        exactly as long as the second writer it fences, with no hook on the
+        run's own end.
+        """
+        from kiro_crew.taskq import TERMINAL
+
+        if row_state is not None and row_state not in TERMINAL:
+            return
+        held = self._manager._conversation_admissions.get(conv_id)
+        if held == ("retry", run_id):
+            self._manager._conversation_admissions.pop(conv_id, None)
+
+    def _observe_retry_hold(self, conv_id: str) -> None:
+        """Sync twin of :meth:`_observe_retry_hold_async`, for the sync
+        ``continue_conversation`` entry: the row is read on the calling thread,
+        as that entry's own ``spawn`` already reads the store there. An
+        unreadable store keeps the hold -- the run it names may be live.
+
+        Names are imported inside the body: this method does not end in
+        ``_impl``, so it keeps this module's globals.
+        """
+        from kiro_crew.subagent import logger
+
+        run_id = self._retry_hold_to_observe(conv_id)
+        if not run_id:
+            return
+        store = self._manager._admission.taskq_store()
+        if store is None:
+            self._retry_hold_lapses(conv_id, run_id, None)
+            return
+        try:
+            state = store.state_of(run_id)
+        except Exception:
+            logger.warning(
+                "retry hold on %s kept: the durable state of run %s could not be read",
+                conv_id,
+                run_id,
+                exc_info=True,
+            )
+            return
+        self._retry_hold_lapses(conv_id, run_id, state)
+
+    async def _observe_retry_hold_async(self, conv_id: str) -> None:
+        """Before an event-loop claimant reserves *conv_id*: when a retry's
+        claim names a run the loop cannot see, read that run's durable row on
+        the store's writer thread and drop the claim only once the row is
+        terminal or gone. Run under the admission lock, so the state it
+        settles is the one the claimant then reads.
+
+        Names are imported inside the body: this method does not end in
+        ``_impl``, so it keeps this module's globals.
+        """
+        from kiro_crew.subagent import logger
+
+        run_id = self._retry_hold_to_observe(conv_id)
+        if not run_id:
+            return
+        store = self._manager._admission.taskq_store()
+        if store is None:
+            self._retry_hold_lapses(conv_id, run_id, None)
+            return
+        try:
+            state = await store.run(store.state_of, run_id)
+        except Exception:
+            logger.warning(
+                "retry hold on %s kept: the durable state of run %s could not be read",
+                conv_id,
+                run_id,
+                exc_info=True,
+            )
+            return
+        self._retry_hold_lapses(conv_id, run_id, state)
+
+    def reserve_conversation_admission_impl(
+        self, conv_id: str, kind: str, run_id: str = ""
+    ) -> tuple[str, str] | None:
+        """Claim the admission of a *kind* run on *conv_id*'s conversation.
+
+        Returns None when the claim is now the caller's, else the ``(kind, run
+        id)`` of the claim that refuses it -- a continuation still being
+        admitted (*run_id* is the id it was preassigned, else empty), a retry
+        still being admitted (an empty id) or a retry's run still in flight.
+        The check and the write are one synchronous step, so on the event loop
+        no other claimant can slip between them; what makes the fence hold is
+        that each side claims BEFORE its first await, the window in which the
+        other side's gate read would otherwise find nothing.
+        """
+        held = self._held_admission(conv_id)
+        if held is not None:
+            return held
+        self._manager._conversation_admissions[conv_id] = (kind, run_id)
+        return None
+
+    def settle_conversation_admission_impl(
+        self, conv_id: str, kind: str, run: SubagentInfo | None
+    ) -> None:
+        """Settle the *kind* claim on *conv_id* with *run*, what ``spawn``
+        answered: None, a terminal record (a typed refusal with an ``error``,
+        or a row cancelled before it started -- ``done`` and ``user_stopped``
+        with no error), or the admitted run (started or queued).
+
+        An admitted continuation publishes the adoption mark on the original
+        and releases the claim: the mark is the durable half of the fence. An
+        admitted retry keeps the claim, now naming its run, which the
+        observers drop once that run has ended in every registry and in the
+        store. Any terminal answer, on either side, is a refusal and rolls
+        the claim back so the original is exactly as continuable and as
+        retryable as it was -- a refusal is not a commit. A claim another
+        kind holds is left alone: this caller never held it.
+        """
+        held = self._manager._conversation_admissions.get(conv_id)
+        if held is None or held[0] != kind:
+            return
+        admitted = run is not None and bool(run.id) and not run.done
+        if kind == "retry" and admitted:
+            assert run is not None
+            self._manager._conversation_admissions[conv_id] = (kind, run.id)
+            return
+        if kind == "continuation" and admitted:
+            self._note_adoption_impl(conv_id, run)
+        self._manager._conversation_admissions.pop(conv_id, None)
+
+    def conversation_admission_impl(self, conv_id: str) -> _ConversationAdmission:
+        """The ``async with`` handle on *conv_id*'s admission lock.
+
+        One lock per conversation, held by the retry route and by the async
+        continuation entry from their gate read through their spawn and the
+        claim's settle: the second claimant waits and then reads the definitive
+        state -- the published mark, or the admitted retry's hold -- rather than
+        a provisional one. The handle is the lock's only entry, so every await
+        that runs with it held -- the body, and the stale-hold observation the
+        entry itself performs -- sits inside the scope that releases it.
+        """
+        return _ConversationAdmission(self, conv_id)
+
+    async def _enter_conversation_admission(self, conv_id: str) -> None:
+        """Count the user in, acquire *conv_id*'s lock, then settle any stale
+        retry hold against its run's durable row (``_observe_retry_hold_async``),
+        so the claimant's gate reads a hold that is current.
+
+        Each step undoes what the earlier ones took if it raises: a wait that
+        is cancelled counts itself back out, and a cancellation or error during
+        the observation -- the follow-up watcher is cancelled at arbitrary
+        awaits by a parent teardown or a stage boundary -- releases the lock and
+        counts out before it propagates. The map is then as it was found and
+        the next claimant is admitted; nothing can leave a lock held with no
+        scope to release it.
+
+        Names are imported inside the body: this method does not end in
+        ``_impl``, so it keeps this module's globals.
+        """
+        from kiro_crew.subagent import _ConversationAdmissionLock
+
+        locks = self._manager._conversation_admission_locks
+        entry = locks.get(conv_id)
+        if entry is None:
+            entry = locks[conv_id] = _ConversationAdmissionLock()
+        entry.users += 1
+        try:
+            await entry.lock.acquire()
+        except BaseException:
+            self._count_admission_user_out(conv_id, entry)
+            raise
+        try:
+            await self._observe_retry_hold_async(conv_id)
+        except BaseException:
+            self._exit_conversation_admission(conv_id)
+            raise
+
+    def _exit_conversation_admission(self, conv_id: str) -> None:
+        """Release *conv_id*'s admission lock and count the user out; the
+        record goes with the last user, so the map holds only conversations
+        with an admission in flight."""
+        entry = self._manager._conversation_admission_locks.get(conv_id)
+        if entry is None:
+            return
+        entry.lock.release()
+        self._count_admission_user_out(conv_id, entry)
+
+    def _count_admission_user_out(self, conv_id: str, entry: _ConversationAdmissionLock) -> None:
+        entry.users -= 1
+        if entry.users <= 0:
+            self._manager._conversation_admission_locks.pop(conv_id, None)
+
+    def _admission_refusal(
+        self,
+        conv_id: str,
+        held: tuple[str, str],
+        task: str,
+        parent_session_key: str,
+        _preassigned_id: str,
+        _stage_boundary_owner: str,
+    ) -> SubagentInfo:
+        """The typed refusal a continuation gets while *held* -- the claim on
+        *conv_id*'s conversation -- stands: ``conversation_busy``, the class
+        every caller already handles (the follow-up watcher retries it a
+        bounded number of times, the dashboard route answers 409), naming the
+        run when the claim has one. A retry of a failed run is a fresh run of
+        its prompt in the same worktree, so a continuation beside it is the
+        second writer the retry route refuses from its side; a second
+        continuation admitted beside the first is the race the busy gate
+        exists to refuse, caught here while the first is still between the
+        gate and the registries.
+
+        Names are imported inside the body: this method does not end in
+        ``_impl``, so it keeps this module's globals.
+        """
+        from kiro_crew.subagent import SubagentInfo, _redact
+
+        kind, run_id = held
+        if kind == "retry":
+            detail = (
+                f"run {run_id}, a retry of run {conv_id}, is in flight in its worktree"
+                if run_id
+                else f"a retry of run {conv_id} is being admitted on this conversation"
+            )
+        else:
+            detail = (
+                f"run {run_id}, a continuation of run {conv_id}, is being admitted"
+                if run_id
+                else f"a continuation of run {conv_id} is being admitted"
+            )
+        return SubagentInfo(
+            id=_preassigned_id or self._manager._mint_agent_id(),
+            task=_redact(task),
+            done=True,
+            parent_session_key=parent_session_key,
+            _stage_boundary_owner=_stage_boundary_owner,
+            error=f"conversation_busy: {detail} -- wait for its completion event",
+        )
+
+    def continuation_of_impl(self, agent_id: str) -> str:
+        """Id of the run that adopted *agent_id*'s conversation, or ``""``.
+
+        The mark ``_note_adoption`` left on the original is read first. The
+        registry scan behind it is the same evidence read from the other side
+        -- any run, live or finished, whose ``conversation_key`` names this
+        run, and any unstarted queue entry carrying that key -- so a
+        continuation that reached the registry without passing the mark (a
+        durable row re-dispatched under its original params) still counts.
+        ``_resume_id`` entries are skipped for the reason ``_conversation_busy``
+        gives: they carry no conversation key and name a resident run, not a
+        continuation. Last, a continuation whose admission is still in flight
+        (its claim reserved, its spawn not yet answered) counts too, as the id
+        it was preassigned or the literal ``pending``: the reservation IS the
+        adoption to a reader without the admission lock.
+        """
+        original = self._manager._agents.get(agent_id)
+        if original is not None and original.superseded_by:
+            return original.superseded_by
+        conv_key = f"subagent:{agent_id}"
+        for info in self._manager._agents.values():
+            if info.id != agent_id and info.conversation_key == conv_key:
+                return info.id
+        for params in self._manager._queue:
+            if params.get("_resume_id"):
+                continue
+            if str(params.get("conversation_key") or "") == conv_key:
+                return str(params.get("_preassigned_id") or "queued")
+        held = self._held_admission(agent_id)
+        if held is not None and held[0] == "continuation":
+            return held[1] or "pending"
+        return ""
 
     def _keep_recorded_on_disk_impl(self, key: str) -> bool:
         """Retention guard for subagent conversations without loop-side disk probes.
@@ -384,22 +728,33 @@ class ContinuationCoordinator(ManagerComponent):
         spawn, so its value has to be awaited -- which is exactly what the async
         entry does.
         """
-        prelude = self._manager._continue_prelude(
-            conv_id,
-            task,
-            parent_session_key,
-            agent,
-            model,
-            max_turns,
-            cwd,
-            _preassigned_id,
-            _memory_mode,
-            _crew_log_asked,
-            _stage_boundary_owner=_stage_boundary_owner,
-        )
-        if not isinstance(prelude, dict):
-            return prelude
-        return self._manager.spawn(**prelude)
+        self._observe_retry_hold(conv_id)
+        held = self.reserve_conversation_admission_impl(conv_id, "continuation", _preassigned_id)
+        if held is not None:
+            return self._admission_refusal(
+                conv_id, held, task, parent_session_key, _preassigned_id, _stage_boundary_owner
+            )
+        child: SubagentInfo | None = None
+        try:
+            prelude = self._manager._continue_prelude(
+                conv_id,
+                task,
+                parent_session_key,
+                agent,
+                model,
+                max_turns,
+                cwd,
+                _preassigned_id,
+                _memory_mode,
+                _crew_log_asked,
+                _stage_boundary_owner=_stage_boundary_owner,
+            )
+            if not isinstance(prelude, dict):
+                return prelude
+            child = self._manager.spawn(**prelude)
+            return child
+        finally:
+            self.settle_conversation_admission_impl(conv_id, "continuation", child)
 
     async def continue_conversation_async_impl(
         self,
@@ -417,81 +772,111 @@ class ContinuationCoordinator(ManagerComponent):
     ) -> SubagentInfo | None:
         """:meth:`continue_conversation_impl` for event-loop callers: the same
         prelude, then ``spawn_async`` (write-before-ack with the store write on
-        its writer thread)."""
-        # Keep map/busy/promotion mutations on-loop. Only the missing owner's
-        # immutable record is read by the worker, then the prelude rechecks busy.
-        from kiro_crew.execution_context import stricter_memory_mode
+        its writer thread), under the conversation's admission lock.
 
-        conv_key = f"subagent:{conv_id}"
-        if self._manager._conversation_busy(conv_key) is not None:
-            busy_result = self._manager._continue_prelude(
-                conv_id,
-                task,
-                parent_session_key,
-                agent,
-                model,
-                max_turns,
-                cwd,
-                _preassigned_id,
-                _memory_mode,
+        The lock is held -- through its one entry, the ``async with`` handle --
+        from the first check to the settle of the admission claim, and the
+        retry route holds the same lock across its own gate and spawn, so a
+        retry and a continuation of one run are admitted one after the other
+        and the second reads the first's outcome -- the published
+        ``superseded_by`` mark, or the admitted retry's hold -- never the
+        window between a check and a spawn. Inside: the claim, the busy
+        pre-check, the off-loop record read, the prelude and ``spawn_async``,
+        and the claim's settle on every exit.
+        """
+        async with self.conversation_admission_impl(conv_id):
+            # Keep map/busy/promotion mutations on-loop. Only the missing owner's
+            # immutable record is read by the worker, then the prelude rechecks busy.
+            from kiro_crew.execution_context import stricter_memory_mode
+
+            # The claim comes FIRST, ahead of every await below: a reader without
+            # the lock (the sync entry, ``continuation_of``) sees it, and the state
+            # this entry awaits in (the record read, ``spawn_async``'s store accept)
+            # is exactly the window in which that reader would otherwise find
+            # nothing. Settled on every exit with what ``spawn_async`` answered; a
+            # refusal returned before the spawn settles it with None.
+            held = self.reserve_conversation_admission_impl(
+                conv_id, "continuation", _preassigned_id
             )
-            assert not isinstance(busy_result, dict)
-            return busy_result
-        original = self._manager._agents.get(conv_id)
-        execution = original.execution_context if original is not None else None
-        state = ...
-        try:
-            if _memory_mode is None:
-                resolver = self._manager._memory_mode_for_session
-                _memory_mode = (
-                    resolver(parent_session_key) if resolver is not None else "persistent"
+            if held is not None:
+                return self._admission_refusal(
+                    conv_id, held, task, parent_session_key, _preassigned_id, _stage_boundary_owner
                 )
-            if execution is None or not self._manager._sessions.resumable_sid(conv_key):
-
-                def read_snapshot():
-                    row = self._persistence.read_state(conv_id)
-                    captured = (
-                        self._persistence.read_run_execution(conv_id, state=row)
-                        if row is not None
-                        else None
+            child: SubagentInfo | None = None
+            try:
+                conv_key = f"subagent:{conv_id}"
+                if self._manager._conversation_busy(conv_key) is not None:
+                    busy_result = self._manager._continue_prelude(
+                        conv_id,
+                        task,
+                        parent_session_key,
+                        agent,
+                        model,
+                        max_turns,
+                        cwd,
+                        _preassigned_id,
+                        _memory_mode,
                     )
-                    return row or {}, captured
+                    assert not isinstance(busy_result, dict)
+                    return busy_result
+                original = self._manager._agents.get(conv_id)
+                execution = original.execution_context if original is not None else None
+                state = ...
+                try:
+                    if _memory_mode is None:
+                        resolver = self._manager._memory_mode_for_session
+                        _memory_mode = (
+                            resolver(parent_session_key) if resolver is not None else "persistent"
+                        )
+                    if execution is None or not self._manager._sessions.resumable_sid(conv_key):
 
-                state, restored = await asyncio.to_thread(read_snapshot)
-                execution = execution or restored
-            if execution is not None:
-                execution = self._manager._admission.resolve_spawn_execution(
-                    conversation_key=conv_key,
-                    agent=agent,
-                    _memory_mode=stricter_memory_mode(execution.memory_mode, _memory_mode),
-                    _record=execution,
+                        def read_snapshot():
+                            row = self._persistence.read_state(conv_id)
+                            captured = (
+                                self._persistence.read_run_execution(conv_id, state=row)
+                                if row is not None
+                                else None
+                            )
+                            return row or {}, captured
+
+                        state, restored = await asyncio.to_thread(read_snapshot)
+                        execution = execution or restored
+                    if execution is not None:
+                        execution = self._manager._admission.resolve_spawn_execution(
+                            conversation_key=conv_key,
+                            agent=agent,
+                            _memory_mode=stricter_memory_mode(execution.memory_mode, _memory_mode),
+                            _record=execution,
+                        )
+                except (OSError, ValueError) as exc:
+                    return SubagentInfo(
+                        id=_preassigned_id or self._manager._mint_agent_id(),
+                        task=_redact(task),
+                        done=True,
+                        parent_session_key=parent_session_key,
+                        error=f"memory_unavailable: {exc}",
+                    )
+                prelude = self._manager._continue_prelude(
+                    conv_id,
+                    task,
+                    parent_session_key,
+                    agent,
+                    model,
+                    max_turns,
+                    cwd,
+                    _preassigned_id,
+                    _memory_mode,
+                    _crew_log_asked,
+                    _execution_context=execution,
+                    _captured_state=state,
+                    _stage_boundary_owner=_stage_boundary_owner,
                 )
-        except (OSError, ValueError) as exc:
-            return SubagentInfo(
-                id=_preassigned_id or self._manager._mint_agent_id(),
-                task=_redact(task),
-                done=True,
-                parent_session_key=parent_session_key,
-                error=f"memory_unavailable: {exc}",
-            )
-        prelude = self._manager._continue_prelude(
-            conv_id,
-            task,
-            parent_session_key,
-            agent,
-            model,
-            max_turns,
-            cwd,
-            _preassigned_id,
-            _memory_mode,
-            _crew_log_asked,
-            _execution_context=execution,
-            _captured_state=state,
-            _stage_boundary_owner=_stage_boundary_owner,
-        )
-        if not isinstance(prelude, dict):
-            return prelude
-        return await self._manager.spawn_async(**prelude)
+                if not isinstance(prelude, dict):
+                    return prelude
+                child = await self._manager.spawn_async(**prelude)
+                return child
+            finally:
+                self.settle_conversation_admission_impl(conv_id, "continuation", child)
 
     def _continue_prelude_impl(
         self,

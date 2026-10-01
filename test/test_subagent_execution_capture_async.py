@@ -314,9 +314,32 @@ async def test_retry_retains_original_member_app_and_mode_after_parent_closes(mo
         memory_store="member-a",
         execution_context=None if cold else captured,
     )
+
+    class _NoLock:
+        """The admission lock's ``async with`` handle, entered and left by the
+        route; nothing to serialize here."""
+
+        async def __aenter__(self) -> None:
+            return None
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
     request = SimpleNamespace(
         get=lambda key, default=None: default,
-        app={"state": SimpleNamespace(subagents=SimpleNamespace(get=lambda _id: old))},
+        app={
+            "state": SimpleNamespace(
+                # ``continuation_of``: nobody continued this run; the admission
+                # lock and claim are the route's, and settling them is a no-op.
+                subagents=SimpleNamespace(
+                    get=lambda _id: old,
+                    continuation_of=lambda _id: "",
+                    reserve_conversation_admission=lambda _id, _kind: None,
+                    settle_conversation_admission=lambda _id, _kind, _run: None,
+                    conversation_admission=lambda _id: _NoLock(),
+                )
+            )
+        },
         match_info={"agent_id": old.id},
     )
     loop_thread = threading.get_ident()

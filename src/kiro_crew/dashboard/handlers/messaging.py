@@ -115,6 +115,7 @@ from kiro_crew.slack.outbound import OPTIONS_FALLBACK_TEXT, PostedOptions
 from kiro_crew.spawn_warm import warm_project_agents_for_spawn
 from kiro_crew.subagent import (
     DEFERRED_QUEUED_REASONS,
+    SubagentInfo,
     effort_applied_note,
     effort_drop_reason,
     parent_spawn_allowlists,
@@ -1604,7 +1605,11 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
 
     Backs the chip's "Retry failed (N)" batch control. Only terminal failed
     agents are retryable (never running ones — that would double the work —
-    and never user-stopped ones — the user killed that work on purpose).
+    and never user-stopped ones — the user killed that work on purpose), and
+    never a failed run whose conversation a ``spawn_continue`` adopted
+    (``continuation_of``): that work moved to the continuation, and a fresh
+    spawn of the original prompt would double it too (typed 409,
+    ``superseded_by_continuation``).
     Spawns a fresh agent with the original task/agent/parent (new id; the old
     terminal card stays for history). Batch identity is NOT carried over: the
     retry is a standalone spawn, so a wave's digest accounting (already
@@ -1629,6 +1634,100 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
             {"error": f"only failed agents can be retried (outcome={old.outcome})"},
             status=409,
         )
+    # A failed run whose conversation a ``spawn_continue`` has taken forward is
+    # history, not retryable work: the continuation holds the run's context and
+    # may already have finished the task, so a fresh spawn of the original
+    # prompt is a SECOND writer on the same work -- a turn-limited member whose
+    # continuation finished its task, re-spawned from this route into the same
+    # worktree once per click of the control that backs it. The card stays
+    # "failed" in the panel, so the button keeps offering it; the refusal is
+    # what closes the gap, and it names the run that carries the work on.
+    #
+    # Ordering contract, shared with the continuation entries: the adoption
+    # check, the claim, the awaits (the execution record, the agent warm), the
+    # spawn and the claim's settle run under the conversation's admission
+    # lock, so a retry and a continuation of one run are admitted one after
+    # the other and the second reads the first's outcome -- the published
+    # mark, or the admitted retry's hold -- never the window between a check
+    # and a spawn. The claim is what a reader without the lock sees. The lock
+    # has one entry, the ``async with`` handle, so it is released on every
+    # exit of this block, a cancellation during its own entry included.
+    info: Any = None
+    async with state.subagents.conversation_admission(agent_id):
+        continued_by = state.subagents.continuation_of(agent_id)
+        if continued_by:
+            return _superseded_by_continuation(continued_by)
+        held = state.subagents.reserve_conversation_admission(agent_id, "retry")
+        if held is not None:
+            kind, run_id = held
+            if kind == "continuation":
+                return _superseded_by_continuation(run_id or "pending")
+            return web.json_response(
+                {
+                    "error": (
+                        f"a retry of this run ({run_id}) is already in flight in its "
+                        "worktree; a second one would start a second copy of the same "
+                        "task. Wait for its completion event."
+                        if run_id
+                        else "a retry of this run is already being admitted; wait for its "
+                        "completion event."
+                    ),
+                    "code": "retry_in_flight",
+                    "retried_by": run_id or "pending",
+                },
+                status=409,
+            )
+        try:
+            info = await _spawn_retry_admitted(state, old)
+        finally:
+            # What ``spawn`` answered settles the claim: an admitted run holds the
+            # conversation until it has left every registry, a refusal (None, or
+            # done with an error), a read that failed on the way (the typed
+            # response) or an exception rolls the claim back.
+            state.subagents.settle_conversation_admission(
+                agent_id, "retry", None if isinstance(info, web.Response) else info
+            )
+    if isinstance(info, web.Response):
+        return info
+    if not info:
+        return web.json_response(
+            {"error": f"capacity reached ({state.subagents.max_concurrent})"}, status=429
+        )
+    if info.done and info.error:
+        return web.json_response({"error": info.error}, status=400)
+    return web.json_response({"id": info.id, "retried_from": agent_id, "status": "spawned"})
+
+
+def _superseded_by_continuation(continued_by: str) -> web.Response:
+    """The retry route's typed 409 for a run whose conversation a continuation
+    adopted -- or is adopting: ``continued_by`` is ``"pending"`` while the
+    continuation's admission is still in flight and no run id exists yet."""
+    if continued_by == "pending":
+        error = (
+            "this run's conversation is being continued right now (spawn_continue); "
+            "that continuation carries its work forward, and retrying the original "
+            "would start a second copy of the same task."
+        )
+    else:
+        error = (
+            f"this run's conversation was continued by run {continued_by} "
+            "(spawn_continue), which carries its work forward; retrying the "
+            "original would start a second copy of the same task. Continue or "
+            "retry that run instead."
+        )
+    return web.json_response(
+        {"error": error, "code": "superseded_by_continuation", "continued_by": continued_by},
+        status=409,
+    )
+
+
+async def _spawn_retry_admitted(
+    state: DashboardState, old: SubagentInfo
+) -> "SubagentInfo | web.Response | None":
+    """:func:`api_spawn_retry` past its gates, with the conversation's
+    admission claim held: the execution record, the agent warm, the stage
+    boundary owner and the spawn. Returns what ``spawn`` answered, or the
+    typed response of a read that failed on the way."""
     execution = old.execution_context
     if execution is None:
         from kiro_crew.subagent_persistence import read_run_execution
@@ -1664,7 +1763,7 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
         if exact_boundary is not None
         else _stage_boundary_owner_for_parent(state, old.parent_session_key)
     )
-    info = await _spawn_on_loop(
+    return await _spawn_on_loop(
         state,
         old._raw_task or old.task,
         parent_session_key=old.parent_session_key,
@@ -1693,13 +1792,6 @@ async def api_spawn_retry(request: web.Request) -> web.Response:
         _execution_context=execution.to_record(),
         _stage_boundary_owner=retry_boundary_owner,
     )
-    if not info:
-        return web.json_response(
-            {"error": f"capacity reached ({state.subagents.max_concurrent})"}, status=429
-        )
-    if info.done and info.error:
-        return web.json_response({"error": info.error}, status=400)
-    return web.json_response({"id": info.id, "retried_from": agent_id, "status": "spawned"})
 
 
 async def api_spawn_delete(request: web.Request) -> web.Response:
