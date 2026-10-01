@@ -53,6 +53,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -14300,6 +14301,12 @@ def _user_bus_socket_paths() -> tuple[str, ...]:
     systemd derives from ``XDG_RUNTIME_DIR``: the user manager's private socket
     (``systemd-run --scope`` tries it first) and the session bus. Abstract and
     non-unix transports are skipped -- they have no path to stat or dial here.
+
+    A D-Bus address value may percent-escape any byte (the spec's escaping is
+    ``%XX`` over the raw bytes), so it is decoded before use; probing the
+    escaped spelling literally would miss a live bus and drop the ceiling. A
+    decoded value carrying a NUL cannot name any filesystem socket and would
+    make ``os.stat`` raise ``ValueError`` on the spawn path, so it is skipped.
     """
     paths: list[str] = []
     for entry in os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").split(";"):
@@ -14308,8 +14315,11 @@ def _user_bus_socket_paths() -> tuple[str, ...]:
             continue
         for param in params.split(","):
             key, _, value = param.partition("=")
-            if key == "path" and value:
-                paths.append(value)
+            if key != "path" or not value:
+                continue
+            decoded = urllib.parse.unquote_to_bytes(value)
+            if decoded and b"\0" not in decoded:
+                paths.append(os.fsdecode(decoded))
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
     if runtime_dir:
         paths.append(os.path.join(runtime_dir, "systemd", "private"))
@@ -14453,8 +14463,13 @@ def _compute_cgroup_scope_probe() -> tuple[bool, str]:
     """Uncached capability check backing :func:`_probe_cgroup_scope`."""
     if sys.platform != "linux":
         return (False, "not Linux")
-    if shutil.which("systemd-run") is None:
-        return (False, "systemd-run not found")
+    # The same fixed-directory lookup ``cgroup_scope_argv`` pins its wrapper
+    # with, minus its PATH-walking miss diagnostic: this runs on the event loop
+    # each time the probe refreshes, so it must stay a handful of stats and
+    # never touch a PATH entry that may sit on a stalled mount. The miss is
+    # reported through the reason below instead.
+    if platform_compat.trusted_system_bin_quiet("systemd-run") is None:
+        return (False, "systemd-run not found in a trusted system directory")
     # A user session bus is required for `systemd-run --user`. The variable
     # alone proves nothing: a login shell sets it from $UID by formula, so it
     # stays set after logind removed the directory it names.
