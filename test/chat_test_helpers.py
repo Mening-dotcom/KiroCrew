@@ -287,7 +287,11 @@ def _make_state(tmp_path, **kwargs):
     sessions.find_mirror_sessions = MagicMock(side_effect=_find_mirror_sessions)
     state = DashboardState(
         sessions=sessions,
-        crons=MagicMock(list_jobs=MagicMock(return_value=[]), status=MagicMock(return_value={})),
+        crons=MagicMock(
+            list_jobs=MagicMock(return_value=[]),
+            status=MagicMock(return_value={}),
+            chat_folder_ids_async=AsyncMock(return_value=set()),
+        ),
         lessons=MagicMock(load_all=MagicMock(return_value=[])),
         start_time=0.0,
         conversation_log=ConversationLog(base_dir=tmp_path),

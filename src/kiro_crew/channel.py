@@ -191,6 +191,12 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # ``chat_tag_column_list`` stays available: the layout names no session.
     "chat_tag_column_create",
     "chat_tag_column_move",
+    # Deleting a folder reshapes the person's own sidebar, like pinning and the
+    # board writes. The chat_folder_delete handler in mcp_dashboard.py also
+    # refuses a ``channel:`` caller at dispatch, which is what holds for
+    # auto-approval; the create/move folder verbs are not here because a channel
+    # agent may organize its OWN sessions, but a delete removes a shared row.
+    "chat_folder_delete",
     "session_revive",
     # The four work-ledger tools, blocked for the same containment reason and not
     # for a new one: a channel agent has no dispatch relationship, so it is

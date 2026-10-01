@@ -16,6 +16,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_crew import pinned_fs
+from kiro_crew.cron_service.store import CronStoreBusy, CronStoreUnreadable
 from kiro_crew.dashboard.chat_persistence import _coerce_requested_mode, save_slot_off_loop
 from kiro_crew.dashboard.chat_tags import tags_write_lock, validate_folder_tag_ids
 from kiro_crew.dashboard.chat_utils import effective_session_key, slot_history_key
@@ -2179,9 +2180,9 @@ async def api_chat_folder_delete(request: web.Request) -> web.Response:
     # Each was closable in isolation; the class was not.
     #
     # Nothing shipped loses a capability: the one MCP tool that reaches this
-    # route, chat_folder_delete, deletes only an EMPTY folder and is refused
-    # here for an app like any other app caller, so its working callers are
-    # the person's own sessions and the dashboard UI. An app organizes its own work by
+    # route, chat_folder_delete, sends ``if_empty`` (below) and is refused here
+    # for an app like any other app caller, so its working callers are the
+    # person's own sessions and the dashboard UI. An app organizes its own work by
     # creating, renaming and reparenting its folders and filing its sessions --
     # cleanup is the person's, who can delete a full folder as they always could.
     if request_app:
@@ -2203,6 +2204,161 @@ async def api_chat_folder_delete(request: web.Request) -> web.Response:
             },
             status=403,
         )
+    # Defense in depth: a crew-member caller may not delete folders either, in
+    # EITHER mode. The chat auth middleware already admits only PATCH on this
+    # path shape for a member (see token_auth / handlers._shared), so a member's
+    # DELETE is refused before this handler runs; this endpoint-side refusal
+    # closes the finding at the point of the write regardless, so a later change
+    # to the admitted method set cannot let a member delete the person's folder.
+    # A member's folders are the person's shared sidebar, with no owner key to
+    # bound the write to, which is the same reason an app is refused above.
+    member_principal = str(request.get(MEMBER_CHAT_PRINCIPAL_KEY) or "")
+    if member_principal.startswith("member:"):
+        sel().log_api_access(
+            caller=member_principal,
+            operation="chat.folder_delete",
+            outcome="denied",
+            source="member_isolation",
+            resources=fid,
+            error="a crew member cannot delete folders",
+        )
+        return web.json_response(
+            {
+                "error": (
+                    "a crew member cannot delete folders - ask the person, or move "
+                    "your sessions out and leave the folder"
+                ),
+                "code": "folder_delete_forbidden",
+            },
+            status=403,
+        )
+    # ``?if_empty=true`` is the empty-only delete the chat_folder_delete MCP tool
+    # sends. It never unfiles a slot or lifts a subfolder: occupancy is answered
+    # where the removal happens. Live slots and child folders are re-checked
+    # inside the folder-store callback below, which runs synchronously under the
+    # store lock and removes the row from the live list in the same step, so a
+    # slot PATCH or a child create cannot land between the check and the removal
+    # (both refuse a folder that is absent from the live list). Archived
+    # sessions are counted first, off the loop, because that is a disk scan; a
+    # session that is filed AND closed inside that one scan is the residue, and
+    # its transcript keeps a folder id that every reader renders as unfiled.
+    if_empty = (request.query.get("if_empty") or "").strip().lower() in ("1", "true", "yes")
+    if if_empty:
+        loop = asyncio.get_running_loop()
+        archived = await loop.run_in_executor(subprocess_executor(), _folder_history_counts, state)
+        if archived.get(fid, 0):
+            return web.json_response(
+                {
+                    "error": "folder still holds archived sessions",
+                    "code": "folder_not_empty",
+                },
+                status=409,
+            )
+
+        # A saved cron job files its future tab into a folder by id, and a
+        # channel files into one by name, so an otherwise-empty folder either
+        # of them points at is NOT free to delete: removing it would strand
+        # every tab that reference later mints as unfiled. The bulk-cleanup
+        # path treats both as occupancy (see chat_folder_cleanup._referents);
+        # the empty-delete has to as well. Both reads are strict and fail
+        # CLOSED: an unreadable or contended store is an unknown reference set,
+        # not an empty one, so a failure refuses the delete rather than
+        # deleting a folder whose referents could not be read.
+        #
+        # Both referent sets are read inside ``prepare`` -- awaited under the
+        # SAME folder-store lock as the removal callback below -- so a cron or
+        # channel save committing between the read and the removal cannot slip
+        # a reference past the check. Reading them before the lock left a
+        # stale-snapshot window; reading them here closes it. (The archived
+        # scan above is a disk walk that cannot run under the loop-blocking
+        # lock, so a session filed-and-closed inside that one scan remains the
+        # one documented residue -- see the handler comment above.)
+        #
+        # Lazy import: chat_folder_cleanup imports chat_folders (circular at
+        # module level). The helpers are pure name-normalization + config reads.
+        # ``_keeps_itself`` is the SAME occupancy predicate the bulk cleanup uses
+        # (``_KEEP_FIELDS`` + the channel stamp + a channel-name match), so the
+        # empty-delete refuses a folder the person configured
+        # (project_dir/default_agent/steering_dirs/tags/color/icon) or a channel
+        # stamped, exactly as the person-driven cleanup does — the two paths
+        # cannot drift because they call one predicate.
+        from kiro_crew.dashboard.chat_folder_cleanup import (  # noqa: PLC0415
+            _keeps_itself,
+            channel_folder_names,
+        )
+
+        job_folder_ids: set[str] = set()
+        channel_names: set[str] = set()
+
+        class _ReferentsUnreadable(Exception):
+            pass
+
+        async def _read_referents_under_lock() -> None:
+            nonlocal job_folder_ids, channel_names
+            try:
+                job_folder_ids = await state.crons.chat_folder_ids_async()
+            except (CronStoreBusy, CronStoreUnreadable) as exc:
+                raise _ReferentsUnreadable() from exc
+            try:
+                channel_names = await asyncio.to_thread(channel_folder_names)
+            except Exception as exc:  # noqa: BLE001 - fail closed, delete nothing
+                raise _ReferentsUnreadable() from exc
+
+        def _remove_if_empty(folders: list[dict[str, Any]]) -> tuple[bool, str]:
+            row = next((f for f in folders if f.get("id") == fid), None)
+            if row is None:
+                return False, "gone"
+            # The empty-only mode removes rows by id with a filter, so a store
+            # carrying DUPLICATE ids (not producible by the uuid4 writer, but a
+            # hand-edited folders.json can hold them) would lose every matching
+            # row at once. Refuse rather than delete more than the one folder
+            # the caller named: the empty-only delete must touch exactly one row.
+            if sum(1 for f in folders if f.get("id") == fid) > 1:
+                return False, "folder id is not unique in the store"
+            if any(f.get("parent_id") == fid for f in folders):
+                return False, "folder has subfolders"
+            if any(slot.folder_id == fid for slot in state._slots.values()):
+                return False, "folder still holds live sessions"
+            if fid in job_folder_ids:
+                return False, "folder is referenced by a saved cron job"
+            # Carries the person's own settings, a channel stamp, or a channel
+            # name — the same rows the bulk cleanup keeps. Deleting the row would
+            # throw those settings away with it.
+            if _keeps_itself(row, channel_names):
+                return False, "folder holds saved settings or a channel reference"
+            folders[:] = [f for f in folders if f["id"] != fid]
+            return True, ""
+
+        try:
+            refused = await state.mutate_folders(
+                _remove_if_empty, prepare=_read_referents_under_lock
+            )
+        except _ReferentsUnreadable:
+            return web.json_response(
+                {
+                    "error": "cannot read folder references; nothing deleted",
+                    "code": "folder_refs_unreadable",
+                },
+                status=503,
+            )
+        if refused == "gone":
+            return web.json_response({"error": "not found", "code": "folder_not_found"}, status=404)
+        if refused:
+            return web.json_response({"error": refused, "code": "folder_not_empty"}, status=409)
+        _CHAT_FOLDER_ICON_EPOCHS.pop(fid, None)
+        pending_icon = _CHAT_FOLDER_PENDING_ICON_TASKS.pop(fid, None)
+        if pending_icon is not None and not pending_icon.done():
+            pending_icon.cancel()
+        state.push_slots_update()
+        source, caller = _audit_origin(request)
+        sel().log_api_access(
+            caller=caller,
+            operation="chat.folder_delete",
+            outcome="allowed",
+            source=source,
+            resources=fid,
+        )
+        return web.json_response({"ok": True})
     # Unfile the folder's slots first, then commit the folder removal. If that
     # commit fails, put the slots back: otherwise the delete half-lands —
     # conversations persistently unfiled while the folder they came from is
