@@ -8,8 +8,9 @@
 # in the first-run chat, where every other choice is made:
 #   0. From GitHub: fetch this branch's source into ~/.local/share/kirocrew/source
 #      (KIROCREW_SOURCE_DIR), then run the setup.sh inside it
-#   1. Python 3.12+, and whether Kiro CLI is installed (when it is not, the
-#      browser walks you through its install at the end; the build carries on)
+#   1. Python 3.12+, and whether Kiro CLI, the default agent engine, is installed
+#      (the browser asks which engine to use at the end and guides its install
+#      and sign-in; the build carries on either way)
 #   2. Node.js (via ensure-node.sh) and optional tools (git-lfs, ffmpeg for voice)
 #   3. Optional ACP adapter
 #   4. Build frontend (npm/vite) + backend (pip)
@@ -235,17 +236,21 @@ if [ -z "$_py" ]; then
     return 1 2>/dev/null || exit 1
 fi
 echo "  ✅ $($_py --version 2>&1) ($(which "$_py"))"
-# Kiro CLI now, before the long build, so a missing one is known up front. This
-# script does not install it and does not wait on it: the build carries on, and
-# `kirocrew start` then opens the browser, which walks through the install.
+# Kiro CLI now, before the long build, so it is known up front whether the default
+# agent engine is here. This script installs no engine and waits on none: the
+# build carries on, and the first-run chat asks which engine to use and walks
+# through installing and signing in to it.
 if _check kiro-cli; then
-    echo "  ✅ kiro-cli ($(which kiro-cli)); when it is signed out, 'kirocrew start' runs its own sign-in"
-elif [ "$_kc_start" = 1 ]; then
-    echo "  ⚠️  Kiro CLI, the default agent, isn't installed yet. Setup carries on, and at"
-    echo "     the end your browser walks you through installing it and signing in."
+    echo "  ✅ kiro-cli, the default agent engine ($(which kiro-cli))"
 else
-    echo "  ⚠️  Kiro CLI, the default agent, isn't installed yet. Setup carries on; then"
-    echo "     'kirocrew start' opens your browser, which walks you through installing it."
+    echo "  ⚠️  Kiro CLI, the default agent engine, isn't installed yet. Setup carries on."
+fi
+if [ "$_kc_start" = 1 ]; then
+    echo "     At the end your browser asks which agent engine to use (Kiro is the"
+    echo "     default) and walks you through installing and signing in to it."
+else
+    echo "     'kirocrew start' then opens your browser, which asks which agent engine to"
+    echo "     use (Kiro is the default) and walks you through installing and signing in."
 fi
 echo ""
 

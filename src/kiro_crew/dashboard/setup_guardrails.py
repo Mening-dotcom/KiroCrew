@@ -263,7 +263,30 @@ def _post(state: "DashboardState", slot: "_ChatSlot", text: str, meta: dict[str,
     logger.info("first-run guardrail notice in %s: %s", slot.key, meta)
 
 
-def _kickoff_answered(slot: "_ChatSlot") -> bool:
+def kickoff_handled(slot_key: str) -> None:
+    """Stop waiting on *slot_key*'s kickoff: another step answers its silence.
+
+    The scripted sign-in step shown again after the first turn failed to sign in
+    is the remedy, so the "did not start" notice must not land on top of it.
+    """
+    _kickoff_open.discard(slot_key)
+
+
+def kickoff_failed_shown(slot: "_ChatSlot") -> bool:
+    """Whether *slot*'s newest notice already says the kickoff got no reply."""
+    for row in reversed(list(getattr(slot, "messages", None) or [])):
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("meta")
+        if row.get("role") == "assistant" and isinstance(meta, dict):
+            return (
+                meta.get("kind") == SETUP_STALLED_KIND
+                and meta.get("reason") == STALL_REASON_KICKOFF_FAILED
+            )
+    return False
+
+
+def kickoff_answered(slot: "_ChatSlot") -> bool:
     """Whether the agent replied after the last kickoff row in *slot*."""
     for row in reversed(list(getattr(slot, "messages", None) or [])):
         if not isinstance(row, dict):
@@ -286,7 +309,7 @@ async def retry_kickoff(state: "DashboardState") -> str:
     """
     from kiro_crew import setup_cards as sc
     from kiro_crew.config.loader import KiroCrewConfig
-    from kiro_crew.dashboard.setup_flow import start_first_run_turn
+    from kiro_crew.dashboard.setup_flow import scripted_lock, start_first_run_turn
     from kiro_crew.first_run import read_first_run_slot
 
     slot_key = await asyncio.to_thread(read_first_run_slot)
@@ -296,9 +319,11 @@ async def retry_kickoff(state: "DashboardState") -> str:
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     if not cfg.dashboard.privacy_acked:
         raise sc.CardRejected("answer the privacy card first", "privacy_not_acked")
+    if await asyncio.to_thread(scripted_lock, slot.key):
+        raise sc.CardRejected("finish the setup step in this chat first", "setup_step_pending")
     if slot.running or slot.key in _retrying:
         raise sc.CardRejected("a turn is still running in this chat", "turn_running")
-    if _kickoff_answered(slot):
+    if kickoff_answered(slot):
         raise sc.CardRejected("setup already started in this chat", "kickoff_answered")
     _retrying.add(slot.key)
     try:

@@ -31,6 +31,11 @@ export type SetupCardKind =
   | 'service'
   /** A permanent home in the user's own AWS account, built in the background. */
   | 'home'
+  /** The first run's scripted steps before any model turn: the agent engine, its
+   *  install and sign-in, and how the owner wants to start. Gateway-only. */
+  | 'harness'
+  | 'harness_signin'
+  | 'path'
 
 export type SetupCardStatus =
   | 'pending'
@@ -86,6 +91,30 @@ export interface FirstRunState {
 
 export interface SetupCardList {
   cards: SetupCard[]
+}
+
+/**
+ * The scripted steps, in the order the gateway shows them. While one is live in
+ * the first-run chat, no model can answer there yet: the gateway refuses a typed
+ * message (`setup_step_pending`) and the composer says which step it waits on.
+ */
+export const SCRIPTED_SETUP_KINDS: readonly SetupCardKind[] = ['harness', 'harness_signin', 'privacy', 'path']
+
+/** The gateway's scripted message before a scripted card (`meta.setupStep`). */
+export interface SetupStepRef {
+  step: string
+  card: string
+  /** The agent engine's name, for the sign-in steps. */
+  label: string
+}
+
+/** Read `meta.setupStep` off a transcript row, or null when it is not a step row. */
+export function setupStepOf(meta: Record<string, unknown> | null | undefined): SetupStepRef | null {
+  const raw = meta?.setupStep
+  if (!raw || typeof raw !== 'object') return null
+  const { step, card, label } = raw as { step?: unknown; card?: unknown; label?: unknown }
+  if (typeof step !== 'string' || !step) return null
+  return { step, card: typeof card === 'string' ? card : '', label: typeof label === 'string' ? label : '' }
 }
 
 /** The transcript row's pointer (`meta.setupCard`). */

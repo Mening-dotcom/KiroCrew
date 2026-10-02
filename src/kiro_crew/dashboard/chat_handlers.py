@@ -628,6 +628,22 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     denied = deny_non_owner_remote_operation(request, slot, "chat_send")
     if denied is not None:
         return denied
+    # The first-run chat takes no message until its scripted steps are done: no
+    # agent harness is ready to answer before them. Refused BEFORE the paste
+    # capture below, so a refused message is stored nowhere (no vault write, no
+    # transcript row). The card store decides, never a readiness latch.
+    from kiro_crew.dashboard.setup_flow import scripted_lock
+
+    pending_step = await asyncio.to_thread(scripted_lock, slot.key)
+    if pending_step:
+        return web.json_response(
+            {
+                "error": "finish the setup step in this chat first",
+                "code": "setup_step_pending",
+                "step": pending_step,
+            },
+            status=409,
+        )
     # A pasted credential never reaches the transcript, the queue or the model:
     # it is swapped for a secret:// reference here, before any branch below
     # stores or sends the message. Only the owner's paste is kept in the vault.

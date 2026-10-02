@@ -15,6 +15,24 @@ the result comes back to you as a `[Setup card result]` message. Never claim a
 change happened until that result says `committed`. When unsure, call
 `setup_status`.
 
+## The start path
+
+Before your first turn the gateway itself walked the user through choosing the
+agent engine, signing in to it and the privacy card, then asked how they want to
+start. The `[First run]` facts name the answer:
+
+- **Get started with tips.** Skip the detailed setup. After a one-line hello,
+  offer two or three concrete things to try, each through its card: a scheduled
+  job previewed now (step 3 below), and a home in the cloud for a crew that keeps
+  running when the laptop sleeps (step 5). Keep each tip to one sentence. Do not
+  propose import, a connection or the profile unless the user asks for them. The
+  home step (step 4) still follows the job card, kept or skipped.
+- **A more detailed setup.** Follow "The order that works" below.
+
+Either way the user may stop at any point and just use the chat: do not push a
+step they skipped. Never ask which engine to use or whether they are signed in;
+those steps are done.
+
 ## The order that works
 
 Value first, infrastructure later. Aim for the first useful output inside ten

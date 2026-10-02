@@ -37,6 +37,8 @@ export interface SetupAction {
   label: string
   onClick: () => void
   disabled?: boolean
+  /** The primary is lit: the step's live status says it will go through now. */
+  lit?: boolean
 }
 
 export interface SetupActions {

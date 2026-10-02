@@ -293,8 +293,17 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
                 type="button"
                 onClick={actions.primary.onClick}
                 disabled={busy || actions.primary.disabled}
-                className="inline-flex items-center gap-1.5"
+                // `lit` set by a body that tracks a live status: the same button,
+                // tinted until the status reads ready, then solid with the glow.
+                className={`inline-flex items-center gap-1.5 ${
+                  actions.primary.lit === true
+                    ? 'shadow-[0_0_20px_var(--accent-glow)]'
+                    : actions.primary.lit === false
+                      ? 'bg-accent-subtle text-accent hover:bg-accent-subtle hover:shadow-none'
+                      : ''
+                }`}
                 data-testid="setup-card-primary"
+                data-lit={actions.primary.lit ? 'true' : undefined}
               >
                 {high && <ShieldCheck className="lucide-inline" aria-hidden="true" />}
                 {actions.primary.label}

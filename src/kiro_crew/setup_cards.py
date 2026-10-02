@@ -52,6 +52,13 @@ KIND_CHANNEL = "channel"
 KIND_CRON = "cron"
 KIND_SERVICE = "service"
 KIND_HOME = "home"
+#: The first run's scripted steps before any model turn (RFC one-chat first run
+#: §5.1): which agent harness runs the crew, its install and sign-in, and how the
+#: owner wants to start. The gateway shows each one itself, in this order with the
+#: privacy card between the sign-in and the path.
+KIND_HARNESS = "harness"
+KIND_HARNESS_SIGNIN = "harness_signin"
+KIND_PATH = "path"
 
 #: Every card kind the store accepts.
 CARD_KINDS: frozenset[str] = frozenset(
@@ -66,12 +73,28 @@ CARD_KINDS: frozenset[str] = frozenset(
         KIND_CRON,
         KIND_SERVICE,
         KIND_HOME,
+        KIND_HARNESS,
+        KIND_HARNESS_SIGNIN,
+        KIND_PATH,
     }
 )
 #: Kinds the MODEL may propose. The privacy disclosure is deterministic: the
 #: gateway shows it before the first model turn, and a model-authored copy of a
 #: disclosure is exactly what must not exist.
-PROPOSABLE_KINDS: frozenset[str] = CARD_KINDS - {KIND_PRIVACY}
+PROPOSABLE_KINDS: frozenset[str] = CARD_KINDS - {
+    KIND_PRIVACY,
+    KIND_HARNESS,
+    KIND_HARNESS_SIGNIN,
+    KIND_PATH,
+}
+#: The first run's scripted steps, in the order the gateway shows them. While a
+#: card of one of these kinds is live in the first-run chat, no model turn can run
+#: there yet, so the chat's composer is locked (``setup_flow.scripted_lock``).
+SCRIPTED_KINDS: tuple[str, ...] = (KIND_HARNESS, KIND_HARNESS_SIGNIN, KIND_PRIVACY, KIND_PATH)
+#: The two ways the owner can start once the scripted steps are done (UX.3).
+PATH_TIPS = "tips"
+PATH_DETAILED = "detailed"
+PATHS: tuple[str, ...] = (PATH_TIPS, PATH_DETAILED)
 #: Kinds whose commit touches a credential, an outside account, or something
 #: that keeps running. They render visibly differently and never auto-advance.
 HIGH_STAKES_KINDS: frozenset[str] = frozenset(

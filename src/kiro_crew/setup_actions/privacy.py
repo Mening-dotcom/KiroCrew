@@ -2,8 +2,10 @@
 
 Gateway-only. A model-authored copy of a disclosure is exactly what must not
 exist, so the agent cannot propose one, and a policy cannot refuse its
-acknowledgement: nothing else in the first run starts without it. The commit
-starts the first model turn itself, so the card is not reported back.
+acknowledgement: nothing else in the first run starts without it. In the
+scripted first run it comes after the harness sign-in and its commit shows the
+start path; in a first-run chat from before those steps its commit starts the
+first model turn itself. Either way the card is not reported back.
 """
 
 from __future__ import annotations

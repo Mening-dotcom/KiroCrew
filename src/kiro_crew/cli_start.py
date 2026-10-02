@@ -6,7 +6,9 @@ installs the wheel through ``cli.sh`` and then execs this command, and a user
 who already has the CLI runs it directly. It takes four steps, in order, and
 each one that cannot proceed stops with the command that fixes it:
 
-1. **Harness.** The configured agent harness (``agent.acp_backend``) must be
+1. **Harness.** On a fresh install at a terminal there is no check: the first-run
+   chat asks which agent harness to use and walks through installing and signing
+   in to it. Otherwise the configured agent harness (``agent.acp_backend``) must be
    installed. For kiro-cli that is the resolved binary plus its sign-in; for any
    other harness it is the machine-local install probe. On a terminal, a
    harness missing only kiro-cli is left to the dashboard's prerequisite gate,
@@ -209,14 +211,25 @@ def _check_harness(args: argparse.Namespace) -> int | None:
 
     ``--skip-harness-check`` skips the probe entirely (no ``kiro-cli whoami``,
     no prompt): the dashboard's prerequisite gate still reports the harness.
+
+    A fresh install on a terminal skips it too: the first-run chat's first steps
+    ask which agent harness to use and walk through installing and signing in to
+    it, so checking (or signing in to) the default here would decide that choice
+    before the owner has made it.
     """
     from kiro_crew.acp_backends import ACP_BACKEND_KIRO
 
     if args.skip_harness_check:
         print("   Skipping the agent harness check (--skip-harness-check).")
         return None
-    backend = KiroCrewConfig.load().agent.acp_backend
     interactive = _interactive(args)
+    if interactive and _first_run_possible():
+        print(
+            "   Your browser will ask which agent engine to use, and walk you through "
+            "installing and signing in to it."
+        )
+        return None
+    backend = KiroCrewConfig.load().agent.acp_backend
     if backend == ACP_BACKEND_KIRO:
         installed = _check_kiro(interactive)
     else:

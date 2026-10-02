@@ -29,6 +29,7 @@ from kiro_crew.acp_backends import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,
     ACP_BACKEND_KIRO,
+    ACP_BACKENDS_KIRO_CLI_PREREQUISITE,
     model_registry_namespace,
     selectable_backend_values,
 )
@@ -2230,10 +2231,22 @@ def _codex_models(request: web.Request, configured_default: str = "") -> list[di
     is known -- force-including a pin the adapter did not advertise would put back
     the exact row that kills the session.
     """
-    codex_namespace = model_registry_namespace(ACP_BACKEND_CODEX)
-    advertised = _advertised_cc_models(request, codex_namespace)
+    return _adapter_models(request, ACP_BACKEND_CODEX, configured_default)
+
+
+def _adapter_models(request: web.Request, backend: str, configured_default: str = "") -> list[dict]:
+    """The model list a harness's own adapter advertised, ``auto`` first.
+
+    :func:`_codex_models`'s rule for any harness that does not run kiro-cli: a live
+    session of THAT harness's namespace first, then the cross-session cache its
+    last ``session/new`` fed, and ``auto`` alone when neither has anything yet.
+    Each harness reads its own namespace (``model_registry_namespace``), so one
+    harness's ids are never offered to another (harness-parity H12).
+    """
+    namespace = model_registry_namespace(backend)
+    advertised = _advertised_cc_models(request, namespace)
     if not advertised:
-        cached = model_registry.advertised_models(codex_namespace)
+        cached = model_registry.advertised_models(namespace)
         advertised = [{"model_name": m, "display_name": m, "description": ""} for m in cached]
 
     rows: list[dict] = [
@@ -2326,6 +2339,15 @@ async def api_models(request: web.Request) -> web.Response:
     if backend == ACP_BACKEND_CODEX:
         return web.json_response(
             _codex_models(request, configured_default=_scoped_default(cfg, backend))
+        )
+    # kiro-cli's catalog is offered only to the harnesses that run kiro-cli, by
+    # membership (harness-parity H5). Any other harness (opencode, pi, goose,
+    # deepseek, one added later) gets what its own adapter advertised: kiro-cli's
+    # ids are not ones it accepts, and probing kiro-cli for it would 503 an install
+    # that has no kiro-cli at all.
+    if backend not in ACP_BACKENDS_KIRO_CLI_PREREQUISITE:
+        return web.json_response(
+            _adapter_models(request, backend, configured_default=_scoped_default(cfg, backend))
         )
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated

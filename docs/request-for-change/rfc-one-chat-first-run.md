@@ -356,30 +356,27 @@ reorder or stop, and a later chat picks up where this one left off.
 
 ### 5.1 Egg: the part with no model
 
-The Egg asks nothing: every choice after the command is made in the web chat.
-start.sh installs, then execs `kirocrew start` (`src/kiro_crew/cli_start.py`),
-which runs steps 2 to 4. The one terminal step left is the harness's own sign-in
-on a signed-out machine, which runs without a yes/no because the chat cannot
-start without it (it opens the browser, or prints a device code on a headless
-host). Where the crew lives is a step of its own in the chat, right after
-privacy (§5.7); `--home here|cloud|later` lets a script answer ahead of time.
+The Egg asks nothing in the terminal: every choice after the command is made in
+the web chat. start.sh installs, then execs `kirocrew start`
+(`src/kiro_crew/cli_start.py`), which runs steps 2 to 4. Until a harness is
+installed and signed in no model can answer, so the chat's first steps are
+scripted (step 5): the gateway shows each one itself, and the agent takes over
+only once the harness answers. Where the crew lives is asked in the chat once
+the first job is kept or skipped (§5.7); `--home here|cloud|later` lets a script
+answer ahead of time.
 
 1. **Install as `cli.sh` does.** start.sh downloads the live `cli.sh` and runs
    it unchanged, so the signed manifest, the pinned trust root and the managed
    Python are `cli.sh`'s own (§6.1).
-2. **Check the harness.**
-   - If kiro-cli or another selectable harness is installed, it is used as is.
-     A signed-out kiro-cli runs its own sign-in at once (`kiro-cli login`, or
-     its device-code variant over SSH or on a headless host).
-   - A missing kiro-cli is guided in the web. On a terminal `kirocrew start`
-     says so in one line and still starts the gateway and opens the browser,
-     where the setup page shows Kiro's install command for this machine and the
-     sign-in, checks again on its own, and lets the first-run chat carry on once
-     kiro-cli is ready. With `--no-input` or no terminal, and for another
-     harness whose missing adapter the page cannot see, it prints the official
-     install guidance, names any other selectable harness that is installed,
-     and exits 3. Kiro Crew installs no harness itself; whether it may is Q2,
-     still open.
+2. **Leave the harness to the chat.** On a fresh install at a terminal,
+   `kirocrew start` checks no harness and signs in to nothing: the browser asks
+   which agent engine to use and walks through installing and signing in to it
+   (step 5). With `--no-input`, or on an install whose first run is behind it,
+   it checks the configured harness as before: a signed-out kiro-cli runs its
+   own sign-in at a terminal (`kiro-cli login`, or its device-code variant over
+   SSH or on a headless host), and a missing harness prints its official install
+   guidance, names any other selectable harness that is installed, and exits 3.
+   Kiro Crew installs no harness itself; whether it may is Q2, still open.
    - *Superseded for the prototype:* start.sh offering the pinned kiro-cli the
      desktop build verifies. That needs the maintainer decision and the
      distribution-terms check Q2 asks for, so the prototype installs nothing.
@@ -392,12 +389,31 @@ privacy (§5.7); `--home here|cloud|later` lets a script answer ahead of time.
    on the main chat, or on the first-run chat on a fresh install. On a host with
    no browser it prints the URL with a QR code another device can scan, or an
    `ssh -L` command when the dashboard listens on loopback only.
-5. **Show the privacy disclosure as the first card**, before the first model
-   turn. It uses the same strings and the same `privacy_acked` flag as
-   `PrivacyChapter.tsx`. A disclosure is not the model's to paraphrase.
+5. **The scripted steps, before any model turn** (UX.2, UX.3). The first-run
+   chat opens on the gateway's welcome, never an empty chat, and each step is a
+   message with its card, shown as a hint like every card:
+   1. choose the agent engine: the selectable harnesses, Kiro first and the
+      default;
+   2. install and sign in to it, with that harness's own commands. Continue
+      asks the harness whether it answers (Kiro CLI's own `whoami`; any other
+      harness, a handshake with no prompt), and after one failed check the
+      owner may continue without it;
+   3. the privacy disclosure, with the same strings and the same `privacy_acked`
+      flag as `PrivacyChapter.tsx`. A disclosure is not the model's to
+      paraphrase, and nothing is sent before it is acknowledged;
+   4. get started with tips, or a more detailed setup.
+
+   Until the last click the chat's composer is locked with the step it waits
+   on, and the gateway refuses a message there. That click sends the
+   `[First run]` kickoff with the engine and the path as facts. A first reply
+   that cannot sign in brings the sign-in step back. *Superseded:* the privacy
+   disclosure as the first card, ahead of a chat that could not answer yet, and
+   the full-screen Kiro CLI setup page in front of the chat on a first run. The
+   steps stay in the chat rather than in a row of modals (Q19).
 
 The desktop app's first run skips steps 1–3, because it already bundles the
-backend and kiro-cli, and lands in the same session. From source, `setup.sh`
+backend and kiro-cli, and lands in the same session; its bundled kiro-cli skips
+the install half of step 5.2. From source, `setup.sh`
 builds the checkout and ends in the same `kirocrew start` (§6.1).
 
 ### 5.2 Hello
@@ -725,7 +741,8 @@ remove one. How to add one:
 **Who may propose (SC8).** A setup card may be raised only in a turn a person
 started: a typed message, or a turn that exists because the owner clicked a
 card. The first-run kickoff is such a turn (it follows the owner's click on the
-privacy card), and so is every `[Setup card result]` turn. A turn started by a
+start path, the last scripted step of §5.1), and so is every `[Setup card
+result]` turn. A turn started by a
 cron, a watch, an injected event or a sub-agent is refused, in the first-run
 session as anywhere else. Otherwise an email, a web page or an imported memory
 file could steer the agent into proposing "connect this" to a tired user — the
@@ -1373,12 +1390,11 @@ made, with its date).
   "install or authenticate a harness from inside Kiro Crew" as a non-goal. The
   desktop bundle already ships a pinned kiro-cli. This needs a maintainer
   decision and a check of kiro-cli's distribution terms. *Open; the prototype
-  installs nothing:* when the harness is missing, `kirocrew start` on a
-  terminal opens the browser on the setup page, which shows Kiro's own install
-  command to copy and checks again until it is installed (with `--no-input` it
-  prints the official install guidance and exits 3), and it runs kiro-cli's own
-  sign-in (the device flow on a headless host) when it is installed but signed
-  out. On Windows it uses the copy the desktop app already installed (Q14).
+  installs nothing:* on a fresh install `kirocrew start` opens the first-run
+  chat, whose sign-in step shows the chosen harness's own install command to
+  copy and checks again on the owner's click (§5.1 step 5); with `--no-input` it
+  prints the official install guidance and exits 3 when the harness is missing.
+  On Windows it uses the copy the desktop app already installed (Q14).
 - **Q3.** Should SOUL.md be read-only to in-sandbox code, to close the
   persistent-injection path? That would be a new seal, and seals are the
   operator's call. *Open;* the prototype adds no seal. The persona files are
@@ -1476,6 +1492,11 @@ made, with its date).
   click (the page opens with the code prefilled). The copy stays a later spike,
   because a rotating refresh token shared by two machines risks signing the
   local kiro-cli out.
+- **Q19.** The steps before the chat can answer (the harness, its sign-in,
+  privacy, how to start): a row of modals, or messages with cards in the chat?
+  *Answered (2026-10-02, the user):* in the chat, as scripted messages with
+  their cards, the composer locked until the last step (§5.1 step 5). One
+  surface from the first screen on, and every step stays in the chat's history.
 
 ## Appendix A: Muse, condensed, with the security mapping
 

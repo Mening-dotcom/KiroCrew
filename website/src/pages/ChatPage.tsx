@@ -291,6 +291,7 @@ import FolderSuggestionCard from './chat/FolderSuggestionCard'
 import { useMoveSlotToFolder } from '../hooks/useMoveSlotToFolder'
 import PendingQuestionCard from '../components/PendingQuestionCard'
 import PendingSetupCards from '../components/setup/PendingSetupCards'
+import { useScriptedLockReason } from '../components/setup/scriptedLock'
 import { highlightSetupCardRow } from '../components/setup/setupCardTray'
 import { setupCardRefOf } from '../api/setupCards'
 import SessionPulseSurveyCard from '../components/SessionPulseSurveyCard'
@@ -584,6 +585,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const unresumableResume = useAppSelector(s => s.chat.unresumableResume)
   const undeletableHistory = useAppSelector(s => s.chat.undeletableHistory)
   const activeSlot = useAppSelector(s => s.chat.activeSlot)
+  // The first-run chat before its scripted steps are done: nothing can answer yet.
+  const scriptedLock = useScriptedLockReason(activeSlot)
   // The store this page is rendered under (not the module singleton): the
   // opener reads live state after an await, and it must be the same store
   // its dispatches went to. Also read by the MCP-app openers below, so it is
@@ -8071,6 +8074,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                    follow-up during the stop window instead of being silently blocked. */
                 false
               }
+              lockedReason={scriptedLock}
               autoFocusKey={activeSlot}
               prefillHint={prefillHint}
               onDismissHint={() => setPrefillHint(false)}

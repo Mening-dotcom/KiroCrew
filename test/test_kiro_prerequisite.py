@@ -4335,6 +4335,10 @@ class TestKiroPrerequisiteHandlers:
             # Present but empty: the command differs by platform, so it would
             # name the host platform this branch redacts.
             assert body["install_command"] == ""
+            # The first-run context decides whether the gate draws at all, so a
+            # non-owner gets it too, and the hand-built branch has to carry it.
+            assert body["applies"] is True
+            assert body["scripted_first_run"] is False
             # Redacted-but-present for the same reason as the sandbox keys: whether
             # the probe timed out describes how slow the HOST is. Asserted here
             # because the hazard the comment above names is not hypothetical -- this
@@ -4353,6 +4357,76 @@ class TestKiroPrerequisiteHandlers:
             ):
                 response = await getattr(client, method)(path)
                 assert response.status == 403
+
+    @staticmethod
+    def _status_snapshot(*, force: bool = False, coalesce: bool = False) -> Any:
+        async def _snapshot() -> dict[str, Any]:
+            return {"platform": "Linux", "installed": False, "ready": False}
+
+        del force, coalesce
+        return _snapshot()
+
+    @pytest.mark.asyncio
+    async def test_status_says_whether_the_prerequisite_applies_to_the_harness(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The gate is about kiro-cli. On a harness that installs and signs in on
+        # its own terms (claude here) it must draw nothing, so the status says so
+        # by a positive membership test, and KAS (which runs kiro-cli) still applies.
+        from kiro_crew.config.paths import data_home
+
+        service = KiroPrerequisiteService(
+            platform_name="linux",
+            environ={"HOME": str(tmp_path), "PATH": ""},
+            home=tmp_path,
+            audit_writer=_no_audit,
+        )
+        monkeypatch.setattr(service, "snapshot", self._status_snapshot)
+        config = data_home() / "config.json"
+        answers: dict[str, bool] = {}
+        for backend in ("claude", "kas", ""):
+            config.write_text(json.dumps({"agent": {"acp_backend": backend}}), encoding="utf-8")
+            async with TestClient(TestServer(self._app(service, app_claim=""))) as client:
+                body = await (await client.get("/api/kiro-prerequisite")).json()
+            answers[backend] = body["applies"]
+        assert answers == {"claude": False, "kas": True, "": True}
+
+    @pytest.mark.asyncio
+    async def test_status_reports_a_scripted_first_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from kiro_crew.dashboard import setup_flow
+
+        service = KiroPrerequisiteService(
+            platform_name="linux",
+            environ={"HOME": str(tmp_path), "PATH": ""},
+            home=tmp_path,
+            audit_writer=_no_audit,
+        )
+        monkeypatch.setattr(service, "snapshot", self._status_snapshot)
+        monkeypatch.setattr(setup_flow, "scripted_first_run_active", lambda: True)
+        async with TestClient(TestServer(self._app(service, app_claim=""))) as client:
+            body = await (await client.get("/api/kiro-prerequisite")).json()
+        assert body["scripted_first_run"] is True
+
+    def test_first_run_context_falls_back_to_todays_gate_when_unreadable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from kiro_crew.config import loader
+        from kiro_crew.dashboard import setup_flow
+        from kiro_crew.dashboard.handlers import kiro_prerequisite as handler
+
+        def _boom(*_args: Any, **_kwargs: Any) -> Any:
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(loader.KiroCrewConfig, "load", _boom)
+        monkeypatch.setattr(setup_flow, "scripted_first_run_active", _boom)
+        assert handler._first_run_context() == {"applies": True, "scripted_first_run": False}
 
     @pytest.mark.asyncio
     async def test_probe_failure_backstop_preserves_returning_user_state(

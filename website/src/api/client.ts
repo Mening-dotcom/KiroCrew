@@ -2495,6 +2495,17 @@ export interface KiroPrerequisiteStatus {
    */
   install_command?: string
   /**
+   * Whether this prerequisite is about the configured agent harness at all: true
+   * for the harnesses that run kiro-cli. `false` means the gate draws nothing.
+   * Absent from a gateway older than the field (the gate then applies).
+   */
+  applies?: boolean
+  /**
+   * A scripted first run is under way: its chat shows the install and sign-in
+   * step as a card, so the gate leaves its own first-run screen to the chat.
+   */
+  scripted_first_run?: boolean
+  /**
    * The command the USER runs to sign in (`kiro-cli login`). Supplied by the
    * gateway and rendered verbatim in a `<code>` — never a catalog value, because
    * a translated command cannot be typed.

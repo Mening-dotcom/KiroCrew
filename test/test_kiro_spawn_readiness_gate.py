@@ -30,6 +30,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from chat_test_helpers import _make_ready_kiro_prerequisite
 
+from kiro_crew.acp_backends import ACP_BACKEND_CLAUDE, ACP_BACKEND_KAS, ACP_BACKEND_KIRO
+from kiro_crew.config.paths import data_home
 from kiro_crew.dashboard import kiro_readiness
 from kiro_crew.dashboard.handlers import agents, sessions
 from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
@@ -451,3 +453,61 @@ async def test_a_ready_gateway_logs_no_refusal() -> None:
             await agents.api_models(request)
 
     warn.assert_not_called()
+
+
+def _configure_harness(backend: str) -> None:
+    (data_home() / "config.json").write_text(
+        json.dumps({"agent": {"acp_backend": backend}}), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rerun_on_a_harness_without_kiro_cli_is_not_held_by_kiro_cli() -> None:
+    # Regenerate, edit-resend, rewind and the OpenAI-compatible route start a turn
+    # on the configured harness. On one that does not run kiro-cli, a signed-out or
+    # absent kiro-cli says nothing about that turn, so it must not refuse it.
+    _configure_harness(ACP_BACKEND_CLAUDE)
+    request = _request(_make_signed_out_kiro_prerequisite())
+
+    assert await kiro_readiness.reject_if_turn_harness_unverified(request) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", [ACP_BACKEND_KIRO, ACP_BACKEND_KAS])
+async def test_a_rerun_on_a_kiro_cli_harness_still_fails_closed_while_signed_out(
+    backend: str,
+) -> None:
+    _configure_harness(backend)
+    request = _request(_make_signed_out_kiro_prerequisite())
+
+    resp = await kiro_readiness.reject_if_turn_harness_unverified(request)
+
+    assert resp is not None and resp.status == 503
+    assert json.loads(resp.body)["code"] == "kiro_prerequisite_required"
+
+
+@pytest.mark.asyncio
+async def test_the_usage_scrape_stays_gated_whatever_the_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The usage scrape shells out to kiro-cli itself, so its gate is kiro-cli's
+    # readiness on every harness: an unauthenticated spawn opens a browser.
+    _configure_harness(ACP_BACKEND_CLAUDE)
+    monkeypatch.setattr(sessions, "_usage_cache_ts", 0.0)
+    request = _request(_make_signed_out_kiro_prerequisite())
+    with patch.object(sessions, "_fetch_usage_bg", AsyncMock()) as fetch:
+        resp = await sessions.api_sessions_usage(request)
+
+    fetch.assert_not_called()
+    assert resp.status == 503
+
+
+def test_every_turn_running_rerun_uses_the_harness_aware_gate() -> None:
+    from kiro_crew.dashboard import chat_regenerate, chat_rewind, openai_compat
+
+    for module in (chat_regenerate, chat_rewind, openai_compat):
+        assert not hasattr(module, "reject_if_kiro_unverified"), module.__name__
+        assert (
+            module.reject_if_turn_harness_unverified
+            is kiro_readiness.reject_if_turn_harness_unverified
+        ), module.__name__

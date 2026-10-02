@@ -39,7 +39,8 @@ import RecoveryCard, { injectOpensTurn, resolveInjectCard } from './RecoveryCard
 import SetupCardRow from '../../components/setup/SetupCardRow'
 import SetupGuardrailNotice, { isSetupGuardrailRow } from '../../components/setup/SetupGuardrailNotice'
 import HandoffDoneNotice, { isHandoffDoneRow } from './HandoffDoneNotice'
-import { setupCardRefOf } from '../../api/setupCards'
+import { setupCardRefOf, setupStepOf } from '../../api/setupCards'
+import SetupStepMessage from '../../components/setup/SetupStepMessage'
 import { SystemNoticeRow, isSystemNoticeRow } from './CompactionCard'
 import { ErrorCard, SESSION_START_REPEAT_REFUSAL_AT, isAuthRequired, isCapabilitiesChanged, isModelUnentitled, isSessionStartFailed, isUsageLimit, sessionStartFailureStreak } from './ErrorCard'
 import { FEATURE_REQUEST_FORM_URL, isFeatureRequestRow } from '../../prompts/featureRequest'
@@ -423,6 +424,19 @@ export function createTranscriptRenderers(
         const ref = setupCardRefOf(m.meta)
         if (!ref) return null
         return ctx.row(<SetupCardRow key={ctx.key} cardId={ref.id} placement={o.setupCardTray ? 'transcript' : 'inline'} />)
+      },
+    },
+    {
+      // Refines `inject`, and must precede `recovery_inject`: the gateway's
+      // scripted message before a first-run step card (`meta.setupStep`). Its
+      // content is the model's breadcrumb; the words are the catalog's.
+      id: 'setup_step',
+      roles: ['inject'],
+      match: m => setupStepOf(m.meta) !== null,
+      render: (m, ctx) => {
+        const step = setupStepOf(m.meta)
+        if (!step) return null
+        return ctx.row(<SetupStepMessage key={ctx.key} step={step} />)
       },
     },
     {

@@ -4558,6 +4558,32 @@ def _mark_kiro_signed_out(state: Any) -> None:
         logger.debug("Could not latch Kiro signed-out state", exc_info=True)
 
 
+def _mark_signed_out_for(state: Any, exc: Any) -> None:
+    """Latch the Kiro service signed out, when the failed sign-in was kiro-cli's.
+
+    Only a harness that signs in through kiro-cli's identity store
+    (``host_auth.backends_retired_by_host_logout()``) says anything about that
+    store; a Claude or Codex sign-in failure leaves the Kiro latch alone. An
+    exception that names no harness is treated as kiro-cli's, as before.
+    """
+    from kiro_crew.agent_sdk.host_auth import backends_retired_by_host_logout
+
+    if str(getattr(exc, "backend", "") or "") in backends_retired_by_host_logout():
+        _mark_kiro_signed_out(state)
+
+
+async def _reopen_first_run_signin(state: Any, slot: Any) -> None:
+    """Best effort: a scripted first run's first turn failed to sign in, so the
+    gateway shows its sign-in step again (``setup_flow`` decides whether it applies).
+    Never raises into the turn's teardown."""
+    try:
+        from kiro_crew.dashboard.setup_flow import reopen_signin_after_auth_failure
+
+        await reopen_signin_after_auth_failure(state, slot)
+    except Exception:
+        logger.debug("Could not show the first run's sign-in step again", exc_info=True)
+
+
 async def _deliver_linked_slack_message(
     state: Any,
     slot: Any,
@@ -18494,7 +18520,8 @@ async def _run_chat(
         # whether that card IS the fix; on a harness with its own credential
         # store the row stays a plain error. The prose is unchanged.
         slot.append("error", _auth_msg, "msg msg-err", meta=_terminal_error_meta(exc))
-        _mark_kiro_signed_out(state)
+        _mark_signed_out_for(state, exc)
+        await _reopen_first_run_signin(state, slot)
         await _deliver_linked_slack_message(state, slot, sessions, session_key, _auth_msg)
     except AcpProcessDied as exc:
         logger.warning("ACP process died in slot %s: %s — resetting session", slot.key, exc)

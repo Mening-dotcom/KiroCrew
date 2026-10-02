@@ -29,8 +29,11 @@ from kiro_crew.setup_actions import (
     connect,
     credential,
     cron,
+    harness,
+    harness_signin,
     home,
     import_,
+    path,
     privacy,
     profile,
     service,
@@ -65,6 +68,9 @@ ACTIONS: tuple[SetupAction, ...] = (
     cron.ACTION,
     service.ACTION,
     home.ACTION,
+    harness.ACTION,
+    harness_signin.ACTION,
+    path.ACTION,
 )
 
 _BY_KIND: dict[str, SetupAction] = {a.kind: a for a in ACTIONS}

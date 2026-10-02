@@ -414,3 +414,56 @@ async def test_api_models_routes_the_codex_backend_to_the_advertised_list(monkey
 
     assert resp.status == 200
     assert _names(json.loads(resp.body)) == ["auto", "gpt-5.4", "gpt-5.4-codex", "gpt-5.5"]
+
+
+# ── Any other harness: its own adapter's list, never kiro-cli's catalog ──
+
+
+def _configured(monkeypatch, backend: str) -> None:
+    monkeypatch.setattr(
+        agents.KiroCrewConfig,
+        "load",
+        staticmethod(lambda: SimpleNamespace(agent=SimpleNamespace(acp_backend=backend, model=""))),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "backend", [sdk_backends.ACP_BACKEND_OPENCODE, sdk_backends.ACP_BACKEND_GOOSE]
+)
+async def test_api_models_gives_another_harness_its_own_advertised_list(monkeypatch, backend):
+    """Neither the kiro-cli spawn nor kiro's bucket: the harness's own ids, auto first."""
+    import json
+
+    _configured(monkeypatch, backend)
+    model_registry.refresh_advertised_models(
+        sdk_backends.model_registry_namespace(backend), ["provider/model-a"]
+    )
+    model_registry.refresh_advertised_models("acp", ["kiro-only-model"])
+
+    async def _never_spawn(*_a, **_k):  # pragma: no cover - the assertion is that it is unreached
+        raise AssertionError(f"{backend!r} must not reach the kiro-cli --list-models path")
+
+    monkeypatch.setattr(agents, "reject_if_kiro_unverified", _never_spawn)
+
+    resp = await agents.api_models(_request())
+
+    assert resp.status == 200
+    assert _names(json.loads(resp.body)) == ["auto", "provider/model-a"]
+
+
+@pytest.mark.asyncio
+async def test_api_models_offers_auto_alone_before_another_harness_ever_ran(monkeypatch):
+    import json
+
+    _configured(monkeypatch, sdk_backends.ACP_BACKEND_PI)
+
+    async def _never_spawn(*_a, **_k):  # pragma: no cover - the assertion is that it is unreached
+        raise AssertionError("pi must not reach the kiro-cli --list-models path")
+
+    monkeypatch.setattr(agents, "reject_if_kiro_unverified", _never_spawn)
+
+    resp = await agents.api_models(_request())
+
+    assert resp.status == 200
+    assert _names(json.loads(resp.body)) == ["auto"]

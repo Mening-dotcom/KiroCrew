@@ -101,6 +101,11 @@ class TestStore:
     def test_privacy_is_not_proposable(self):
         assert sc.KIND_PRIVACY not in sc.PROPOSABLE_KINDS
 
+    def test_no_scripted_step_is_proposable(self):
+        # The model cannot raise a step that comes before any model can answer.
+        assert not set(sc.SCRIPTED_KINDS) & sc.PROPOSABLE_KINDS
+        assert sc.SCRIPTED_KINDS == ("harness", "harness_signin", "privacy", "path")
+
 
 class TestBuilders:
     def test_profile_accepts_known_fields_and_rejects_bad_values(self):

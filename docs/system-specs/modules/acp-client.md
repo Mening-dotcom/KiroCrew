@@ -1578,7 +1578,11 @@ Subprocess lifecycle:
   shared `kiro_prerequisite_required` 503 — the same degraded response their
   timeout branches already produce — so the client contract is unchanged and
   only the subprocess is skipped. Without this gate a signed-out gateway opened
-  a browser window every 8 seconds indefinitely. These are the **only** blocking
+  a browser window every 8 seconds indefinitely. `/api/models` reaches it only
+  for the harnesses that run kiro-cli (`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`);
+  any other harness gets the list its own adapter advertised and spawns no
+  kiro-cli. The usage scrape runs kiro-cli whatever the harness, so it keeps the
+  gate on every one. These are the **only** blocking
   readiness gates: ordinary sends are ungated, because a failing ACP attempt
   reports its own `AcpAuthRequired` (see the governance of latched readiness in
   `modules/learn-cron-dashboard.md`), whereas a timer-driven spawn has no turn to
@@ -1592,7 +1596,10 @@ Subprocess lifecycle:
   `AcpAuthRequired`; the dashboard turn loop handles it ahead of the generic
   `AcpError` branch (it is a subclass), never re-queues it, surfaces the
   actionable `kiro-cli login` message in the transcript, and latches the
-  prerequisite service to signed-out. That error card is the **only** sign-out
+  prerequisite service to signed-out — only when the failing harness signs in
+  through kiro-cli's identity store (`host_auth.backends_retired_by_host_logout()`,
+  read off the exception's `backend`); a Claude or Codex sign-in failure says
+  nothing about kiro-cli and leaves the latch alone. That error card is the **only** sign-out
   signal the dashboard shows — there is no reauthentication banner and no paused
   session state (see `modules/learn-cron-dashboard.md` § "The dashboard does not
   guide the user to sign in").

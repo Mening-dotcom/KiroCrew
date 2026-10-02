@@ -4659,7 +4659,7 @@
       "setup_check_unavailable": "Setup check unavailable",
       "sign_in_to_kiro": "Sign in to Kiro",
       "the_gateway_owner_needs_to_finish_setup": "The gateway owner needs to finish setup.",
-      "then_the_dashboard_will_open_automatically": ", then\n              the dashboard will open automatically.",
+      "then_the_dashboard_will_open_automatically": "Then the dashboard opens automatically.",
       "try_again": "Try again",
       "we_could_not_check_kiro_cli": "We could not check Kiro CLI.",
       "your_crew_is_almost_ready": "Your crew is almost ready."

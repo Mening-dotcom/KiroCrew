@@ -13,8 +13,9 @@ Two modes, because only one of them can run in CI:
 ``--run [--case ID]``
     For each persona, a real first run: an ISOLATED gateway (fresh data home,
     fresh kiro home, a free port, the simulated cloud engine, a fixture agent
-    home to import) driven over HTTP. The runner commits the privacy card,
-    clicks every later card by the persona's policy, sends the next scripted
+    home to import) driven over HTTP. The runner clicks the gateway's own
+    steps (the default harness, its sign-in check, privacy, the persona's
+    start path), clicks every later card by the persona's policy, sends the next scripted
     reply whenever the agent is idle with nothing pending, and grades the
     record against the persona's rubric. The model calls are real, so this is
     a local command, not a CI gate. Results land in ``iteration-N/``.
@@ -57,6 +58,8 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 SKILL_FILE = REPO_ROOT / "src" / "kiro_crew" / "builtin_skills" / "crew-setup" / "SKILL.md"
 CASES_FILE = HERE / "cases.json"
+#: The gateway's own first-run steps before any model turn (setup_cards.SCRIPTED_KINDS).
+SCRIPTED_KINDS = ("harness", "harness_signin", "privacy", "path")
 FIXTURES = HERE / "fixtures"
 EXPLAIN_FOR_RUNNER = HERE.parent / "explain-for" / "run_evals.py"
 VENV_BIN = REPO_ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin")
@@ -504,7 +507,7 @@ class Ctx:
         self.record = record
         self.spec = spec
         self.t0 = float(record.get("t0") or 0.0)
-        self.cards = [c for c in record.get("cards") or [] if c.get("kind") != "privacy"]
+        self.cards = [c for c in record.get("cards") or [] if c.get("kind") not in SCRIPTED_KINDS]
         self.cards.sort(key=lambda c: float(c.get("created_ts") or 0.0))
         self.sends = list(record.get("sends") or [])
         self.transcript = list(record.get("transcript") or [])
@@ -598,7 +601,7 @@ def _g_job_kept_within(ctx: Ctx, args: Dict[str, Any]) -> Grade:
     if ctx.first_kept is None:
         return False, "no job was kept"
     mins = (ctx.first_kept - ctx.t0) / 60.0
-    return mins <= args["minutes"], f"first job kept {mins:.1f} min after the privacy click"
+    return mins <= args["minutes"], f"first job kept {mins:.1f} min after setup started"
 
 
 def _v_job_kept(args: Dict[str, Any], persona: Dict[str, Any], spec: Dict[str, Any]) -> List[str]:
@@ -616,7 +619,7 @@ def _g_first_reply(ctx: Ctx, args: Dict[str, Any]) -> Grade:
     if not after:
         return False, "the agent never replied"
     secs = min(after) - ctx.t0
-    return secs <= args["secs"], f"first reply {secs:.0f}s after the privacy click"
+    return secs <= args["secs"], f"first reply {secs:.0f}s after setup started"
 
 
 def _g_preview_succeeded(ctx: Ctx, args: Dict[str, Any]) -> Grade:
@@ -1650,7 +1653,7 @@ class Driver:
                 raise GatewayRefused(
                     "a home card is not simulated; refusing to click anything near AWS"
                 )
-            if kind == "privacy" or status != "pending":
+            if kind in SCRIPTED_KINDS or status != "pending":
                 continue
             thread = self.inflight.get(cid)
             if thread is not None and thread.is_alive():
@@ -1701,7 +1704,7 @@ class Driver:
     def waiting_on_user(self, cards: List[Dict[str, Any]]) -> bool:
         """A card the runner will still click, or one mid-commit (a home builds on its own)."""
         for card in cards:
-            if card["kind"] in ("privacy", "home"):
+            if card["kind"] in SCRIPTED_KINDS or card["kind"] == "home":
                 continue
             if card["status"] == "working":
                 return True
@@ -1795,16 +1798,9 @@ class Driver:
 
     def run(self) -> Dict[str, Any]:
         slot = self._first_run_slot()
-        privacy = self._privacy_card(slot)
-        status, body = self.client.post(
-            f"/api/setup/cards/{privacy['id']}/decide",
-            {"decision": "commit", "hash": privacy["hash"], "input": {"telemetry": False}},
-        )
-        if status != 200:
-            raise GatewayRefused(f"the privacy card did not commit: HTTP {status} {body}")
+        self._scripted_steps(slot)
         self.t0 = time.time()
-        self.event("privacy_committed")
-        self.log("privacy committed; the first-run turn starts")
+        self.log("the scripted steps are done; the first-run turn starts")
         script = list(self.persona["script"])
         next_idx = 0
         idle_since: Optional[float] = None
@@ -1859,15 +1855,44 @@ class Driver:
             time.sleep(1)
         raise GatewayRefused("the gateway never recorded a first-run session")
 
-    def _privacy_card(self, slot: str) -> Dict[str, Any]:
-        deadline = time.monotonic() + 60
+    def _scripted_steps(self, slot: str) -> None:
+        """Click the gateway's own steps, in order, until the start path is chosen.
+
+        The default harness (Kiro), its sign-in check, privacy with telemetry off,
+        then the persona's start path (``detailed`` unless it names ``tips``). A
+        gateway older than the scripted steps opens on privacy, which is the last
+        click there.
+        """
+        inputs = {
+            "harness": {"backend": ""},
+            "harness_signin": {},
+            "privacy": {"telemetry": False},
+            "path": {"path": self.persona.get("path", "detailed")},
+        }
+        deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             cards = self.client.get(f"/api/setup/cards?slot={urllib.parse.quote(slot)}")["cards"]
-            for card in cards:
-                if card["kind"] == "privacy" and card["status"] == "pending":
-                    return card
-            time.sleep(1)
-        raise GatewayRefused("no pending privacy card in the first-run session")
+            live = [c for c in cards if c["kind"] in SCRIPTED_KINDS and c["status"] == "pending"]
+            if not live:
+                done = {c["kind"] for c in cards if c["status"] == "committed"}
+                if "path" in done or ("privacy" in done and "harness" not in done):
+                    return
+                time.sleep(1)
+                continue
+            card = live[0]
+            if card.get("error") and card["kind"] == "harness_signin":
+                raise GatewayRefused(f"the harness sign-in check failed: {card['error']}")
+            status, body = self.client.post(
+                f"/api/setup/cards/{card['id']}/decide",
+                {"decision": "commit", "hash": card["hash"], "input": inputs[card["kind"]]},
+            )
+            if status != 200:
+                raise GatewayRefused(
+                    f"the {card['kind']} card did not commit: HTTP {status} {body}"
+                )
+            self.event(f"{card['kind']}_committed")
+            self.log(f"{card['kind']} committed")
+        raise GatewayRefused("the scripted first-run steps did not finish")
 
     def _record(self, slot: str, stop_reason: str, sent: int) -> Dict[str, Any]:
         for thread in list(self.inflight.values()) + ([self.sender] if self.sender else []):

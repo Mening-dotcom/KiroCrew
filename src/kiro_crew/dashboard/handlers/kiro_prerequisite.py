@@ -55,6 +55,39 @@ def _not_ready_snapshot(
     return result
 
 
+def _first_run_context() -> dict[str, bool]:
+    """Two facts the setup gate reads beside the probe. Blocking; never raises.
+
+    ``applies``: the configured harness runs kiro-cli, so this prerequisite is
+    about it (``ACP_BACKENDS_KIRO_CLI_PREREQUISITE``, a positive test, harness-parity
+    H5); for any other harness the gate draws nothing. ``scripted_first_run``: the
+    first-run chat owns the install and sign-in step as a card, so the gate leaves
+    its own first-run screen to the chat. Each falls back to today's behaviour
+    (the gate applies, no scripted first run) when it cannot be read.
+    """
+    context = {"applies": True, "scripted_first_run": False}
+    try:
+        from kiro_crew.agent_sdk.backends import ACP_BACKENDS_KIRO_CLI_PREREQUISITE
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        backend = getattr(KiroCrewConfig.load().agent, "acp_backend", "")
+        context["applies"] = backend in ACP_BACKENDS_KIRO_CLI_PREREQUISITE
+    except Exception:
+        logger.debug("Could not read the configured agent harness", exc_info=True)
+    try:
+        from kiro_crew.dashboard.setup_flow import scripted_first_run_active
+
+        context["scripted_first_run"] = bool(scripted_first_run_active())
+    except Exception:
+        logger.debug("Could not read the first-run state", exc_info=True)
+    return context
+
+
+async def _owner_response(snapshot: dict[str, Any]) -> web.Response:
+    context = await asyncio.to_thread(_first_run_context)
+    return web.json_response({**snapshot, **context, "setup_allowed": True})
+
+
 def _service(request: web.Request) -> KiroPrerequisiteService:
     service = request.app.get("kiro_prerequisite_service")
     if not isinstance(service, KiroPrerequisiteService):
@@ -156,14 +189,17 @@ async def api_kiro_prerequisite_status(request: web.Request) -> web.Response:
             probe_error=f"{type(exc).__name__}: {exc}"[:400],
         )
     if _is_dashboard_owner(request):
-        return web.json_response({**snapshot, "setup_allowed": True})
+        return await _owner_response(snapshot)
 
     # Authorized non-owner dashboard users need the readiness bit so the
     # application gate does not lock them out after the owner completes setup.
     # Do not expose the host platform, candidate state, operation output, URLs,
-    # or mutations to those users.
+    # or mutations to those users. The first-run context is served as-is: it
+    # decides whether the gate draws at all, and it names no host state.
+    context = await asyncio.to_thread(_first_run_context)
     return web.json_response(
         {
+            **context,
             "platform": "gateway",
             "installed": False,
             "authenticated": False,
@@ -235,7 +271,7 @@ async def api_kiro_prerequisite_repair_specs(request: web.Request) -> web.Respon
     if denied is not None:
         return denied
     snapshot = await _service(request).repair_agent_specs(_caller(request))
-    return web.json_response({**snapshot, "setup_allowed": True})
+    return await _owner_response(snapshot)
 
 
 async def api_kiro_prerequisite_update_cli(request: web.Request) -> web.Response:
@@ -256,4 +292,4 @@ async def api_kiro_prerequisite_update_cli(request: web.Request) -> web.Response
     if denied is not None:
         return denied
     snapshot = await _service(request).update_cli(_caller(request))
-    return web.json_response({**snapshot, "setup_allowed": True})
+    return await _owner_response(snapshot)

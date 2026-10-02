@@ -20,9 +20,11 @@ this spec is the contract the code keeps.
 | Setup actions | `src/kiro_crew/setup_actions/` | One module per kind, each a `SetupAction`: its tool arguments and their MCP-side check, its builder, committer, extra decisions, the model-facing title and result sentence, and the flags the flow reads instead of branching on the kind (see [Adding a setup action](#adding-a-setup-action)). |
 | Flow | `src/kiro_crew/dashboard/setup_flow.py` | `propose` (the directive applier), `decide` (the owner's click), both dispatching through the setup actions; the committers and watchers the actions name, `ensure_first_run_session`, `start_first_run_turn`, graduation and the crew overview. |
 | HTTP | `src/kiro_crew/dashboard/handlers/setup_cards.py` | `GET /api/setup/first-run`, `POST /api/setup/first-run/retry`, `GET /api/setup/cards?slot=`, `GET /api/setup/cards/{id}`, `GET /api/setup/cards/{id}/approvals`, `POST /api/setup/cards/{id}/decide`, `POST /api/setup/main-chat`. All owner-only. |
+| Harness check | `src/kiro_crew/dashboard/harness_readiness.py` | Whether the chosen harness answers, asked by the sign-in step's Continue: the Kiro prerequisite probe for the kiro-cli harnesses, the install probe and a no-prompt handshake for any other (see [The scripted steps](#the-scripted-steps)). |
+| Composer lock | `setup_flow.scripted_lock`, `dashboard/chat_handlers.py` (`api_chat`), `website/src/components/setup/scriptedLock.ts` | The first-run chat refuses a message, and its composer is disabled with the step's reason, while a scripted step waits. |
 | Guardrails | `src/kiro_crew/dashboard/setup_guardrails.py` | The stall watchdog, the kickoff notice and the quota pause (see [Guardrails](#guardrails)). |
 | MCP tools | `src/kiro_crew/mcp_tools/setup.py` | `setup_card` (a session directive) and `setup_status` (read-only). The `setup_card` kind enum, argument properties and description are generated from the proposable setup actions. |
-| Card faces | `website/src/components/setup/` | `setupCardRegistry.tsx`: kind → body, title key and flags (`draft`, `refreshesBoot`); a kind with no entry draws `FallbackBody`: the generic title, Approve and Not now, nothing from the payload. `SetupCard.tsx` draws a card, `SetupCardBodies.tsx` holds the bodies, and `PendingSetupCards.tsx` is the tray above the composer that keeps every live card of the chat in view while its transcript row folds to a one-line pointer. Every pending card arrives there as a one-line hint, never open ([decision](../../decisions/2026-10-02-setup-cards-arrive-as-hints.md)): the kind's icon (the shield on a high-stakes card), the title, a short summary from the payload or the card's live state (each kind's `hint` in the registry, `setupCardHints.ts`; a kind without one shows its title alone), "N more" when several wait (the hint names the first), Not now when the card may be declined, and Review. Nothing commits from the hint: Not now is its one decision, and every other decision, the commit included, is in the opened card. Review opens the card in place, capped at a third of the chat pane and scrolling inside; Hide folds it back. An open card also folds once the conversation moves on after it was opened (a user message, a later turn or a notice: `setupCardTray.ts` `conversationMoves`) or when the user scrolls up to read, except while the owner is using a card (a pointer press, a key, or focus inside it), which holds until that card is decided, they hide it, or they scroll up themselves. A folded card stays mounted but inert. The hint's title scrolls the transcript to the card's row (`SetupCardRow.tsx`), opening a folded turn first; that row, "waiting for your decision below", opens the card in the tray and highlights it. |
+| Card faces | `website/src/components/setup/` | `setupCardRegistry.tsx`: kind → body, title key and flags (`draft`, `refreshesBoot`); a kind with no entry draws `FallbackBody`: the generic title, Approve and Not now, nothing from the payload. `SetupCard.tsx` draws a card, `SetupCardBodies.tsx` holds the bodies (the scripted steps' are in `ScriptedStepBodies.tsx`, the harness picker seam in `HarnessPicker.tsx`, the step messages in `SetupStepMessage.tsx`), and `PendingSetupCards.tsx` is the tray above the composer that keeps every live card of the chat in view while its transcript row folds to a one-line pointer. Every pending card arrives there as a one-line hint, never open ([decision](../../decisions/2026-10-02-setup-cards-arrive-as-hints.md)): the kind's icon (the shield on a high-stakes card), the title, a short summary from the payload or the card's live state (each kind's `hint` in the registry, `setupCardHints.ts`; a kind without one shows its title alone), "N more" when several wait (the hint names the first), Not now when the card may be declined, and Review. Nothing commits from the hint: Not now is its one decision, and every other decision, the commit included, is in the opened card. Review opens the card in place, capped at a third of the chat pane and scrolling inside; Hide folds it back. An open card also folds once the conversation moves on after it was opened (a user message, a later turn or a notice: `setupCardTray.ts` `conversationMoves`) or when the user scrolls up to read, except while the owner is using a card (a pointer press, a key, or focus inside it), which holds until that card is decided, they hide it, or they scroll up themselves. A folded card stays mounted but inert. The hint's title scrolls the transcript to the card's row (`SetupCardRow.tsx`), opening a folded turn first; that row, "waiting for your decision below", opens the card in the tray and highlights it. |
 | Channel pairing | `src/kiro_crew/dashboard/setup_channel.py` | The `channel` card's commit (the bot token) and its `/pair` code, which lives in process memory only. |
 | Job preview | `src/kiro_crew/dashboard/setup_preview.py` | The `cron` card's preview run: the approvals it waits on, shown on the card, and a verdict that counts how they ended (see [Job previews](#job-previews)). |
 | The account a home lives in | `src/kiro_crew/cloud/local_signin.py`, `src/kiro_crew/cloud/sizes.py` | Read-only AWS facts (who the CLI signs in as, the account's region, its plan, its vCPU quota), the sign-up links, and the size tiers with their per-region prices (see [The home](#the-home)). |
@@ -42,22 +44,23 @@ this spec is the contract the code keeps.
 `dashboard/server.py` calls `setup_flow.ensure_first_run_session` after the
 session restore. It creates one pinned slot titled for the first run
 (`FIRST_RUN_TITLE`), on the `kirocrew-main` agent spec (see
-[The main chat](#the-main-chat)), records it in the state file, and appends the
-privacy card — only when the install is not onboarded, the privacy flag is
-unset, no slot is live and no session exists on disk. It is idempotent across
-restarts. `_theme_payload` reports `first_run_slot`, which the SPA uses to keep
+[The main chat](#the-main-chat)), records it in the state file, and opens it on
+the first scripted step, the welcome with the harness choice (see
+[The scripted steps](#the-scripted-steps)) — only when the install is not
+onboarded, the privacy flag is unset, no slot is live and no session exists on
+disk. It is idempotent across restarts, and on a restart it picks the scripted
+steps up where they stopped. `_theme_payload` reports `first_run_slot`, which the SPA uses to keep
 the classic chapters from opening by themselves; `/onboarding` still opens them.
 `kirocrew start` lands on the main chat when there is one, else on this chat.
 
-On a fresh install whose kiro-cli is missing or signed out, the dashboard's
-prerequisite gate stands in front of this chat. `kirocrew start` on a terminal
-still starts the gateway and opens the browser ([cli](cli.md#start-command));
-the gate shows Kiro's install command and the sign-in, checks again on its own,
-and lifts once kiro-cli is ready, and the chat then opens on its privacy card.
-The chat's own transcript does not count as an established install until a main
-chat is recorded, so a restart before then keeps the gate
-([learn-cron-dashboard](learn-cron-dashboard.md)). Installing kiro-cli for the
-user is RFC Q2, still open.
+On a fresh install the harness's install and sign-in are steps in this chat,
+not a screen in front of it: `kirocrew start` on a terminal skips its own
+harness check and opens the browser ([cli](cli.md#start-command)), and the
+dashboard's Kiro prerequisite gate leaves its first-run install and sign-in
+screen to the chat while a scripted first run is under way
+(`scripted_first_run`, [learn-cron-dashboard](learn-cron-dashboard.md)). The
+chat's own transcript does not count as an established install until a main chat
+is recorded. Installing a harness for the user is RFC Q2, still open.
 
 Before `setup.sh` launches the gateway on WSL, it queries the systemd user
 manager with a five-second timeout. A missing, unreachable or unresponsive
@@ -84,14 +87,81 @@ nothing, so the setup cards and notices are the only guidance. Tips resume on
 their own cadence once graduation sets the main chat, and the user's tips
 opt-out still wins.
 
-Committing the privacy card dispatches the `[First run]` kickoff turn
-(`FIRST_RUN_PREFIX` in `dashboard/state.py`, `injectKind: "first_run"`), whose
-text carries facts the gateway gathered (other agents detected, curated
-connections, whether the service is installed, and a `--home cloud` answer) and
-the `$crew-setup` token, so the skill body is expanded into that turn. Only a
-`kirocrew start --home cloud` answer puts a home card on screen at this point;
-every other first run asks where the crew lives after scheduling is kept or skipped (see
-[The home step](#the-home-step)).
+Committing the last scripted step, the start path, dispatches the `[First run]`
+kickoff turn (`FIRST_RUN_PREFIX` in `dashboard/state.py`, `injectKind:
+"first_run"`), whose text carries facts the gateway gathered (the agent engine
+the owner chose and whether its sign-in check passed, the start path, other
+agents detected, curated connections, whether the service is installed, and a
+`--home cloud` answer) and the `$crew-setup` token, so the skill body is
+expanded into that turn. A first-run chat created before the scripted steps
+opens on the privacy card, and committing that card dispatches the kickoff as it
+always did. Only a `kirocrew start --home cloud` answer puts a home card on
+screen at this point; every other first run asks where the crew lives after
+scheduling is kept or skipped (see [The home step](#the-home-step)).
+
+### The scripted steps
+
+Until a harness is installed and signed in no model can answer, so the first
+part of the first run is scripted: the gateway shows each step itself, as a
+message with its card (a tray hint, like every card), and advances on the
+owner's click alone. The order (`setup_cards.SCRIPTED_KINDS`):
+
+1. **Welcome, and the harness** (`harness`). The card offers
+   `selectable_backends()` after governance narrowed it, Kiro first and badged as
+   the default (harness-parity H1), with whether each is installed here. Its
+   picker (`components/setup/HarnessPicker.tsx`) is a seam the full harness
+   selector replaces by keeping its props. The commit re-checks the choice
+   against the card's options and the live selectable set (H3, H4), then writes
+   `agent.acp_backend` (a live key: new sessions use it).
+2. **Install and sign in** (`harness_signin`). For the harnesses that run
+   kiro-cli (`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`: Kiro, KAS) the body reads the
+   live Kiro CLI status (`?refresh=auto`, every 5 s): Kiro's install command for
+   the host's platform, then its sign-in commands; a desktop app's bundled copy
+   skips the install. Any other harness shows its install command and its
+   declared `sign_in_remedy`, verbatim. Continue is the check
+   (`dashboard/harness_readiness.py`): the Kiro prerequisite service's forced
+   probe for the kiro-cli harnesses (never an `acp` spawn, which signed out opens
+   a browser sign-in; KAS also counts Crew's own vault identity), and for any
+   other harness its install probe, then a handshake with no prompt (spawn,
+   `initialize`, `session/new`, shut down). Kiro Crew reads no harness's
+   credential files. The button reads Check again until the live status says
+   ready, then lights up as Continue. A failed check returns the card with its
+   reason; after one, Continue without checking commits it unverified.
+3. **Privacy** (`privacy`), the existing disclosure. The first heartbeat waits
+   on `privacy_acked` whatever the order, so nothing is sent before it.
+4. **How to start** (`path`): get started with tips, or a more detailed setup
+   (UX.3). Its commit sends the kickoff with the path as a fact, and the
+   crew-setup skill branches on it.
+
+Each step opens with the gateway's message: an `inject` row with no
+`injectKind` (it opens no turn) whose `meta.setupStep` names the step
+(`welcome`, `harness`, `signin`, `signin_again`, `privacy`, `path`) and, for
+the sign-in steps, the engine's label. The dashboard draws its words from the
+catalog by step name (`components/setup/SetupStepMessage.tsx`); the row's
+content is an English breadcrumb for the model. The first turn is a cold start,
+so its replay shows these rows as `Inject:` lines, the gateway's, never as
+`Assistant:` lines the agent would read as its own words.
+
+**The composer lock.** While a scripted card is live in the first-run chat,
+`api_chat` refuses a message there with `409 setup_step_pending` (and the step),
+before the pasted-secret capture, so a refused message is stored nowhere; the
+first-run retry route refuses the same way. The dashboard disables that chat's
+composer with the step's reason (`components/setup/scriptedLock.ts`, read from
+the tray's own card list). Both read the card store (`setup_flow.scripted_lock`),
+never a readiness latch, and only the first-run chat: a lost card store unlocks
+it, and every other chat sends as before.
+
+**After a restart.** `ensure_first_run_session` re-runs the advance with no
+click: a step left `working` returns to `pending` (`step_interrupted`), a step
+whose successor was never shown is shown, and a finished script whose kickoff
+got no reply posts the kickoff notice with Try again once, never a turn of its
+own (SC8).
+
+**When the first reply cannot sign in.** A harness whose sign-in fails only on
+its first prompt is caught by that turn: on `AcpAuthRequired` in the first-run
+chat before the agent has answered, `reopen_signin_after_auth_failure` shows the
+sign-in step again (`signin_again`), the composer locks, the kickoff notice is
+withheld, and committing the new card sends the kickoff again.
 
 ## Lifecycle of a card
 
@@ -134,7 +204,10 @@ for a picked region), so a click carrying the old hash is refused.
 
 | Kind | Proposed by | Payload shown | Commit does |
 |---|---|---|---|
-| `privacy` | the gateway only | the privacy disclosure (frontend strings) | sets `dashboard.privacy_acked`; `telemetry.beacon_enabled = false` when the owner turned telemetry off; shows the home card a `--home cloud` answer asked for, and starts the first model turn |
+| `harness` | the gateway only, as the first scripted step | the selectable harnesses (`id`, `label`), the current one and the default | re-checks the choice against the options and `selectable_backends()`, writes `agent.acp_backend`, then shows the sign-in step |
+| `harness_signin` | the gateway only, after the harness and again when the first reply cannot sign in | the engine (`backend`, `label`) and its flow: `kiro_cli`, or `own` with its install command and `sign_in` remedy | asks the harness whether it answers (`harness_readiness.check`); no: back to pending with the reason; after one failed check `input.skip` commits it unverified. Then the next step, or the kickoff again when the rest is done |
+| `privacy` | the gateway only | the privacy disclosure (frontend strings) | sets `dashboard.privacy_acked`; `telemetry.beacon_enabled = false` when the owner turned telemetry off; then the start path in a scripted first run, or, in a first-run chat from before the scripted steps, the home card a `--home cloud` answer asked for and the first model turn |
+| `path` | the gateway only, as the last scripted step | `options`: `tips`, `detailed` | records `input.path`, shows the home card a `--home cloud` answer asked for, and starts the first model turn, whose facts name the path |
 | `profile` | agent | `fields`: bot_name, language, timezone, technical_level, role | writes those config keys through `update_config_locked` under `run_config_write`, then a hot apply |
 | `soul` | agent | `file` (`SOUL`/`USER`), `content` (≤ `SOUL_MAX_CHARS`, 3000), `previous` | writes `data_home()/persona/<file>.md` |
 | `import` | agent | detected sources and categories with counts | `onboarding_import.run_import_apply` — the same lock order and re-scan as the Import chapter; imported jobs arrive disabled, and the result names them (name, schedule, a prompt excerpt) because the chat's session-scoped job tools do not list jobs the import created |
@@ -155,6 +228,7 @@ for a picked region), so a click carrying the old hash is refused.
 | SC4 | Kiro Crew never reads or stores an AWS credential: the AWS CLI resolves and caches its own. The card's `aws login` child has every standard stream closed, and a card keeps at most the account's last four digits. | `test_setup_aws_signin.py::TestNoCredentials` |
 | SC5 | A schedule runs on exactly one crew during a move-in: the local copies are off before the archive reaches the home, back on when the home does not confirm it, and stay off once it has. | `test_setup_move_in.py::TestHappyPath::test_sc5_the_moving_job_is_off_here_before_the_archive_lands`, `TestCarryFailure`, `TestRetry` |
 | SC6 | The first-run state file admits nothing. | `test_setup_flow.py::TestPropose::test_s6_the_first_run_state_file_admits_nothing` |
+| SC9 | No model turn runs in the first-run chat before its scripted steps are done: a typed message is refused (`setup_step_pending`) before anything stores it, and the kickoff starts only from the start path's click (or the sign-in step's, after the first reply could not sign in), never from a restart. | `test_setup_flow.py::TestScriptedSteps::test_no_model_turn_runs_before_the_start_path`, `TestScriptedStepsAfterARestart::test_a_finished_script_never_starts_a_turn_on_its_own`, `test_first_run_composer_lock.py` |
 | SC8 | A card is raised only in a turn a person started: a typed message, or a turn that exists because the owner clicked a card (the first-run kickoff and every `[Setup card result]` turn carry user provenance for that reason). | `test_setup_flow.py::TestPropose::test_s8_a_turn_no_person_started_shows_nothing` |
 
 ## Governance
@@ -162,8 +236,11 @@ for a picked region), so a click carrying the old hash is refused.
 `capabilities.setup` (`platform/governance.py` `SCOPE_CATALOG`, default on) gates
 every proposal and every commit of a governed kind; its inner `kinds` ruleset
 checks the card kind as the item, so a fleet can keep cards while refusing, say,
-`service`. The privacy acknowledgement is the one kind a policy may not refuse
-(`governed=False`): nothing else runs without it. Cron cards additionally pass
+`service`. The scripted steps (`harness`, `harness_signin`, `privacy`, `path`)
+are the kinds a policy may not refuse (`governed=False`): nothing else runs
+without them. The policy control over the harness is the harness list itself:
+the card offers `selectable_backends()` after the agent-backend governance
+narrowed it, and the commit re-checks the choice against that live set. Cron cards additionally pass
 `capabilities.cron` (`mcp_cron._vet_cron_capability_governance`). The core MCP
 server is auto-approved, so the card is the consent step and these checks run
 inside the flow, not at the permission gate.
@@ -206,8 +283,10 @@ sets from the provider's raw frame (`AcpError.usage_limit`), never from prose. A
 turn whose model fallback answered after the limit is not an episode, and a
 second failing turn in the same episode posts nothing more. The pause lives in
 memory and can only make a proposal refuse. The retry route refuses with
-`slot_not_found`, `privacy_not_acked`, `turn_running` or `kickoff_answered` (an
-assistant reply after the last `first_run` inject row). The retried kickoff
+`slot_not_found`, `privacy_not_acked`, `setup_step_pending` (a scripted step is
+still live), `turn_running` or `kickoff_answered` (an assistant reply after the
+last `first_run` inject row). A restart forgets the open kickoff, so a finished
+script whose kickoff got no reply posts the kickoff notice once on the next start. The retried kickoff
 carries user provenance for the same reason the first one does (SC8). None of
 these reads or writes a keystone file (SC3), and the first-run state file only
 picks which chat is watched (SC6).

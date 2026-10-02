@@ -1170,7 +1170,13 @@ specified compatibility change.
   it never re-queues (respawning hits the same wall), appends the actionable
   "not logged in — run `kiro-cli login`" error card, mirrors that message to a
   linked Slack thread (preserving the delivery the old pre-turn gate performed),
-  and calls `KiroPrerequisiteService.mark_signed_out()`. That latch narrows
+  and calls `KiroPrerequisiteService.mark_signed_out()` when the failing harness
+  signs in through kiro-cli's identity store
+  (`host_auth.backends_retired_by_host_logout()`, read off the exception's
+  `backend`; any other harness's failure leaves it alone). In a scripted first
+  run whose agent has not answered yet it also asks
+  `setup_flow.reopen_signin_after_auth_failure` to show the sign-in step again
+  (best effort: nothing it does can break the turn). That latch narrows
   `authenticated`/`ready` to false without spawning anything and never touches
   `initial_setup_complete` (so a returning user is never demoted to first-run
   setup). It only ever narrows readiness, and defers while an install/login
@@ -1195,7 +1201,11 @@ specified compatibility change.
   to do. It latches the service signed-out too.
   **Two classes still fail closed** via the blocking guard
   `reject_if_kiro_unverified()`, because neither can use the ACP attempt as its
-  authority: the **poll-driven `kiro-cli` spawn sites** (`/api/models`,
+  authority (the reruns and `POST /v1/chat/completions` through
+  `reject_if_turn_harness_unverified()`, which applies it only when the configured
+  harness runs kiro-cli, `ACP_BACKENDS_KIRO_CLI_PREREQUISITE`: on any other
+  harness kiro-cli's readiness says nothing about the turn they start): the
+  **poll-driven `kiro-cli` spawn sites** (`/api/models`,
   `/api/sessions/usage`) have no turn to carry the failure and `kiro-cli`
   auto-opens an interactive browser login when run unauthenticated (and
   `kiro-cli chat` hangs), so an unverified spawn on a timer opens a window and
@@ -2489,6 +2499,22 @@ still refresh while the dashboard body is blocked. On a new gateway it:
    copy's **Update** is refused (`BUNDLED_CLI_UPDATE_REFUSAL`);
 4. records first-run completion when `ready=true`.
 
+Two fields of the status decide whether it draws at all, both read per request
+off the loop and falling back to today's gate when unreadable:
+
+- **`applies`**: the configured `agent.acp_backend` runs kiro-cli
+  (`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`, kiro and KAS; a positive test, H5). On
+  any other harness the gate renders the app and none of its screens, the
+  CliOutdated and agent-spec ones included: they are all about kiro-cli.
+- **`scripted_first_run`** (`setup_flow.scripted_first_run_active()`): the
+  first-run chat owns the setup steps, and its `harness_signin` card carries the
+  install, the sign-in and their re-check. The gate then renders the chat instead
+  of its install/sign-in screen. The non-owner, agent-spec, outdated-CLI,
+  probe-error and sandbox screens keep their place: none of them is a step.
+
+Both are served to non-owners too (they name no host state), and a gateway older
+than the fields keeps today's gate.
+
 **Kiro Crew performs neither setup step, and there is no code path that could.**
 Both belong to Kiro CLI. Deleted for install: the installer download
 (`https://cli.kiro.dev/install`), its pinned SHA-256 pair, the bash/PowerShell
@@ -2547,7 +2573,9 @@ CLI always offers an enabled **Sign in to Kiro** rather than a button-less
 
 **The first-run gate is the one screen that polls the HOST rather than the latch.**
 `kiroPrerequisiteIsBlocking(status)` is true only while the full-screen first-run
-gate is the whole UI (not `ready`, not `initial_setup_complete`, owner). In that
+gate is the whole UI (not `ready`, not `initial_setup_complete`, owner, the
+prerequisite `applies`, no `scripted_first_run`: the chat's sign-in card polls on
+its own). In that
 state the gate polls every 5s AND passes `?refresh=1`, because the two steps it is
 waiting on — installing from kiro.dev and signing in, possibly from a terminal —
 touch the gateway not at all, so a latch-reading poll could never observe either
@@ -2646,8 +2674,11 @@ to a slot is a lifecycle change wider than this guard.
 (`_save_slot_to_history`, `_pending_rewrite`) *before* dispatching the background
 turn, so "let the ACP attempt be the authority" does not hold for them: by the
 time the turn raises `AcpAuthRequired` the history is already rewritten and no
-error card can undo it. All three therefore call `reject_if_kiro_unverified`
-BEFORE any mutation, returning the shared `kiro_prerequisite_required` 503.
+error card can undo it. All three therefore call `reject_if_turn_harness_unverified`
+BEFORE any mutation, returning the shared `kiro_prerequisite_required` 503. That
+is `reject_if_kiro_unverified` when the configured harness runs kiro-cli
+(`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`) and nothing on any other harness: its turn
+does not run kiro-cli, so a missing or signed-out kiro-cli must not refuse it.
 (`switch-variant` is exempt — it swaps an already-stored variant and starts no
 turn.)
 
@@ -2655,9 +2686,10 @@ turn.)
 no transcript the caller reads. Its collectors pick up only `chunk`/`assistant`
 roles, so the `error` card an `AcpAuthRequired` turn appends is invisible and the
 request would return **HTTP 200 with empty content** — an OpenAI SDK client
-cannot distinguish that from a model that legitimately said nothing. It returns
-the `kiro_prerequisite_required` 503 in OpenAI error shape until the endpoint
-learns to translate `AcpAuthRequired` itself.
+cannot distinguish that from a model that legitimately said nothing. On a
+harness that runs kiro-cli it returns the `kiro_prerequisite_required` 503 in
+OpenAI error shape (through the same `reject_if_turn_harness_unverified`) until
+the endpoint learns to translate `AcpAuthRequired` itself.
 
 **An unresolved check is never rendered as "setup required."** The cold probe
 spawns two sandboxed `kiro-cli` subprocesses (`--version`, then `whoami`), which

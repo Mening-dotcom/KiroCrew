@@ -21,6 +21,7 @@ latched value can be arbitrarily stale. That splits the callers in two:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -252,3 +253,36 @@ async def reject_if_kiro_unverified(request: web.Request) -> web.Response | None
         return None
     _warn_refused_once(_log_safe_path(request))
     return web.json_response(_KIRO_NOT_READY_RESPONSE, status=503)
+
+
+def _turn_harness_runs_kiro_cli() -> bool:
+    """Whether the configured harness runs kiro-cli. Blocking; ``True`` when unreadable.
+
+    A positive membership test (harness-parity H5). An unreadable config answers
+    ``True`` so the gate below stays as closed as it was.
+    """
+    from kiro_crew.agent_sdk.backends import ACP_BACKENDS_KIRO_CLI_PREREQUISITE
+
+    try:
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        backend = getattr(KiroCrewConfig.load().agent, "acp_backend", "")
+    except Exception:
+        logger.debug("could not read the configured agent harness", exc_info=True)
+        return True
+    return backend in ACP_BACKENDS_KIRO_CLI_PREREQUISITE
+
+
+async def reject_if_turn_harness_unverified(request: web.Request) -> web.Response | None:
+    """:func:`reject_if_kiro_unverified`, for the callers whose turn runs on the harness.
+
+    The destructive reruns and ``POST /v1/chat/completions`` start a turn on the
+    configured harness, so kiro-cli's readiness is their authority only when that
+    harness runs kiro-cli. On any other harness this answers ``None``: blocking on
+    a kiro-cli probe would refuse every rerun of an install that has no kiro-cli
+    at all. The spawn sites that run kiro-cli itself whatever the harness
+    (``/api/sessions/usage``) keep the plain gate.
+    """
+    if await asyncio.to_thread(_turn_harness_runs_kiro_cli):
+        return await reject_if_kiro_unverified(request)
+    return None

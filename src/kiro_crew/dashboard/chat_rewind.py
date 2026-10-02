@@ -36,7 +36,7 @@ from kiro_crew.dashboard.chat_utils import (
     reject_if_slot_under_construction,
     slot_history_key,
 )
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import reject_if_turn_harness_unverified
 from kiro_crew.dashboard.remote_relay import remote_bound_refusal
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -94,7 +94,7 @@ async def api_chat_slot_rewind(request: web.Request) -> web.Response:
     # Destructive: this truncates and PERSISTS history before the background
     # turn runs, so a failed turn cannot undo it. Unlike an ordinary send, the
     # readiness latch must be honored BEFORE the mutation.
-    blocked = await reject_if_kiro_unverified(request)
+    blocked = await reject_if_turn_harness_unverified(request)
     if blocked is not None:
         return blocked
     state: DashboardState = request.app["state"]

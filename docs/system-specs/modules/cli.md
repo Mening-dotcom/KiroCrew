@@ -481,6 +481,18 @@ from a different later installation.
   command the page says that over SSH or with no browser kiro-cli prints a link
   and a code instead, to finish on any device. Sign-in completion is observed
   only through the read-only `kiro-cli whoami` probe.
+- Which harness: the page is about kiro-cli, so it draws only when the
+  configured `agent.acp_backend` runs kiro-cli (`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`,
+  kiro and KAS). The status carries that answer as `applies`; on any other
+  harness (`applies: false`) the gate renders the app and none of its screens,
+  the CliOutdated and agent-spec ones included.
+- Scripted first run: while the first-run chat owns the setup steps
+  (`scripted_first_run`, from `setup_flow.scripted_first_run_active()`), its
+  `harness_signin` card carries the install, the sign-in and their re-check, so
+  the page renders the chat instead of its install/sign-in screen and stops its
+  5 s host probe (the card polls on its own). The non-owner, agent-spec,
+  outdated-CLI, probe-error and sandbox screens keep their place: none of them is
+  a setup step.
 - Browser dashboard: the authenticated SPA gate operates on the **gateway
   host**, not the browser host. This covers native Windows source installs,
   Linux gateways, and browsers connected to another machine.
@@ -1451,8 +1463,14 @@ only. No AWS call is made here. It takes four steps, in order:
 
 1. **Port.** `resolve_client_port(--port)`, the same resolution `token` and
    `stop` use.
-2. **Harness.** The configured `agent.acp_backend`, identified positively
-   (`== ACP_BACKEND_KIRO`):
+2. **Harness.** On a fresh install (`_first_run_possible()`: neither
+   `dashboard.onboarded` nor `privacy_acked`) and a run that can ask (a TTY on
+   stdin, no `--no-input`), nothing is checked and no sign-in runs: one line says
+   the browser will ask which agent engine to use, and the first-run chat's
+   scripted steps ask it and walk through its install and sign-in
+   ([first-run](first-run.md)). Checking or signing in to the default here would
+   decide that choice before the owner made it. Otherwise, the configured
+   `agent.acp_backend`, identified positively (`== ACP_BACKEND_KIRO`):
    - kiro-cli: `kiro_cli.resolve_kiro_cli()`. Missing on a run that can ask (a
      TTY on stdin, no `--no-input`) prints one line, `kiro-cli isn't installed
      yet; the browser will walk you through it.`, and carries on to the gateway
@@ -1479,9 +1497,9 @@ only. No AWS call is made here. It takes four steps, in order:
      for KAS, which rides kiro-cli) and exits **3**; otherwise its declared
      `sign_in_remedy` is printed, unprobed. The one exception is a run that can
      ask when kiro-cli is the only missing component (KAS): that is guided in
-     the browser like kiro-cli, because the prerequisite gate probes kiro-cli
-     whatever the harness. It probes nothing else, so a missing adapter (claude,
-     codex, pi) still exits 3.
+     the browser like kiro-cli, because the prerequisite gate covers the
+     harnesses that run kiro-cli (`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`). It
+     probes nothing else, so a missing adapter (claude, codex, pi) still exits 3.
    - `--skip-harness-check` skips the step entirely — no `whoami` spawn, no
      prompt.
 3. **Gateway.**

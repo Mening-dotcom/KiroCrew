@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { KiroPrerequisiteStatus } from '../api/client'
 import KiroPrerequisiteGate, {
@@ -62,6 +62,16 @@ const POD_YAML = 'securityContext:\n  appArmorProfile:\n    type: Unconfined'
 const podBlock = () =>
   screen.getByText((_, el) => el?.tagName === 'CODE' && el.textContent === POD_YAML)
 
+// The gate renders its children while the first check is PENDING, so a test of
+// "the app shows" must first wait for the status to resolve, then let React
+// render it; otherwise it would pass against a gate that blocks.
+async function settled(rendered: ReturnType<typeof renderWithProviders>) {
+  await waitFor(() =>
+    expect(rendered.queryClient.getQueryState(['kiro-prerequisite'])?.status).toBe('success'),
+  )
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+}
+
 describe('KiroPrerequisiteGate', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -89,6 +99,82 @@ describe('KiroPrerequisiteGate', () => {
     expect(kiroPrerequisiteIsBlocking(status({ initial_setup_complete: true }))).toBe(false)
     expect(kiroPrerequisiteIsBlocking(status({ setup_allowed: false }))).toBe(false)
     expect(kiroPrerequisiteIsBlocking(undefined)).toBe(false)
+  })
+
+  it('holds nothing up when kiro-cli is not this install\'s harness or the chat owns the step', () => {
+    // Neither case may drive the 5s host probe: another harness has nothing to
+    // probe here, and a scripted first run's sign-in card polls on its own.
+    expect(kiroPrerequisiteIsBlocking(status({ applies: false }))).toBe(false)
+    expect(kiroPrerequisiteIsBlocking(status({ scripted_first_run: true }))).toBe(false)
+    expect(kiroPrerequisiteRefetchInterval(status({ applies: false }))).toBe(30_000)
+    // A gateway older than the fields keeps today's blocking poll.
+    expect(kiroPrerequisiteIsBlocking(status())).toBe(true)
+  })
+
+  it('draws no kiro-cli screen for a harness that does not run kiro-cli', async () => {
+    // A Claude or Codex install with no kiro-cli at all, and an established one
+    // whose stray kiro-cli is too old: neither is this install's business.
+    vi.mocked(api.kiroPrerequisite)
+      .mockResolvedValueOnce(status({ applies: false }))
+      .mockResolvedValue(status({ applies: false, installed: true, acp_supported: false, initial_setup_complete: true }))
+
+    const first = renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+    await settled(first)
+    expect(screen.getByText('Dashboard loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Set up Kiro')).not.toBeInTheDocument()
+    first.unmount()
+
+    const second = renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+    await settled(second)
+    expect(screen.getByText('Dashboard loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Your Kiro CLI is out of date')).not.toBeInTheDocument()
+  })
+
+  it('leaves a scripted first run\'s install and sign-in to the chat', async () => {
+    // The first-run chat's sign-in card carries the steps and their re-check, so
+    // the full-screen "Set up Kiro" gives way to the chat.
+    vi.mocked(api.kiroPrerequisite).mockResolvedValue(status({ scripted_first_run: true }))
+
+    const rendered = renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+    await settled(rendered)
+
+    expect(screen.getByText('Dashboard loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Set up Kiro')).not.toBeInTheDocument()
+  })
+
+  it('keeps the host-level and non-owner screens during a scripted first run', async () => {
+    // Only the install/sign-in fallthrough moves into the chat: a sandbox that
+    // cannot be built, or a viewer who is not the owner, is not a setup step.
+    vi.mocked(api.kiroPrerequisite)
+      .mockResolvedValueOnce(status({
+        scripted_first_run: true,
+        installed: true,
+        sandbox_unavailable: true,
+        sandbox_failure_kind: 'no_backend',
+        sandbox_detail: 'unshare(CLONE_NEWNS) failed with errno 1 (EPERM)',
+      }))
+      .mockResolvedValue(status({ scripted_first_run: true, setup_allowed: false }))
+
+    const first = renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+    expect(
+      await screen.findByText('Kiro CLI is installed but could not be verified'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Dashboard loaded')).not.toBeInTheDocument()
+    first.unmount()
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+    expect(await screen.findByText(/The gateway owner needs to finish setup/)).toBeInTheDocument()
+    expect(screen.queryByText('Dashboard loaded')).not.toBeInTheDocument()
   })
 
   it('forces a real host probe on the blocking gate, not a latched read', async () => {

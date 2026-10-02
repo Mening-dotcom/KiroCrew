@@ -187,6 +187,7 @@ def test_missing_kiro_cli_on_a_terminal_starts_the_gateway_and_opens_the_browser
     # a person at a terminal is sent there instead of being told to re-run.
     from kiro_crew.kiro_prerequisite import OFFICIAL_INSTALL_DOCS_URL
 
+    host.config = _Config(onboarded=True)
     _a_terminal(monkeypatch)
     monkeypatch.setattr("kiro_crew.kiro_cli.resolve_kiro_cli", lambda: None)
     monkeypatch.setattr("kiro_crew.cli_doctor._kiro_cli_signed_in", _refuse("signed_in"))
@@ -204,13 +205,49 @@ def test_missing_kiro_cli_on_a_terminal_starts_the_gateway_and_opens_the_browser
     assert "/chat?sid=chat-1" in host.opened[0]
 
 
+@pytest.mark.parametrize("backend", ["", "claude"])
+def test_a_fresh_install_on_a_terminal_leaves_the_harness_to_the_browser(
+    host, monkeypatch, capsys, backend
+) -> None:
+    # The first-run chat asks which agent engine to use and walks through its
+    # install and sign-in, so the terminal neither checks the default nor runs
+    # its sign-in: no probe, no kiro-cli spawn, whatever is configured.
+    host.config = _Config(backend=backend)
+    _a_terminal(monkeypatch)
+    monkeypatch.setattr("kiro_crew.kiro_cli.resolve_kiro_cli", _refuse("resolve_kiro_cli"))
+    monkeypatch.setattr("kiro_crew.cli_doctor._kiro_cli_signed_in", _refuse("signed_in"))
+    monkeypatch.setattr(
+        "kiro_crew.agent_sdk.backend_install.probe_backend", _refuse("probe_backend")
+    )
+    spawned = _spawns_a_gateway(host, monkeypatch)
+
+    assert cli_start.run_start(_args(no_input=False)) == cli_start.EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "Your browser will ask which agent engine to use" in out
+    assert spawned == [PORT]
+    assert len(host.opened) == 1
+
+
+def test_a_fresh_install_with_no_input_still_checks_the_harness(host, monkeypatch, capsys) -> None:
+    # A script has no one at a browser to ask, so today's check stands.
+    _a_terminal(monkeypatch)
+    monkeypatch.setattr("kiro_crew.kiro_cli.resolve_kiro_cli", lambda: None)
+    monkeypatch.setattr(
+        cli_start.cli_server, "_probe_gateway_ready", _refuse("_probe_gateway_ready")
+    )
+
+    assert cli_start.run_start(_args(no_input=True)) == cli_start.EXIT_HARNESS_MISSING
+    assert "Your browser will ask" not in capsys.readouterr().out
+
+
 def test_kas_missing_only_kiro_cli_on_a_terminal_is_guided_in_the_browser(
     host, monkeypatch, capsys
 ) -> None:
     # KAS rides kiro-cli, and the gate probes kiro-cli whatever the harness.
     from kiro_crew.agent_sdk import backend_install
 
-    host.config = _Config(backend="kas")
+    host.config = _Config(backend="kas", onboarded=True)
     _a_terminal(monkeypatch)
     monkeypatch.setattr(
         backend_install,
@@ -229,7 +266,7 @@ def test_another_missing_harness_on_a_terminal_still_exits_3(host, monkeypatch, 
     # The gate probes kiro-cli only, so it cannot guide an adapter install.
     from kiro_crew.agent_sdk import backend_install
 
-    host.config = _Config(backend="claude")
+    host.config = _Config(backend="claude", onboarded=True)
     _a_terminal(monkeypatch)
     monkeypatch.setattr(
         backend_install,
@@ -275,6 +312,7 @@ def test_signed_out_with_no_input_prints_the_sign_in_and_continues(
 
 
 def test_signed_out_on_a_terminal_runs_the_harness_own_device_login(host, monkeypatch) -> None:
+    host.config = _Config(onboarded=True)
     answers = iter([False, True])
     monkeypatch.setattr("kiro_crew.cli_doctor._kiro_cli_signed_in", lambda: next(answers))
     monkeypatch.setattr(cli_start, "_interactive", lambda args: True)

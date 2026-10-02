@@ -9,8 +9,11 @@ Three entry points:
   This is the ONLY path that commits anything, and it re-checks the owner, the
   payload hash, the card's status and governance before it does.
 * :func:`ensure_first_run_session` — at gateway start, a fresh install gets one
-  pinned chat whose first row is the deterministic privacy card. Acknowledging
-  it dispatches the first model turn (:func:`start_first_run_turn`).
+  pinned chat that opens on the gateway's scripted steps: no model can answer
+  until a harness is chosen and signed in, so the gateway itself shows the
+  welcome with the harness choice, its sign-in, privacy and the start path, each
+  a card the owner clicks. The last click dispatches the first model turn
+  (:func:`start_first_run_turn`).
 
 A decided card is reported back to the agent as a ``[Setup card result]``
 envelope turn so the conversation continues. That turn carries user provenance:
@@ -699,9 +702,332 @@ async def _commit_privacy(
     card = await _finish(card, sc.STATUS_COMMITTED, outcome={})
     slot = state.get_slot(card.slot)
     if slot is not None:
-        await _show_chosen_home(state, slot, card.session_key)
-        await start_first_run_turn(state, slot)
+        if await asyncio.to_thread(_is_scripted, slot.key):
+            await _advance(state, slot, card.session_key, clicked=True)
+        else:
+            await _show_chosen_home(state, slot, card.session_key)
+            await start_first_run_turn(state, slot)
     return card
+
+
+# ── the scripted steps, before any model turn ───────────────────────────────
+
+#: The gateway's message that introduces each scripted card (``meta.setupStep``).
+#: The dashboard draws its words from its own catalog by step name; the row's text
+#: is what the MODEL reads of the step when the first turn replays the chat.
+STEP_WELCOME = "welcome"
+STEP_HARNESS = "harness"
+STEP_SIGNIN = "signin"
+STEP_SIGNIN_AGAIN = "signin_again"
+STEP_PRIVACY = "privacy"
+STEP_PATH = "path"
+
+_STEP_TEXT = {
+    STEP_WELCOME: "welcome to Kiro Crew, and choose the agent engine",
+    STEP_HARNESS: "choose the agent engine",
+    STEP_SIGNIN: "install and sign in to {label}",
+    STEP_SIGNIN_AGAIN: "sign in to {label} again; the first reply could not sign in",
+    STEP_PRIVACY: "what Kiro Crew sends, and how to turn it off",
+    STEP_PATH: "how to start: tips, or a more detailed setup",
+}
+
+#: What the first turn is told about the path the owner picked (UX.3).
+_PATH_FACTS = {
+    sc.PATH_TIPS: (
+        "Start path the user chose: get started with tips. Skip the detailed setup: "
+        "after a short hello, offer two or three concrete things to try, each with its "
+        "card (a scheduled job previewed now; a home in the cloud for a crew that keeps "
+        "running), and keep each tip to one sentence."
+    ),
+    sc.PATH_DETAILED: (
+        "Start path the user chose: a more detailed setup. Walk it in the crew-setup "
+        "order: bring over and connect, then the profile, then a first job to keep."
+    ),
+}
+
+
+def _append_step_row(
+    state: "DashboardState", slot: "_ChatSlot", step: str, card: sc.SetupCard, label: str = ""
+) -> None:
+    """The gateway's scripted message for *card*, written before the card's own row.
+
+    An ``inject`` row with no ``injectKind``, like a card row: it opens no turn,
+    and the first turn's replay shows it as the gateway's breadcrumb rather than
+    as something the agent said (an ``assistant`` row would replay as its words).
+    """
+    text = "(Setup step shown to the user: " + _STEP_TEXT[step].format(label=label) + ")"
+    step_meta: dict[str, Any] = {"step": step, "card": card.id}
+    if label:
+        step_meta["label"] = label
+    slot.append("inject", text, "msg msg-inject", meta={"setupStep": step_meta})
+
+
+async def _show_scripted(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    session_key: str,
+    kind: str,
+    payload: dict[str, Any],
+    step: str,
+    label: str = "",
+) -> sc.SetupCard:
+    """Show one scripted card: its step message, then its row (a tray hint)."""
+    card = await asyncio.to_thread(
+        lambda: sc.create_card(slot=slot.key, session_key=session_key, kind=kind, payload=payload)
+    )
+    _append_step_row(state, slot, step, card, label)
+    _append_card_row(state, slot, card)
+    broadcast(state, card)
+    return card
+
+
+def _scripted_cards(slot_key: str) -> dict[str, sc.SetupCard]:
+    """The newest card of each scripted kind in *slot_key*. Blocking."""
+    latest: dict[str, sc.SetupCard] = {}
+    for card in sorted(sc.list_cards(slot_key), key=lambda c: c.created_ts):
+        if card.kind in sc.SCRIPTED_KINDS:
+            latest[card.kind] = card
+    return latest
+
+
+def _is_scripted(slot_key: str) -> bool:
+    """Whether *slot_key*'s first run began with the scripted steps. Blocking.
+
+    A first-run chat created before them opened on the privacy card and starts its
+    first turn from that commit, as it always did.
+    """
+    return any(c.kind == sc.KIND_HARNESS for c in sc.list_cards(slot_key))
+
+
+def scripted_lock(slot_key: str) -> str | None:
+    """The scripted step still waiting in the first-run chat *slot_key*, or ``None``.
+
+    Blocking. While one is live no model turn can run there yet, so a typed message
+    is refused (``chat_handlers.api_chat``) and the composer shows why. Read from
+    the card store, never from a readiness latch, and only for the first-run chat:
+    a lost or unreadable store unlocks it, and the turn then reports the truth.
+    """
+    if read_first_run_slot() != slot_key:
+        return None
+    for card in sc.list_cards(slot_key):
+        if card.kind in sc.SCRIPTED_KINDS and not card.terminal:
+            return card.kind
+    return None
+
+
+def scripted_first_run_active() -> bool:
+    """Whether a scripted first run is under way: its chat owns the setup steps. Blocking.
+
+    The Kiro prerequisite gate reads it to leave the first-run screen to the chat's
+    sign-in card. True until the first-run chat becomes the main chat.
+    """
+    from kiro_crew.first_run import read_main_slot
+
+    slot_key = read_first_run_slot()
+    if not slot_key or read_main_slot():
+        return False
+    return _is_scripted(slot_key)
+
+
+def _harness_payload() -> dict[str, Any]:
+    """The harnesses offered, the one selected to start with, and the default (H1)."""
+    from kiro_crew.agent_sdk.backends import ACP_BACKEND_KIRO
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.setup_actions.harness import harness_options
+
+    options = harness_options()
+    configured = str(getattr(KiroCrewConfig.load().agent, "acp_backend", "") or "")
+    current = configured if any(o["id"] == configured for o in options) else ACP_BACKEND_KIRO
+    return {"options": options, "current": current, "default": ACP_BACKEND_KIRO}
+
+
+def _signin_payload(backend: str) -> dict[str, Any]:
+    """The sign-in card for *backend*: which flow its body draws, and what it names."""
+    from kiro_crew.agent_sdk.backends import ACP_BACKENDS_KIRO_CLI_PREREQUISITE
+    from kiro_crew.setup_actions.harness import harness_label
+
+    payload: dict[str, Any] = {"backend": backend, "label": harness_label(backend)}
+    if backend in ACP_BACKENDS_KIRO_CLI_PREREQUISITE:
+        # The body reads the live Kiro CLI status: its install command, its
+        # sign-in commands (the desktop app's own copy included) and readiness.
+        payload["flow"] = "kiro_cli"
+        return payload
+    from kiro_crew.agent_sdk import backend_install
+    from kiro_crew.agent_sdk.host_auth import declaration_for
+
+    payload["flow"] = "own"
+    payload["install_command"] = backend_install.probe_backend(backend).install_command
+    payload["sign_in"] = declaration_for(backend).sign_in_remedy
+    return payload
+
+
+def _chosen_backend(latest: dict[str, sc.SetupCard]) -> str:
+    harness = latest.get(sc.KIND_HARNESS)
+    if harness is not None and harness.status == sc.STATUS_COMMITTED:
+        return str((harness.outcome or {}).get("backend", ""))
+    from kiro_crew.config.loader import KiroCrewConfig
+
+    return str(getattr(KiroCrewConfig.load().agent, "acp_backend", "") or "")
+
+
+async def _show_step(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    session_key: str,
+    kind: str,
+    latest: dict[str, sc.SetupCard],
+    *,
+    again: bool = False,
+) -> sc.SetupCard:
+    if kind == sc.KIND_HARNESS:
+        payload = await asyncio.to_thread(_harness_payload)
+        step = STEP_HARNESS if kind in latest else STEP_WELCOME
+        return await _show_scripted(state, slot, session_key, kind, payload, step)
+    if kind == sc.KIND_HARNESS_SIGNIN:
+        backend = await asyncio.to_thread(_chosen_backend, latest)
+        payload = await asyncio.to_thread(_signin_payload, backend)
+        step = STEP_SIGNIN_AGAIN if again else STEP_SIGNIN
+        return await _show_scripted(
+            state, slot, session_key, kind, payload, step, str(payload["label"])
+        )
+    if kind == sc.KIND_PRIVACY:
+        return await _show_scripted(state, slot, session_key, kind, {}, STEP_PRIVACY)
+    return await _show_scripted(
+        state, slot, session_key, kind, {"options": list(sc.PATHS)}, STEP_PATH
+    )
+
+
+async def _advance(
+    state: "DashboardState", slot: "_ChatSlot", session_key: str, *, clicked: bool
+) -> None:
+    """Show the next scripted step, or hand over to the agent once all are done.
+
+    *clicked*: an owner's click got here, so the first model turn may start (it
+    carries that click's provenance, SC8). From a restart (``clicked=False``) a
+    finished script never starts a turn on its own: the kickoff notice offers
+    Try again instead.
+    """
+    from kiro_crew.dashboard import setup_guardrails
+
+    latest = await asyncio.to_thread(_scripted_cards, slot.key)
+    for kind in sc.SCRIPTED_KINDS:
+        card = latest.get(kind)
+        if card is not None and card.status == sc.STATUS_COMMITTED:
+            continue
+        if card is not None and not card.terminal:
+            if card.status == sc.STATUS_WORKING and not clicked:
+                # A click a restart cut short: the owner clicks again.
+                card = await _back_to_pending(
+                    card, "step_interrupted", "Kiro Crew restarted. Try this step again."
+                )
+                broadcast(state, card)
+            return
+        await _show_step(state, slot, session_key, kind, latest)
+        return
+    if setup_guardrails.kickoff_answered(slot):
+        return
+    if clicked:
+        await _show_chosen_home(state, slot, session_key)
+        await start_first_run_turn(state, slot)
+    elif not setup_guardrails.kickoff_failed_shown(slot):
+        setup_guardrails.kickoff_failed(state, slot)
+
+
+async def _commit_harness(
+    state: "DashboardState", card: sc.SetupCard, input_: dict[str, Any]
+) -> sc.SetupCard:
+    """Record the harness the owner chose, from what the card offered and policy allows."""
+    from kiro_crew.agent_sdk.backends import selectable_backends
+    from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.setup_actions.harness import harness_label
+
+    backend = input_.get("backend")
+    offered = {str(o.get("id")) for o in card.payload.get("options") or [] if isinstance(o, dict)}
+    if not isinstance(backend, str) or backend not in offered:
+        raise sc.CardRejected("choose one of the agent engines shown", "harness_invalid")
+    if backend not in selectable_backends():
+        raise sc.CardRejected("your policy does not allow this agent engine", "harness_denied")
+    cfg = await asyncio.to_thread(KiroCrewConfig.load)
+    if str(getattr(cfg.agent, "acp_backend", "") or "") != backend:
+        await _update_config(lambda data: data.setdefault("agent", {}).update(acp_backend=backend))
+    card = await _finish(
+        card,
+        sc.STATUS_COMMITTED,
+        outcome={"backend": backend, "label": harness_label(backend)},
+    )
+    slot = state.get_slot(card.slot)
+    if slot is not None:
+        await _advance(state, slot, card.session_key, clicked=True)
+    return card
+
+
+async def _commit_harness_signin(
+    state: "DashboardState", card: sc.SetupCard, input_: dict[str, Any]
+) -> sc.SetupCard:
+    """Continue: ask the harness whether it answers; after a failed check, Skip may."""
+    from kiro_crew.dashboard import harness_readiness
+
+    if input_.get("skip") is True:
+        if int(card.private.get("checks_failed", 0) or 0) < 1:
+            raise sc.CardRejected("check the sign-in once first", "harness_check_first")
+        outcome: dict[str, Any] = {"verified": False}
+    else:
+        verdict = await harness_readiness.check(state, str(card.payload.get("backend", "")))
+        if not verdict.ready:
+
+            def _count(c: sc.SetupCard) -> None:
+                c.private["checks_failed"] = int(c.private.get("checks_failed", 0) or 0) + 1
+
+            await asyncio.to_thread(sc.update_card, card.id, _count)
+            raise sc.CardRejected(verdict.detail or verdict.code, f"harness_{verdict.code}")
+        outcome = {"verified": True}
+    card = await _finish(card, sc.STATUS_COMMITTED, outcome=outcome)
+    slot = state.get_slot(card.slot)
+    if slot is not None:
+        await _advance(state, slot, card.session_key, clicked=True)
+    return card
+
+
+async def _commit_path(
+    state: "DashboardState", card: sc.SetupCard, input_: dict[str, Any]
+) -> sc.SetupCard:
+    path = input_.get("path")
+    if path not in sc.PATHS:
+        raise sc.CardRejected("choose tips or a more detailed setup", "path_invalid")
+    card = await _finish(card, sc.STATUS_COMMITTED, outcome={"path": path})
+    slot = state.get_slot(card.slot)
+    if slot is not None:
+        await _advance(state, slot, card.session_key, clicked=True)
+    return card
+
+
+async def reopen_signin_after_auth_failure(state: "DashboardState", slot: "_ChatSlot") -> bool:
+    """After the first turn failed to sign in, show the sign-in step again.
+
+    Only in a scripted first-run chat whose agent has not answered yet: later, the
+    error row is the whole signal, as on any chat. The kickoff guardrail's "did not
+    start" notice is withheld, because this step is what fixes it, and committing
+    the new card sends the kickoff again. Returns whether it showed the card.
+    """
+    from kiro_crew.dashboard import setup_guardrails
+    from kiro_crew.first_run import read_main_slot
+
+    if await asyncio.to_thread(read_first_run_slot) != slot.key:
+        return False
+    if await asyncio.to_thread(read_main_slot):
+        return False
+    if not await asyncio.to_thread(_is_scripted, slot.key):
+        return False
+    if setup_guardrails.kickoff_answered(slot):
+        return False
+    latest = await asyncio.to_thread(_scripted_cards, slot.key)
+    if any(not c.terminal for c in latest.values()):
+        return False
+    setup_guardrails.kickoff_handled(slot.key)
+    await _show_step(
+        state, slot, f"dashboard:{slot.key}", sc.KIND_HARNESS_SIGNIN, latest, again=True
+    )
+    return True
 
 
 def _scripted_home() -> dict[str, Any] | None:
@@ -1840,8 +2166,9 @@ def _has_any_session(state: "DashboardState") -> bool:
 async def ensure_first_run_session(state: "DashboardState") -> str | None:
     """Create the first-run chat on a fresh install; return its slot key.
 
-    Idempotent across restarts: an existing first-run slot is reused, and an
-    install that is onboarded or already has sessions never gets one.
+    Idempotent across restarts: an existing first-run slot is reused (and its
+    scripted steps picked up where they stopped), and an install that is
+    onboarded or already has sessions never gets one.
     """
     from kiro_crew.config.loader import KiroCrewConfig
     from kiro_crew.dashboard import setup_guardrails
@@ -1849,9 +2176,13 @@ async def ensure_first_run_session(state: "DashboardState") -> str | None:
 
     existing = await asyncio.to_thread(read_first_run_slot)
     if existing:
-        if state.get_slot(existing) is None:
+        slot = state.get_slot(existing)
+        if slot is None:
             return None
         setup_guardrails.track(state, existing)
+        if await asyncio.to_thread(_is_scripted, existing):
+            # Pick up where a restart left the scripted steps; never start a turn.
+            await _advance(state, slot, f"dashboard:{existing}", clicked=False)
         return existing
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     if cfg.dashboard.onboarded or cfg.dashboard.privacy_acked:
@@ -1870,21 +2201,48 @@ async def ensure_first_run_session(state: "DashboardState") -> str | None:
     # before graduation names it after the agent.
     await _set_explicit_title(state, slot, FIRST_RUN_TITLE)
     await asyncio.to_thread(record_slot, slot.key)
-    session_key = f"dashboard:{slot.key}"
-    card = await asyncio.to_thread(
-        lambda: sc.create_card(
-            slot=slot.key, session_key=session_key, kind=sc.KIND_PRIVACY, payload={}
-        )
-    )
-    _append_card_row(state, slot, card)
+    # The first row is the gateway's welcome with the harness choice: no model can
+    # answer until a harness is chosen and signed in, so the steps up to the start
+    # path are scripted (privacy among them), and the agent takes over after.
+    await _advance(state, slot, f"dashboard:{slot.key}", clicked=False)
     state.push_slots_update()
     setup_guardrails.track(state, slot.key)
     logger.info("first-run session created: %s", slot.key)
     return slot.key
 
 
+def _scripted_facts(slot_key: str) -> list[str]:
+    """What the scripted steps settled: the harness, its sign-in check, the path."""
+    latest = _scripted_cards(slot_key) if slot_key else {}
+    facts: list[str] = []
+    harness = latest.get(sc.KIND_HARNESS)
+    if harness is not None and harness.status == sc.STATUS_COMMITTED:
+        label = str((harness.outcome or {}).get("label") or "the default")
+        fact = f"Agent engine the user chose: {label}."
+        signin = latest.get(sc.KIND_HARNESS_SIGNIN)
+        if signin is not None and signin.status == sc.STATUS_COMMITTED:
+            if (signin.outcome or {}).get("verified"):
+                fact += " It answered the gateway's sign-in check."
+            else:
+                fact += (
+                    " The user continued without a sign-in check; if a reply fails to "
+                    "sign in, the gateway shows the sign-in step again."
+                )
+        facts.append(fact)
+    path = latest.get(sc.KIND_PATH)
+    if path is not None and path.status == sc.STATUS_COMMITTED:
+        chosen = (path.outcome or {}).get("path")
+        if chosen in _PATH_FACTS:
+            facts.append(_PATH_FACTS[chosen])
+    return facts
+
+
 def _kickoff_facts(slot_key: str = "") -> list[str]:
     facts: list[str] = []
+    try:
+        facts.extend(_scripted_facts(slot_key))
+    except Exception:
+        logger.warning("scripted-step facts for the first-run kickoff failed", exc_info=True)
     try:
         plan = _import_plan()
         for source in plan.get("sources", []):
@@ -1942,9 +2300,15 @@ async def start_first_run_turn(state: "DashboardState", slot: "_ChatSlot") -> No
 
     facts = await asyncio.to_thread(_kickoff_facts, slot.key)
     lines = "\n".join(f"- {fact}" for fact in facts) or "- Nothing else was detected."
+    done = (
+        "The user just finished the setup steps the gateway showed in this chat (the "
+        "agent engine, its sign-in, privacy and how to start)."
+        if await asyncio.to_thread(_is_scripted, slot.key)
+        else "The user just acknowledged the privacy disclosure."
+    )
     text = (
         f"{FIRST_RUN_PREFIX} This is a brand-new Kiro Crew install and this chat is its "
-        "first-run session. The user just acknowledged the privacy disclosure. $crew-setup\n"
+        f"first-run session. {done} $crew-setup\n"
         "Facts the gateway gathered (not from the user):\n"
         f"{lines}\n"
         "Follow the crew-setup skill. Open with what you found, keep it short, and use "

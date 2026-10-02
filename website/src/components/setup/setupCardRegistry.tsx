@@ -15,13 +15,16 @@ import {
   CalendarClock,
   CircleDot,
   Cloud,
+  Cpu,
   KeyRound,
   Lock,
+  LogIn,
   MessageCircle,
   PackageOpen,
   Plug,
   Power,
   ScrollText,
+  Signpost,
   UserRound,
   type LucideIcon,
 } from 'lucide-react'
@@ -42,6 +45,7 @@ import {
   SoulBody,
   type SetupBodyProps,
 } from './SetupCardBodies'
+import { HarnessBody, HarnessSigninBody, PathBody } from './ScriptedStepBodies'
 import {
   channelResultDetail,
   credentialResultDetail,
@@ -105,6 +109,9 @@ export const SETUP_CARD_TITLE_KEY = {
   cron: 'components.setupCard.title_cron',
   service: 'components.setupCard.title_service',
   home: 'components.setupCard.title_home',
+  harness: 'components.setupCard.title_harness',
+  harness_signin: 'components.setupCard.title_harness_signin',
+  path: 'components.setupCard.title_path',
 } as const satisfies Record<SetupCardKind, string>
 
 export const SETUP_CARD_KINDS = {
@@ -145,6 +152,16 @@ export const SETUP_CARD_KINDS = {
     titleOverride: card => (isHomeOffer(card) ? i18nT('components.setupCard.title_home_offer') : null),
     resultDetail: homeResultDetail,
   },
+  // The first run's scripted steps (UX.2, UX.3): mandatory, like privacy, because
+  // nothing can answer in the chat until they are done.
+  harness: { Body: HarnessBody, Icon: Cpu, mandatory: true },
+  harness_signin: {
+    Body: HarnessSigninBody,
+    Icon: LogIn,
+    mandatory: true,
+    titleValues: card => ({ label: str(card.payload?.label) }),
+  },
+  path: { Body: PathBody, Icon: Signpost, mandatory: true },
 } satisfies Record<SetupCardKind, SetupCardKindEntry>
 
 /** The entry for *kind*, or null for a kind this build does not know. */

@@ -2067,6 +2067,18 @@ ACP_BACKENDS_STRUCTURED_REFUSAL = frozenset({ACP_BACKEND_KIRO, ACP_BACKEND_KAS})
 # provider key it needs is resolved inside the harness from its own credential store.
 ACP_BACKENDS_HOST_AUTH_CALLBACK = frozenset({ACP_BACKEND_KAS})
 
+# Backends that run the kiro-cli binary, so the dashboard's Kiro CLI prerequisite
+# (``kiro_prerequisite``: the resolved binary, ``whoami``, the agent-spec and
+# ``acp`` checks, the setup gate and the poll-driven spawn guards) is about them.
+# KAS is a member because it is spawned as ``kiro-cli acp --agent-engine v3`` and
+# installs nothing of its own (``backend_install._probe_kas``). Every other harness
+# installs and signs in on its own terms, so a missing or signed-out kiro-cli says
+# nothing about whether it can run. Distinct from ``ACP_BACKENDS_KIRO_SLASH_COMMANDS``,
+# which has the same members today and answers a protocol question, and from
+# ``host_auth.backends_retired_by_host_logout()``, which answers a credential one
+# (harness-parity H6).
+ACP_BACKENDS_KIRO_CLI_PREREQUISITE = frozenset({ACP_BACKEND_KIRO, ACP_BACKEND_KAS})
+
 #: Backends whose agent asks its CLIENT for the hooks matching a trigger, and to
 #: run one, over ``_kiro/hooks/list``, ``_kiro/hooks/sessionStart`` and
 #: ``_kiro/hooks/executeHook``. Only KAS defines that channel, and the answers

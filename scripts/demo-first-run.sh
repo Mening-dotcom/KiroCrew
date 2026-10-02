@@ -273,8 +273,11 @@ TOKEN="ghp_$("$PY" -c 'import secrets, string; print("".join(secrets.choice(stri
 cat <<EOF
 
 What to show:
-  1. The terminal asks nothing; the browser opens on the first-run chat (nav collapsed).
-  2. Privacy card -> Continue.
+  1. The terminal asks nothing; the browser opens on the first-run chat (nav collapsed),
+     on the welcome; the composer stays locked until the agent can answer.
+  2. The setup steps, each a hint above the composer -> Review:
+     agent engine (Kiro) -> Continue; Set up Kiro CLI -> Continue (it checks the
+     sign-in); Privacy -> Continue; How would you like to start? -> Set me up.
   3. The hello found a Hermes agent -> Bring it over (memories, a skill, a persona;
      its jobs arrive switched off).
   4. Connect GitHub -> declining is fine; the agent moves on.

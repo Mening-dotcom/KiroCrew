@@ -23,6 +23,7 @@ import PaneDim from './PaneDim'
 export type PaneLeading = { inset?: boolean; control?: React.ReactNode }
 import PendingQuestionCard from './PendingQuestionCard'
 import PendingSetupCards from './setup/PendingSetupCards'
+import { useScriptedLockReason } from './setup/scriptedLock'
 import QueueStack, { SubagentDeliveryProgress, splitPaneMessages } from './QueueStack'
 import SubagentProgressBar from '../pages/chat/SubagentProgressBar'
 import ChatFooter from '../pages/chat/ChatFooter'
@@ -228,6 +229,8 @@ export default function ChatPane({
   // restored; a late recovery for a slot that is no longer shown merges into
   // that slot's parked draft. The store outlives the pane, so leaving the page
   // mid-flight loses nothing either.
+  // The first-run chat before its scripted steps are done: nothing can answer yet.
+  const scriptedLock = useScriptedLockReason(slotKey)
   const slotKeyRef = useRef(slotKey)
   const inputRef = useRef(input)
   const pendingFilesRef = useRef(pendingFiles)
@@ -1910,6 +1913,7 @@ export default function ChatPane({
           // there is no running turn for the point to decide about.
           jevAutoAvailable={jevAutoConsented && running}
           busyMode={busyMode}
+          lockedReason={scriptedLock}
           autoFocusKey={slotKey}
           agentName={paneAgentName}
           // The chip shows the inherited-default marker; `agentName` stays the

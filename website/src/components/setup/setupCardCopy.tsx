@@ -79,6 +79,16 @@ const ERROR_KEY = {
   channel_token_invalid: 'components.setupCard.error_channel_token_invalid',
   channel_token_rejected: 'components.setupCard.error_channel_token_rejected',
   pair_attempts: 'components.setupCard.error_pair_attempts',
+  // The first run's scripted steps (setup_flow._commit_harness, _commit_harness_signin,
+  // _commit_path). A check that could not finish keeps the server's own detail.
+  harness_invalid: 'components.setupCard.error_harness_invalid',
+  harness_denied: 'components.setupCard.error_harness_denied',
+  harness_not_installed: 'components.setupCard.error_harness_not_installed',
+  harness_not_signed_in: 'components.setupCard.error_harness_not_signed_in',
+  harness_outdated: 'components.setupCard.error_harness_outdated',
+  harness_check_first: 'components.setupCard.error_harness_check_first',
+  path_invalid: 'components.setupCard.error_path_invalid',
+  step_interrupted: 'components.setupCard.error_step_interrupted',
 } as const
 
 /**

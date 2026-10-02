@@ -119,14 +119,16 @@ def _pending(kind: str, payload: dict[str, Any] | None = None) -> sc.SetupCard:
 
 
 class TestTheRegistryDeclares:
-    def test_privacy_is_the_one_gateway_only_kind(self):
-        assert _GATEWAY_ONLY == [sc.KIND_PRIVACY]
+    def test_the_scripted_steps_are_the_gateway_only_kinds(self):
+        # Privacy and the first run's steps before any model turn: nothing could
+        # have proposed them, because no model can run until they are done.
+        assert sorted(_GATEWAY_ONLY) == sorted(sc.SCRIPTED_KINDS)
 
     def test_only_a_gateway_only_kind_escapes_governance_or_the_result_turn(self):
         ungoverned = [a.kind for a in setup_actions.ACTIONS if not a.governed]
         unreported = [a.kind for a in setup_actions.ACTIONS if not a.reported]
-        assert ungoverned == [sc.KIND_PRIVACY]
-        assert unreported == [sc.KIND_PRIVACY]
+        assert sorted(ungoverned) == sorted(_GATEWAY_ONLY)
+        assert sorted(unreported) == sorted(_GATEWAY_ONLY)
 
     def test_every_proposable_kind_builds_and_summarizes_itself(self):
         for action in setup_actions.proposable():

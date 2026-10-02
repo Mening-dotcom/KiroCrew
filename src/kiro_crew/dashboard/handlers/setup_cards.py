@@ -34,6 +34,7 @@ _STATUS_FOR_CODE: dict[str, int] = {
     "privacy_not_acked": 409,
     "turn_running": 409,
     "kickoff_answered": 409,
+    "setup_step_pending": 409,
 }
 
 

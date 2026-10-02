@@ -3514,6 +3514,9 @@ class AcpAuthRequired(AcpError):  # noqa: N818
 
     def __init__(self, message: str = "", *, backend: str = "") -> None:
         super().__init__(message)
+        #: The harness whose sign-in failed, so a consumer can tell whose store
+        #: it says something about (the Kiro readiness latch only reads its own).
+        self.backend = backend
         self.auth_required = backend in ACP_BACKENDS_HOST_AUTH_CALLBACK
 
 

@@ -57,6 +57,9 @@ export function kiroPrerequisiteIsBlocking(
   status: KiroPrerequisiteStatus | undefined,
 ): boolean {
   if (!status || status.ready) return false
+  // Not this harness's prerequisite, or the first-run chat's own sign-in card
+  // owns the step (and polls on its own): the gate holds nothing up either way.
+  if (status.applies === false || status.scripted_first_run) return false
   // A non-owner cannot probe and is shown the "owner must finish setup" screen.
   if (status.setup_allowed === false) return false
   return !status.initial_setup_complete
@@ -1072,7 +1075,9 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
       <SetupStatusError message={message} retrying={retrying} onRetry={retryStatus} />
     )
   }
-  if (prerequisite.ready) {
+  // The configured harness does not run kiro-cli (Claude, Codex, ...): every
+  // screen below is about kiro-cli, so none of them is this install's business.
+  if (prerequisite.applies === false || prerequisite.ready) {
     return <>{children}</>
   }
   const status = prerequisite
@@ -1194,6 +1199,12 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
       />
     )
   }
+  // A scripted first run: its chat's sign-in card carries the install and
+  // sign-in steps and their re-check, so the chat is shown instead of this
+  // screen. The states above keep their own screens: none of them is a step.
+  if (status.scripted_first_run) {
+    return <>{children}</>
+  }
 
   return (
     <SetupShell
@@ -1229,7 +1240,7 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
             <h1 className="text-3xl font-bold tracking-tight text-text-strong">{i18nT('components.kiroPrerequisiteGate.set_up_kiro')}</h1>
             <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
               {i18nT('components.kiroPrerequisiteGate.kiro_crew_uses_kiro_cli_as_its_agent_engine_comp')}{' '}
-              <strong className="font-semibold text-text">{platform} {i18nT('components.kiroPrerequisiteGate.gateway_host')}</strong>{i18nT('components.kiroPrerequisiteGate.then_the_dashboard_will_open_automatically')}
+              <strong className="font-semibold text-text">{platform} {i18nT('components.kiroPrerequisiteGate.gateway_host')}</strong>{'. '}{i18nT('components.kiroPrerequisiteGate.then_the_dashboard_will_open_automatically')}
             </p>
           </div>
 

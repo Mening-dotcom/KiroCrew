@@ -138,6 +138,46 @@ def _only_card(slot="chat-1-1") -> sc.SetupCard:
     return cards[0]
 
 
+@pytest.fixture(autouse=True)
+def _harness_answers(monkeypatch):
+    """No test here reaches a real harness: the sign-in check says ready unless a test says not."""
+    from kiro_crew.dashboard import harness_readiness
+
+    async def _ready(state, backend):
+        return harness_readiness.Verdict(backend, harness_readiness.READY)
+
+    monkeypatch.setattr(harness_readiness, "check", _ready)
+
+
+def _live(slot_key: str, kind: str) -> sc.SetupCard:
+    live = [c for c in sc.list_cards(slot_key) if c.kind == kind and not c.terminal]
+    assert len(live) == 1, (kind, [(c.kind, c.status) for c in sc.list_cards(slot_key)])
+    return live[0]
+
+
+async def _decide_live(st, slot_key: str, kind: str, input_=None, decision="commit"):
+    card = _live(slot_key, kind)
+    return await setup_flow.decide(st, card.id, decision, card.payload_hash, input_ or {})
+
+
+async def _to_privacy(st, slot_key: str, backend: str = "") -> sc.SetupCard:
+    """Walk the scripted steps up to the privacy card, and return it."""
+    await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": backend})
+    await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN)
+    return _live(slot_key, sc.KIND_PRIVACY)
+
+
+async def _through_script(st, slot_key: str, *, path: str = "detailed") -> None:
+    """Every scripted step, ending on the start path that sends the first turn."""
+    privacy = await _to_privacy(st, slot_key)
+    await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {"telemetry": False})
+    await _decide_live(st, slot_key, sc.KIND_PATH, {"path": path})
+
+
+def _kinds(slot_key: str) -> list[str]:
+    return [c.kind for c in sorted(sc.list_cards(slot_key), key=lambda c: c.created_ts)]
+
+
 class TestPropose:
     @pytest.mark.asyncio
     async def test_a_profile_proposal_becomes_a_card_row_and_event(self, state):
@@ -435,17 +475,24 @@ class TestCronPreviewThenKeep:
 
 class TestFirstRun:
     @pytest.mark.asyncio
-    async def test_a_fresh_install_gets_a_pinned_chat_with_the_privacy_card(self):
+    async def test_a_fresh_install_opens_on_the_welcome_and_the_harness_choice(self):
         st = FakeState()
         slot_key = await setup_flow.ensure_first_run_session(st)
         assert slot_key and st.slots[slot_key].pinned
         assert first_run.read_first_run_slot() == slot_key
         card = _only_card(slot_key)
-        assert card.kind == sc.KIND_PRIVACY
+        assert card.kind == sc.KIND_HARNESS
+        # Kiro first and the default (harness-parity H1), from the selectable set.
+        assert card.payload["options"][0] == {"id": "", "label": "Kiro CLI"}
+        assert card.payload["default"] == "" and card.payload["current"] == ""
         # The chat that becomes the main chat carries the session tools from the start.
         assert st.slots[slot_key].agent == "kirocrew-main"
-        assert st.slots[slot_key].messages[0][2] == {
-            "setupCard": {"id": card.id, "kind": "privacy"}
+        # Not an empty chat: the gateway's welcome comes first, then the card's row.
+        (role, text, meta), (card_role, _t, card_meta) = st.slots[slot_key].messages
+        assert role == "inject" and meta == {"setupStep": {"step": "welcome", "card": card.id}}
+        assert text.startswith("(Setup step shown to the user:")
+        assert card_role == "inject" and card_meta == {
+            "setupCard": {"id": card.id, "kind": "harness"}
         }
 
     @pytest.mark.asyncio
@@ -470,10 +517,10 @@ class TestFirstRun:
         assert await setup_flow.ensure_first_run_session(st) is None
 
     @pytest.mark.asyncio
-    async def test_acknowledging_privacy_sets_the_flag_and_starts_the_first_turn(self, dispatched):
+    async def test_acknowledging_privacy_sets_the_flag_and_shows_the_start_path(self, dispatched):
         st = FakeState()
         slot_key = await setup_flow.ensure_first_run_session(st)
-        card = _only_card(slot_key)
+        card = await _to_privacy(st, slot_key)
         decided = await setup_flow.decide(
             st, card.id, "commit", card.payload_hash, {"telemetry": False}
         )
@@ -481,9 +528,25 @@ class TestFirstRun:
         cfg = json.loads((data_home() / "config.json").read_text())
         assert cfg["dashboard"]["privacy_acked"] is True
         assert cfg["telemetry"]["beacon_enabled"] is False
-        assert [(k, kind) for k, kind, _ in dispatched] == [(slot_key, "first_run")]
-        assert "$crew-setup" in dispatched[0][2]
         assert "privacy" in first_run.done_stages()
+        # No model turn yet: the start path is the last scripted step.
+        assert dispatched == []
+        assert _live(slot_key, sc.KIND_PATH).payload == {"options": ["tips", "detailed"]}
+
+    @pytest.mark.asyncio
+    async def test_a_first_run_chat_from_before_the_scripted_steps_starts_on_privacy(
+        self, dispatched
+    ):
+        # A first-run chat created with the privacy card first keeps its own order.
+        st = FakeState()
+        st.slots["chat-1-1"] = FakeSlot("chat-1-1")
+        first_run.record_slot("chat-1-1")
+        card = sc.create_card(
+            slot="chat-1-1", session_key="dashboard:chat-1-1", kind=sc.KIND_PRIVACY, payload={}
+        )
+        await setup_flow.decide(st, card.id, "commit", card.payload_hash, {"telemetry": False})
+        assert [(k, kind) for k, kind, _ in dispatched] == [("chat-1-1", "first_run")]
+        assert "acknowledged the privacy disclosure" in dispatched[0][2]
 
 
 class TestHomeInTheBackground:
@@ -578,10 +641,8 @@ class TestHomeInTheBackground:
         state_file = first_run.read_state()
         state_file["home"] = {"choice": "cloud", "region": "eu-west-1"}
         first_run.write_state(state_file)
-        privacy = _only_card(slot_key)
-        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
-        kinds = [c.kind for c in sc.list_cards(slot_key)]
-        assert kinds == ["privacy", "home"]
+        await _through_script(st, slot_key)
+        assert _kinds(slot_key) == ["harness", "harness_signin", "privacy", "path", "home"]
         assert "home in the cloud" in dispatched[-1][2]
 
     @pytest.mark.asyncio
@@ -591,10 +652,9 @@ class TestHomeInTheBackground:
         monkeypatch.setattr(iam, "reachability_check", _refuse_detect)
         st = FakeState()
         slot_key = await setup_flow.ensure_first_run_session(st)
-        privacy = _only_card(slot_key)
-        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
+        await _through_script(st, slot_key)
         # Where the crew lives is asked at the first kept job, not before the Hello.
-        assert [c.kind for c in sc.list_cards(slot_key)] == ["privacy"]
+        assert sc.KIND_HOME not in _kinds(slot_key)
         assert "Where should your crew live?" not in dispatched[-1][2]
 
     @pytest.mark.asyncio
@@ -625,9 +685,8 @@ class TestHomeInTheBackground:
         first_run.record_home_choice("here")
         st = FakeState()
         slot_key = await setup_flow.ensure_first_run_session(st)
-        privacy = _only_card(slot_key)
-        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
-        assert [c.kind for c in sc.list_cards(slot_key)] == ["privacy"]
+        await _through_script(st, slot_key)
+        assert sc.KIND_HOME not in _kinds(slot_key)
         assert "Where should your crew live?" not in dispatched[-1][2]
 
 
@@ -1035,3 +1094,260 @@ class TestImportResult:
         )
         text = setup_flow._result_text(card)
         assert "Morning brief (" in text and "propose a cron card" in text
+
+
+class TestScriptedSteps:
+    """UX.2 / UX.3: the steps before any model turn, shown and advanced by the gateway alone."""
+
+    @pytest.mark.asyncio
+    async def test_no_model_turn_runs_before_the_start_path(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": ""})
+        await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN)
+        privacy = _live(slot_key, sc.KIND_PRIVACY)
+        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
+        assert dispatched == []
+        await _decide_live(st, slot_key, sc.KIND_PATH, {"path": "tips"})
+        assert [(k, kind) for k, kind, _ in dispatched] == [(slot_key, "first_run")]
+        assert _kinds(slot_key) == ["harness", "harness_signin", "privacy", "path"]
+        text = dispatched[0][2]
+        assert "$crew-setup" in text and "finished the setup steps" in text
+        assert "Agent engine the user chose: Kiro CLI. It answered" in text
+        assert "Start path the user chose: get started with tips" in text
+
+    @pytest.mark.asyncio
+    async def test_the_detailed_path_is_named_in_the_kickoff(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _through_script(st, slot_key, path="detailed")
+        assert "Start path the user chose: a more detailed setup" in dispatched[-1][2]
+
+    @pytest.mark.asyncio
+    async def test_each_step_opens_with_a_gateway_row_that_opens_no_turn(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _through_script(st, slot_key)
+        steps = [
+            meta["setupStep"]["step"]
+            for role, _text, meta in st.slots[slot_key].messages
+            if meta and "setupStep" in meta
+        ]
+        assert steps == ["welcome", "signin", "privacy", "path"]
+        for role, text, meta in st.slots[slot_key].messages:
+            if meta and ("setupStep" in meta or "setupCard" in meta):
+                assert role == "inject" and "injectKind" not in meta
+
+    @pytest.mark.asyncio
+    async def test_the_first_turn_reads_the_steps_as_the_gateways_not_its_own_words(
+        self, dispatched
+    ):
+        from kiro_crew.context import build_session_replay
+
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _through_script(st, slot_key)
+        rows = [{"role": r, "content": c} for r, c, _m in st.slots[slot_key].messages]
+        replay = build_session_replay(None, f"dashboard:{slot_key}", pending_messages=rows)
+        assert "Inject: (Setup step shown to the user: welcome to Kiro Crew" in replay
+        assert "Assistant:" not in replay
+
+    @pytest.mark.asyncio
+    async def test_the_chosen_engine_is_written_and_its_own_sign_in_shown(self, monkeypatch):
+        from kiro_crew.agent_sdk import backend_install
+
+        monkeypatch.setattr(
+            backend_install,
+            "probe_backend",
+            lambda backend: backend_install.BackendInstallState(
+                backend, "codex", backend_install.MISSING, ("codex-acp",), "npm i -g codex-acp"
+            ),
+        )
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "codex"})
+        cfg = json.loads((data_home() / "config.json").read_text())
+        assert cfg["agent"]["acp_backend"] == "codex"
+        signin = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        assert signin.payload["flow"] == "own" and signin.payload["backend"] == "codex"
+        assert signin.payload["install_command"] == "npm i -g codex-acp"
+        assert signin.payload["sign_in"]  # the harness's own declared remedy, verbatim
+        step = [m for _r, _t, m in st.slots[slot_key].messages if m and "setupStep" in m][-1]
+        assert (
+            step["setupStep"]["step"] == "signin" and step["setupStep"]["label"] == "OpenAI Codex"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_kiro_engines_use_the_kiro_cli_flow(self):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "kas"})
+        assert _live(slot_key, sc.KIND_HARNESS_SIGNIN).payload == {
+            "backend": "kas",
+            "label": "KAS (kiro-agent)",
+            "flow": "kiro_cli",
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_engine_not_offered_or_not_allowed_is_refused(self, monkeypatch):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        card = await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "not-a-harness"})
+        assert card.status == sc.STATUS_PENDING and card.error["code"] == "harness_invalid"
+        # A policy that narrowed the set after the card was shown: the live set decides.
+        from kiro_crew.agent_sdk import backends
+
+        monkeypatch.setattr(backends, "selectable_backends", lambda: frozenset({""}))
+        card = await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "claude"})
+        assert card.status == sc.STATUS_PENDING and card.error["code"] == "harness_denied"
+        assert (
+            not (data_home() / "config.json").exists()
+            or "claude" not in (data_home() / "config.json").read_text()
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_check_returns_the_card_and_then_allows_continuing(self, monkeypatch):
+        from kiro_crew.dashboard import harness_readiness
+
+        async def _signed_out(state, backend):
+            return harness_readiness.Verdict(backend, harness_readiness.NOT_SIGNED_IN, "nope")
+
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": ""})
+        # Continuing without a check needs one failed check first.
+        card = await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN, {"skip": True})
+        assert card.status == sc.STATUS_PENDING and card.error["code"] == "harness_check_first"
+        monkeypatch.setattr(harness_readiness, "check", _signed_out)
+        card = await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN)
+        assert card.status == sc.STATUS_PENDING and card.error["code"] == "harness_not_signed_in"
+        assert sc.KIND_PRIVACY not in _kinds(slot_key)
+        card = await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN, {"skip": True})
+        assert card.status == sc.STATUS_COMMITTED and card.outcome == {"verified": False}
+        assert _live(slot_key, sc.KIND_PRIVACY)
+
+    @pytest.mark.asyncio
+    async def test_a_skipped_check_is_named_in_the_kickoff(self, dispatched, monkeypatch):
+        from kiro_crew.dashboard import harness_readiness
+
+        async def _timed_out(state, backend):
+            return harness_readiness.Verdict(backend, harness_readiness.CHECK_FAILED, "timeout")
+
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": ""})
+        monkeypatch.setattr(harness_readiness, "check", _timed_out)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN, {"skip": True})
+        privacy = _live(slot_key, sc.KIND_PRIVACY)
+        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
+        await _decide_live(st, slot_key, sc.KIND_PATH, {"path": "tips"})
+        assert "continued without a sign-in check" in dispatched[-1][2]
+
+    @pytest.mark.asyncio
+    async def test_the_lock_holds_in_the_first_run_chat_until_the_last_step(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_HARNESS
+        assert setup_flow.scripted_lock("chat-9-9") is None
+        assert setup_flow.scripted_first_run_active() is True
+        privacy = await _to_privacy(st, slot_key)
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_PRIVACY
+        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_PATH
+        await _decide_live(st, slot_key, sc.KIND_PATH, {"path": "tips"})
+        assert setup_flow.scripted_lock(slot_key) is None
+
+    @pytest.mark.asyncio
+    async def test_a_lost_card_store_unlocks_the_chat(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        (first_run.setup_dir() / sc.CARDS_FILE).unlink()
+        assert setup_flow.scripted_lock(slot_key) is None
+
+
+class TestScriptedStepsAfterARestart:
+    @pytest.mark.asyncio
+    async def test_a_check_a_restart_cut_short_waits_for_the_owner_again(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": ""})
+        signin = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        sc.claim_pending(signin.id, signin.payload_hash)  # the click, then the restart
+        assert await setup_flow.ensure_first_run_session(st) == slot_key
+        again = sc.get_card(signin.id)
+        assert again.status == sc.STATUS_PENDING and again.error["code"] == "step_interrupted"
+        assert dispatched == []
+
+    @pytest.mark.asyncio
+    async def test_a_step_a_restart_never_showed_is_shown_on_the_next_start(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        harness = _live(slot_key, sc.KIND_HARNESS)
+        # Committed, then the gateway stopped before the next card was created.
+        sc.claim_pending(harness.id, harness.payload_hash)
+        sc.update_card(harness.id, lambda c: setattr(c, "status", sc.STATUS_COMMITTED))
+        await setup_flow.ensure_first_run_session(st)
+        assert _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        await setup_flow.ensure_first_run_session(st)
+        assert _kinds(slot_key).count(sc.KIND_HARNESS_SIGNIN) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_finished_script_never_starts_a_turn_on_its_own(self, dispatched, monkeypatch):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _through_script(st, slot_key)
+        assert len(dispatched) == 1
+        slot = st.slots[slot_key]
+        # The restart: the kickoff never got a reply, so Try again is offered.
+        slot.messages = [{"role": r, "content": c, "meta": m} for r, c, m in slot.messages] + [
+            {"role": "inject", "content": "[First run] ...", "meta": {"injectKind": "first_run"}}
+        ]
+        appended = []
+        monkeypatch.setattr(
+            slot, "append", lambda role, content, cls="", **kw: appended.append(kw.get("meta"))
+        )
+        await setup_flow.ensure_first_run_session(st)
+        assert len(dispatched) == 1
+        assert appended == [{"kind": "setup_stalled", "reason": "kickoff_failed"}]
+        slot.messages.append({"role": "assistant", "content": "x", "meta": appended[0]})
+        await setup_flow.ensure_first_run_session(st)
+        assert len(appended) == 1  # never posted twice
+
+
+class TestSignInAgainAfterTheFirstReplyFailed:
+    @pytest.mark.asyncio
+    async def test_the_sign_in_step_comes_back_and_its_commit_resends_the_kickoff(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _through_script(st, slot_key)
+        slot = st.slots[slot_key]
+        assert await setup_flow.reopen_signin_after_auth_failure(st, slot) is True
+        again = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_HARNESS_SIGNIN
+        step = [m for _r, _t, m in slot.messages if m and "setupStep" in m][-1]
+        assert step["setupStep"]["step"] == "signin_again"
+        # Not twice while the step waits.
+        assert await setup_flow.reopen_signin_after_auth_failure(st, slot) is False
+        await setup_flow.decide(st, again.id, "commit", again.payload_hash, {})
+        assert [kind for _k, kind, _t in dispatched] == ["first_run", "first_run"]
+        assert _kinds(slot_key).count(sc.KIND_PRIVACY) == 1
+
+    @pytest.mark.asyncio
+    async def test_after_the_agent_answered_the_error_row_is_the_whole_signal(
+        self, dispatched, monkeypatch
+    ):
+        from kiro_crew.dashboard import setup_guardrails
+
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _through_script(st, slot_key)
+        monkeypatch.setattr(setup_guardrails, "kickoff_answered", lambda slot: True)
+        assert await setup_flow.reopen_signin_after_auth_failure(st, st.slots[slot_key]) is False
+
+    @pytest.mark.asyncio
+    async def test_a_chat_without_the_scripted_steps_is_left_alone(self, dispatched):
+        st = FakeState()
+        st.slots["chat-1-1"] = FakeSlot("chat-1-1")
+        first_run.record_slot("chat-1-1")
+        assert await setup_flow.reopen_signin_after_auth_failure(st, st.slots["chat-1-1"]) is False

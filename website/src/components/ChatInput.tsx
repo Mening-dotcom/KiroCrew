@@ -469,6 +469,9 @@ interface ChatInputProps {
    * path the busy send still falls back to the queue button. */
   busyMode?: ComposerBusyMode
   disabled?: boolean
+  /** Why this composer cannot send at all yet (the first-run chat before its
+   *  scripted steps are done). Non-empty disables it and becomes its placeholder. */
+  lockedReason?: string
   placeholder?: string
   prefillHint?: boolean
   onDismissHint?: () => void
@@ -957,6 +960,7 @@ function ChatInput({
   jevAutoAvailable = false,
   busyMode = 'split',
   disabled: disabledProp = false,
+  lockedReason = '',
   placeholder = '',
   prefillHint,
   onScreenshot,
@@ -1078,7 +1082,7 @@ function ChatInput({
     onClearVoiceError,
   } = composerVoice?.inputProps ?? NO_VOICE
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
-  const disabled = disabledProp
+  const disabled = disabledProp || !!lockedReason
   const dispatch = useAppDispatch()
   const slotId = useSlotId()
   // The store handle, read at click time (not subscribed) so "Optimize prompt"
@@ -3649,7 +3653,7 @@ function ChatInput({
   const voiceModePlaceholder = voiceModeAvailable && !voiceHoldMode && !composerHasDraft && !placeholder
     ? i18nT('components.chatInput.send_a_message_or_tap_the_mic_for_voice')
     : ''
-  const activePlaceholder = !connected ? i18nT('components.chatInput.gateway_offline_message_will_not_send') : disabledProp ? i18nT('components.chatInput.stopping') : voiceRecording ? i18nT('components.chatInput.recording_click_mic_to_stop') : transcribingIsHonest ? i18nT('components.chatInput.transcribing_please_wait') : continuePlaceholder || voiceModePlaceholder || resolvedPlaceholder
+  const activePlaceholder = !connected ? i18nT('components.chatInput.gateway_offline_message_will_not_send') : lockedReason ? lockedReason : disabledProp ? i18nT('components.chatInput.stopping') : voiceRecording ? i18nT('components.chatInput.recording_click_mic_to_stop') : transcribingIsHonest ? i18nT('components.chatInput.transcribing_please_wait') : continuePlaceholder || voiceModePlaceholder || resolvedPlaceholder
   // The sigil hint is a label and may be cut to one line. Every other
   // placeholder here is a sentence the user needs whole, so it still wraps —
   // including a caller's own `placeholder`, which `resolvedPlaceholder` carries.
@@ -4327,7 +4331,10 @@ function ChatInput({
           className={/* focus-cue-ok: the cue is the composer shell's focus-within border-accent brightening; a second ring on the textarea would double-paint one control. */ `relative w-full bg-transparent border-none ${INPUT_TYPO} text-text outline-hidden min-h-[44px] max-h-[50vh] placeholder:text-muted resize-none ${placeholderIsHint ? 'placeholder:whitespace-nowrap placeholder:overflow-hidden placeholder:[mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)] placeholder:[-webkit-mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)]' : ''} ${manualHeight !== null ? 'flex-1' : ''} ${disabled ? 'opacity-40 pointer-events-none' : ''} ${optimizing ? 'opacity-30' : ''}`}
           style={manualHeight !== null ? { height: '100%' } : undefined}
           placeholder={activePlaceholder}
-          readOnly={optimizing}
+          // Locked (the first-run chat before its steps are done): nothing typed
+          // here could be sent, so nothing can be typed.
+          readOnly={optimizing || !!lockedReason}
+          aria-disabled={lockedReason ? true : undefined}
           rows={1}
           value={value}
           onDragOver={e => { e.preventDefault(); onDragOver?.(e); e.stopPropagation() }}

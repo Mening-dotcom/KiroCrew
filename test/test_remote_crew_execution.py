@@ -3664,8 +3664,12 @@ class TestBoundSlotRefusesTurnRestartingActions:
         async def _ok(_request):
             return None
 
-        monkeypatch.setattr("kiro_crew.dashboard.chat_regenerate.reject_if_kiro_unverified", _ok)
-        monkeypatch.setattr("kiro_crew.dashboard.chat_rewind.reject_if_kiro_unverified", _ok)
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_regenerate.reject_if_turn_harness_unverified", _ok
+        )
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_rewind.reject_if_turn_harness_unverified", _ok
+        )
 
         state = _make_state(tmp_path)
         slot = await self._bound_slot(state)
@@ -3718,7 +3722,9 @@ class TestBoundSlotRefusesTurnRestartingActions:
         async def _ok(_request):
             return None
 
-        monkeypatch.setattr("kiro_crew.dashboard.chat_rewind.reject_if_kiro_unverified", _ok)
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_rewind.reject_if_turn_harness_unverified", _ok
+        )
 
         state = _make_state(tmp_path)
         await self._bound_slot(state)  # remote slot in state, _app unset (owner-only)
