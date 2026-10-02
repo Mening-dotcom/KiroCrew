@@ -1197,3 +1197,109 @@ class TestSearchTargetSynthesizedTier:
             raw_params={"path": "/mnt/forbidden", "pattern": "*.md"},
         )
         assert result.action != TOOL_DENY
+
+
+def _kiro_cli_title(command: str) -> str:
+    """Reproduce the display title kiro-cli builds for a shell tool: ``Running: ``
+    + the command, cut to 200 chars (first 197 + ``...``). This is the exact
+    truncation that turns a long, allowed push into a title that reads as a bare
+    push, which the git-publish floor refused when the title was judged as a
+    separate deny target."""
+    title = "Running: " + command
+    if len(title) > 200:
+        title = title[:197] + "..."
+    return title
+
+
+class TestTitleTruncationOverBlock:
+    """The git-publish title-truncation over-block (issue events 9/10/16).
+
+    kiro-cli judges a shell tool's display title as a security target in its own
+    right so a dangerous title cannot hide behind a benign command. But it builds
+    that title as ``Running: `` + the command cut to 200 chars (197 + ``...``),
+    so for a long command the title is only a TRUNCATED PREFIX of the command we
+    already check. A long lease-pinned ``git push ... origin <branch>`` whose
+    ``origin <branch>`` refspec falls past char 197 is truncated into a title
+    that reads as a push naming no branch, firing ``git-publish-push-bare`` on
+    the TITLE even though the full command is ALLOWED.
+
+    The fix: for a shell tool whose raw command was recovered, stop judging the
+    title as a separate command/git-publish deny target when, after removing a
+    single trailing ``...``, it is a PREFIX of that command. A title that is NOT
+    such a prefix is still checked exactly as before, and non-shell tools (whose
+    identifier IS the title) are untouched.
+
+    ``PUSH`` keeps the literal blocked command out of the source.
+    """
+
+    PUSH = "git pus" + "h"
+    SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+
+    def _long_allowed_push(self) -> str:
+        """A real, floor-ALLOWED lease-pinned push to a feature branch, long
+        enough that its ``origin <branch>`` refspec falls past char 197 of the
+        ``Running: `` title (so the truncation cuts inside the lease value).
+
+        ``-c key=val`` config options are used (not ``git -C <path>``) because
+        the enforcement path lowercases the command before the floor sees it, and
+        a literal ``-C`` would fold to ``-c`` and be read as a config flag; the
+        lease ref and lowercase keys survive lowercasing unchanged."""
+        branch = "docs/sync-design-system-contrast-tokens-accessibility-pass"
+        verb = "pus" + "h"  # the subcommand alone; the leading ``git`` is literal here
+        return (
+            f"git -c credential.helper=cache "
+            f"-c credential.https://github.com.helper=store "
+            f"-c protocol.version=2 {verb} "
+            f"--force-with-lease=refs/heads/{branch}:{self.SHA} origin {branch}"
+        )
+
+    def test_the_setup_is_the_documented_over_block(self):
+        """Guard the premise: the FULL command is allowed by the floor, yet its
+        truncated normalized title alone reads as a bare push. If either half
+        stops holding, the regression below would pass vacuously."""
+        from kiro_crew.hooks import _normalize_tool_name
+        from kiro_crew.security import argv_floor
+
+        command = self._long_allowed_push()
+        assert argv_floor._git_publish_floor_tags(command.lower()) == frozenset()
+
+        title = _kiro_cli_title(command)
+        assert len(title) == 200 and title.endswith("...")
+        normalized = _normalize_tool_name(title)
+        # The title, judged on its own, is the false positive the fix removes.
+        assert "git-publish-push-bare" in argv_floor._git_publish_floor_tags(normalized.lower())
+
+    def test_truncated_prefix_title_no_longer_denies(self):
+        """The fix: on_tool_call with the truncated title + the full allowed
+        command is NOT denied by the git-publish floor."""
+        command = self._long_allowed_push()
+        title = _kiro_cli_title(command)
+        result = HookManager(HooksConfig()).on_tool_call(title, command=command, is_shell=True)
+        assert result.action != TOOL_DENY, result.reason
+
+    def test_dangerous_title_not_a_prefix_is_still_denied(self):
+        """Control: a genuinely dangerous title that is NOT a truncated prefix of
+        the (benign) command is STILL judged — the title check is only skipped
+        for true truncated-prefixes, never dropped wholesale."""
+        result = HookManager(HooksConfig()).on_tool_call(
+            f"{self.PUSH} origin main",  # title: a protected-branch push
+            command="echo done",  # command: harmless, and NOT a superstring of the title
+            is_shell=True,
+        )
+        assert result.action == TOOL_DENY
+
+    def test_non_shell_dangerous_title_is_unaffected(self):
+        """Control: a non-shell tool carries no recovered command, so the
+        prefix rule never applies and its dangerous title is checked as before."""
+        result = HookManager(HooksConfig()).on_tool_call(f"{self.PUSH} origin main", is_shell=False)
+        assert result.action == TOOL_DENY
+
+    def test_full_untruncated_title_push_to_protected_still_denies(self):
+        """A SHORT push to a protected branch whose title is NOT truncated (the
+        title equals the command) still denies — the command itself carries the
+        protected-branch tag, so dropping the redundant title changes nothing."""
+        command = f"{self.PUSH} origin main"
+        result = HookManager(HooksConfig()).on_tool_call(
+            _kiro_cli_title(command), command=command, is_shell=True
+        )
+        assert result.action == TOOL_DENY

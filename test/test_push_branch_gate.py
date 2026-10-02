@@ -27,6 +27,8 @@ from kiro_crew.security import (
     _is_git_publish,
     _is_push_to_protected_branch,
     _schedule_push_allow_audit,
+    argv_floor,
+    denied_rules,
     is_denied,
 )
 
@@ -2014,3 +2016,112 @@ class TestNestedPayloadExtractionSpansTheProvenBoundary:
         )
         assert security._GIT_PUBLISH_UNGATED in floor("git push origin feature > >(echo main")
         assert security._git_push_args("bash -c '(cd /tmp && git push origin my-feature)'") is None
+
+
+class TestLongPushRefusalEventShapes:
+    """Regression lock for the six adjudicated git-publish refusals (issue events
+    5, 6, 7, 9, 10, 16).
+
+    The issue reported that five of the six pushes named BOTH a remote and a
+    literal branch yet were refused with a reason that did not describe the
+    command (``target-unverifiable``, ``push-bare``, ``push-single-arg``). The
+    FEAT-001 replay established that none of those mis-reasons comes from the
+    full command: on the full command the floor already
+
+      * parses push options (``-u``/``-q``/``--force-with-lease=<ref>:<sha>``)
+        before counting positionals, so events 9/10/16 are ALLOWED (Ask 1);
+      * judges substitution only within the remote/refspec tokens, so a
+        ``$PATH`` expansion inside an ``export``/``env`` assignment or a ``cd``
+        elsewhere on the line does NOT make the push target unverifiable
+        (events 5/7, Ask 2);
+      * fires ``protected-branch-name`` — not the unverifiable sentinel — for a
+        literal protected target (event 5, Ask 3).
+
+    The live defect is the title-truncation over-block in ``hooks.py`` (covered
+    by ``test_denied_commands_hooks.py``); these cases pin the full-command
+    parser behaviour so a future floor change cannot silently reintroduce the
+    reported mis-reasons. The command shapes mirror the issue table (redacted
+    feature-branch names kept); ``PUSH`` keeps the literal blocked command out of
+    the source as the rest of the module does. The floor is driven on
+    ``cmd.lower()`` because the real enforcement path (``is_denied``) lowercases
+    the whole command once before the floor sees it.
+    """
+
+    # The ungated anti-obfuscation sentinel that maps to
+    # ``git-publish-target-unverifiable`` at the enforcement site. The issue's
+    # false positives named this reason; a correct parse must NOT emit it for
+    # these commands.
+    UNVERIFIABLE = denied_rules._GIT_PUBLISH_UNGATED
+
+    def _floor(self, cmd: str):
+        # Match the enforcement path: is_denied lowercases once before the floor.
+        return argv_floor._git_publish_floor_tags(cmd.lower())
+
+    # ``...`` in the issue table marks a cut; filled here with representative
+    # literal tokens so the full command is a real one the floor can parse.
+    SHA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+
+    def test_event5_path_export_push_to_main_is_protected_branch_name(self) -> None:
+        """A ``$PATH`` expansion lives in the ``export``, not the push target;
+        the literal push target is the protected branch ``main``. The block is
+        correct, but the reason must be ``protected-branch-name`` (Ask 3), never
+        the unverifiable sentinel the operator was shown."""
+        cmd = (
+            'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; '
+            "cd /work/repo && git add README.md && "
+            'git commit -q -m "docs: tweak" && '
+            f"{PUSH} -q origin main"
+        )
+        tags = self._floor(cmd)
+        assert "git-publish-push-protected-branch-name" in tags
+        assert self.UNVERIFIABLE not in tags
+
+    def test_event6_bare_push_to_main_is_protected_branch_name(self) -> None:
+        """The one intended block: a direct push to the protected branch."""
+        tags = self._floor(f"{PUSH} origin main")
+        assert tags == frozenset({"git-publish-push-protected-branch-name"})
+
+    def test_event7_literal_feature_refspec_with_cd_is_allowed(self) -> None:
+        """A ``cd`` elsewhere on the line does not make the push target
+        unverifiable; the literal refspec names a feature branch (Ask 2)."""
+        cmd = (
+            "cd /work/repo && git add docs/onboarding.md && "
+            'git commit -q -m "docs" && '
+            f"{PUSH} origin docs/onboarding-rev-3.16"
+        )
+        assert self._floor(cmd) == frozenset()
+
+    def test_event9_force_with_lease_before_remote_is_allowed(self) -> None:
+        """``--force-with-lease=<ref>:<sha>`` is an option parsed by arity before
+        the positional count, and ``env PATH=...`` is an assignment, not a target
+        substitution — remote and branch are both seen (Ask 1)."""
+        cmd = (
+            "cd /work/repo && export PATH=/opt/homebrew/bin:$PATH && "
+            "env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin "
+            f"{PUSH} --force-with-lease=docs/contrast-tokens:{self.SHA} "
+            "origin docs/contrast-tokens 2>&1 | tail -2; true"
+        )
+        assert self._floor(cmd) == frozenset()
+
+    def test_event10_dash_u_before_remote_is_allowed(self) -> None:
+        """``-u`` before the remote is parsed as an option, so ``origin`` and the
+        feature branch are both counted (Ask 1)."""
+        cmd = (
+            f"cd /work/repo && git branch -f docs/contrast-tokens-3.17 {self.SHA} && "
+            "git checkout -q docs/contrast-tokens-3.17 && "
+            "env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin "
+            f"{PUSH} -u origin docs/contrast-tokens-3.17 2>&1 | tail -2"
+        )
+        assert self._floor(cmd) == frozenset()
+
+    def test_event16_dash_q_before_remote_then_gh_pr_is_allowed(self) -> None:
+        """``-q`` before the remote is an option; remote and feature branch are
+        both named. The trailing ``gh pr create`` segment is not a git push
+        (Ask 1)."""
+        cmd = (
+            "cd /work/repo && git add docs/design.md && "
+            'git commit -q -m "docs" && '
+            f"{PUSH} -q origin docs/sync-design-system 2>/dev/null; "
+            "gh pr create --base main --head docs/sync-design-system --title x"
+        )
+        assert self._floor(cmd) == frozenset()

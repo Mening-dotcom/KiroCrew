@@ -1185,7 +1185,40 @@ class HookManager:
         authority = ctx.security
         denied_regexes = self._effective_denied(ctx)
         denied_notes = self._denied_notes()
-        deny_targets = [normalized, tool_name]
+        # A shell tool's DISPLAY TITLE is normally judged as a deny target in its
+        # own right (``[normalized, tool_name]``), so a dangerous title can't hide
+        # behind a benign command — the over-block direction this gate chooses on
+        # purpose. But kiro-cli builds the shell title as ``Running: `` + the
+        # command and cuts it to 200 chars (the first 197 followed by ``...``), so
+        # for a long command the title is just a TRUNCATED PREFIX of the very
+        # command we also check. Such a title carries no signal the command check
+        # does not already see; worse, the cut can land mid-token and change the
+        # command's shape — a long lease-pinned ``git push ... origin <branch>``
+        # whose ``origin <branch>`` refspec falls past char 197 is truncated into
+        # a title that reads as a push naming no branch, firing the git-publish
+        # floor (``push-bare`` / ``push-single-arg``) on the title even though the
+        # full command is allowed. So when the recovered command STARTS WITH the
+        # normalized title (minus the single trailing ``...`` kiro-cli appends on
+        # the cut), drop both title spellings from the command/catalog deny set
+        # and judge the command alone.
+        #
+        # Narrowly scoped and fail-closed: this only applies to a shell tool
+        # (``is_shell``) whose raw ``command`` was recovered, and only to this
+        # command-oriented deny loop. A title that is NOT such a prefix (a genuine
+        # mismatch, or a title longer than the command) stays in the list and is
+        # checked exactly as before, and non-shell tools — whose identifier IS the
+        # title — are untouched. An empty-or-whitespace remainder (a degenerate
+        # title that was only ``...``) is a prefix of everything, so it is treated
+        # as NOT a safe prefix and the title is still checked. The sensitive-path /
+        # IMDS / exfil tier above is deliberately left as-is: it resolves each
+        # target as a path rather than as a command line, so the truncation does
+        # not reshape what it sees.
+        title_is_truncated_command_prefix = False
+        if is_shell and command and normalized:
+            remainder = normalized[:-3] if normalized.endswith("...") else normalized
+            if remainder.strip() and command.startswith(remainder):
+                title_is_truncated_command_prefix = True
+        deny_targets = [] if title_is_truncated_command_prefix else [normalized, tool_name]
         # The canonical ``mcp__<server>__<tool>`` identity, when kiro-cli supplied
         # BOTH trusted ``_meta.kiro`` fields. ``select_tool_title`` prefers the
         # model's prose ``description``, so ``tool_name`` for an MCP call may be
