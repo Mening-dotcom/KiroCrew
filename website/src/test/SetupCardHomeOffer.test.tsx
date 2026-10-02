@@ -25,7 +25,7 @@ const PAYLOAD = {
   monthly_usd: 17, billed_by: 'AWS, to your own account', aws_signed_in: true, aws_account: '…1234',
   sign_in_commands: ['aws login'],
 }
-const LEAD = 'Your new job runs only while Kiro Crew is running. Keep the crew on this machine, or give it a home in the cloud that is always on.'
+const LEAD = 'Choose where Kiro Crew lives: on this machine while it is on, or in the cloud so it stays available when this machine is off.'
 
 function home(over: Partial<Card> = {}, payload: Record<string, unknown> = {}): Card {
   return {
