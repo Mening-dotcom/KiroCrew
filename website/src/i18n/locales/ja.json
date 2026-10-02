@@ -9233,10 +9233,25 @@
     "setupCardTray": {
       "needs_you": "対応が必要",
       "in_progress": "進行中",
-      "cards_other": "{{count}} 件のカード",
-      "show": "表示",
       "hide": "隠す",
       "locate": "チャットで「{{title}}」を探す"
+    },
+    "setupCardHint": {
+      "review": "確認する",
+      "decline_label": "今はしない: {{title}}",
+      "more_other": "ほか {{count}} 件",
+      "import_instructions_other": "指示ファイル {{count}} 件",
+      "import_memories_other": "記憶 {{count}} 件",
+      "import_workspaces_other": "ワークスペース {{count}} 件",
+      "import_mcp_servers_other": "MCP サーバー {{count}} 件",
+      "import_skills_other": "スキル {{count}} 件",
+      "import_schedules_other": "スケジュール {{count}} 件",
+      "import_settings_other": "設定 {{count}} 件",
+      "import_other": "{{label}}: {{count}}",
+      "home_from": "月額 {{amount}} から",
+      "home_moving": "移行中",
+      "home_moving_step": "移行中: {{step}}",
+      "home_ready": "移行の準備ができました"
     },
     "setupGuardrail": {
       "no_output": "{{elapsed}}応答がないため、何かが止まっている可能性があります。応答を停止してメッセージを送り直すか、代わりにクラシックセットアップを使ってください。",

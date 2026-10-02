@@ -9233,10 +9233,25 @@
     "setupCardTray": {
       "needs_you": "需要你",
       "in_progress": "进行中",
-      "cards_other": "{{count}} 张卡片",
-      "show": "显示",
       "hide": "隐藏",
       "locate": "在聊天中找到“{{title}}”"
+    },
+    "setupCardHint": {
+      "review": "查看",
+      "decline_label": "暂不：{{title}}",
+      "more_other": "还有 {{count}} 个",
+      "import_instructions_other": "{{count}} 个指令文件",
+      "import_memories_other": "{{count}} 条记忆",
+      "import_workspaces_other": "{{count}} 个工作区",
+      "import_mcp_servers_other": "{{count}} 个 MCP 服务器",
+      "import_skills_other": "{{count}} 个技能",
+      "import_schedules_other": "{{count}} 个日程",
+      "import_settings_other": "{{count}} 项设置",
+      "import_other": "{{label}}：{{count}}",
+      "home_from": "{{amount}}/月起",
+      "home_moving": "正在搬迁",
+      "home_moving_step": "正在搬迁：{{step}}",
+      "home_ready": "可以搬迁了"
     },
     "setupGuardrail": {
       "no_output": "{{elapsed}}内没有回复，可能卡住了。请停止这次回复并重新发送消息，或改用经典设置流程。",

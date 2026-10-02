@@ -159,7 +159,10 @@ describe('PendingSetupCards — one card on screen, the row points at it', () =>
     expect(within(tray).getByTestId('setup-card')).toBeInTheDocument()
     expect(screen.queryByText('model-visible summary')).toBeNull()
 
-    // Deciding in the tray posts the decision with the card's hash…
+    // The card arrives folded to its hint: Review opens it, then deciding in
+    // the tray posts the decision with the card's hash…
+    expect(within(tray).getByTestId('setup-card-tray-cards')).toHaveAttribute('inert')
+    await userEvent.click(within(tray).getByTestId('setup-card-tray-toggle'))
     await userEvent.click(within(tray).getByTestId('setup-card-primary'))
     await waitFor(() => expect(gw.bodies).toEqual([{ id: 'sc-a', body: { decision: 'commit', hash: HASH } }]))
     // …the tray empties, and the row becomes the compact result line.
@@ -175,6 +178,7 @@ describe('PendingSetupCards — one card on screen, the row points at it', () =>
     const gw = serveGateway([card({ id: 'sc-a', kind: 'profile', payload: { fields: { role: 'SRE' } } })])
     renderSurface(['sc-a'])
     const tray = await screen.findByTestId('setup-card-tray')
+    await userEvent.click(await within(tray).findByTestId('setup-card-tray-toggle'))
     await userEvent.click(await within(tray).findByTestId('setup-card-decline'))
     await waitFor(() => expect(gw.bodies[0]?.body).toEqual({ decision: 'decline', hash: HASH }))
     await waitFor(() => expect(screen.queryByTestId('setup-card-tray')).toBeNull())

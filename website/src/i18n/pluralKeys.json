@@ -238,5 +238,12 @@
   "components.setupCard.import_jobs_result",
   "components.setupCard.cron_approvals_every_run",
   "components.setupCard.cron_preview_approval_not_given",
-  "components.setupCardTray.cards"
+  "components.setupCardHint.more",
+  "components.setupCardHint.import_instructions",
+  "components.setupCardHint.import_memories",
+  "components.setupCardHint.import_workspaces",
+  "components.setupCardHint.import_mcp_servers",
+  "components.setupCardHint.import_skills",
+  "components.setupCardHint.import_schedules",
+  "components.setupCardHint.import_settings"
 ]

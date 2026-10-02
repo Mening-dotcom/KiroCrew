@@ -11,6 +11,20 @@
  */
 import type React from 'react'
 import type { ComponentType } from 'react'
+import {
+  CalendarClock,
+  CircleDot,
+  Cloud,
+  KeyRound,
+  Lock,
+  MessageCircle,
+  PackageOpen,
+  Plug,
+  Power,
+  ScrollText,
+  UserRound,
+  type LucideIcon,
+} from 'lucide-react'
 
 import { i18nT } from '../../i18n/t'
 import type { SetupCard, SetupCardKind } from '../../api/setupCards'
@@ -36,10 +50,28 @@ import {
   isHomeOffer,
   soulFileName,
 } from './setupCardCopy'
+import {
+  credentialHint,
+  cronHint,
+  homeHint,
+  importHint,
+  profileHint,
+  waitingOnOwnerHint,
+  type SetupCardHint,
+} from './setupCardHints'
 
 export interface SetupCardKindEntry {
   /** What the card's payload shows, then its actions, handed to the footer. */
   Body: ComponentType<SetupBodyProps>
+  /** The kind's glyph on its tray hint; a high-stakes card wears the shield instead. */
+  Icon: LucideIcon
+  /** The tray hint's short line: a summary of the payload ("3 memories, 1 skill"),
+   *  or where the card is while it works. Absent or null: the title alone (and,
+   *  while the card works, the generic "working"). See setupCardHints.ts. */
+  hint?: (card: SetupCard) => SetupCardHint | null
+  /** The card cannot be declined (the privacy disclosure), so its hint offers
+   *  no Not now. Mirrors the body's own `decline: false`. */
+  mandatory?: boolean
   /** Interpolation values for the kind's title (`SETUP_CARD_TITLE_KEY`). */
   titleValues?: (card: SetupCard) => Record<string, string>
   /** A heading that replaces the kind's own for this card, or null to keep it. */
@@ -76,30 +108,39 @@ export const SETUP_CARD_TITLE_KEY = {
 } as const satisfies Record<SetupCardKind, string>
 
 export const SETUP_CARD_KINDS = {
-  privacy: { Body: PrivacyBody, refreshesBoot: true },
-  profile: { Body: ProfileBody },
-  soul: { Body: SoulBody, titleValues: card => ({ file: soulFileName(card.payload?.file) }) },
-  import: { Body: ImportBody, resultDetail: importResultDetail, draft: true, refreshesBoot: true },
+  privacy: { Body: PrivacyBody, Icon: Lock, mandatory: true, refreshesBoot: true },
+  profile: { Body: ProfileBody, Icon: UserRound, hint: profileHint },
+  soul: { Body: SoulBody, Icon: ScrollText, titleValues: card => ({ file: soulFileName(card.payload?.file) }) },
+  import: { Body: ImportBody, Icon: PackageOpen, hint: importHint, resultDetail: importResultDetail, draft: true, refreshesBoot: true },
   connect: {
     Body: ConnectBody,
+    Icon: Plug,
+    // The title already names the provider ("Connect GitHub"); the hint says only when it waits on the owner.
+    hint: waitingOnOwnerHint,
     titleValues: card => ({ name: str(((card.payload?.provider ?? {}) as { name?: unknown }).name) }),
   },
   credential: {
     Body: CredentialBody,
+    Icon: KeyRound,
+    hint: credentialHint,
     titleValues: card => ({ name: str(card.payload?.name) }),
     resultDetail: credentialResultDetail,
     draft: true,
   },
   channel: {
     Body: ChannelBody,
+    Icon: MessageCircle,
+    hint: waitingOnOwnerHint,
     titleValues: card => ({ label: str(card.payload?.label) || str(card.payload?.channel) }),
     resultDetail: channelResultDetail,
     draft: true,
   },
-  cron: { Body: CronBody },
-  service: { Body: ServiceBody },
+  cron: { Body: CronBody, Icon: CalendarClock, hint: cronHint },
+  service: { Body: ServiceBody, Icon: Power },
   home: {
     Body: HomeBody,
+    Icon: Cloud,
+    hint: homeHint,
     // The first run's own "Where should your crew live?" step, while it is still the question.
     titleOverride: card => (isHomeOffer(card) ? i18nT('components.setupCard.title_home_offer') : null),
     resultDetail: homeResultDetail,
@@ -118,6 +159,29 @@ export function cardTitle(card: SetupCard): string {
   const entry = setupCardEntry(card.kind)
   if (!entry) return i18nT('components.setupCard.title_generic')
   return entry.titleOverride?.(card) ?? i18nT(SETUP_CARD_TITLE_KEY[card.kind], entry.titleValues?.(card))
+}
+
+/** The glyph for the card's tray hint: its kind's own, or a neutral dot for a kind this build does not know. */
+export function cardIcon(card: SetupCard): LucideIcon {
+  return setupCardEntry(card.kind)?.Icon ?? CircleDot
+}
+
+/**
+ * The tray hint's line for the card: its kind's summary or live state, or, for a
+ * card that is working with nothing more specific to say, the generic "working".
+ * Null: the hint shows the title alone.
+ */
+export function cardHint(card: SetupCard): SetupCardHint | null {
+  const own = setupCardEntry(card.kind)?.hint?.(card) ?? null
+  if (own) return own
+  return card.status === 'working' || card.status === 'waiting'
+    ? { text: i18nT('components.setupCardTray.in_progress'), state: 'busy' }
+    : null
+}
+
+/** Whether the card's hint may offer Not now: a pending card that is not mandatory. */
+export function cardDeclinableFromHint(card: SetupCard): boolean {
+  return card.status === 'pending' && setupCardEntry(card.kind)?.mandatory !== true
 }
 
 /** The optional second line under a committed card's result. */

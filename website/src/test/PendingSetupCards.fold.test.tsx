@@ -1,12 +1,14 @@
 /**
- * The tray must never crowd out what the agent is saying.
+ * The tray shows every pending card as a one-line HINT and never opens one on
+ * its own (decision docs/decisions/2026-10-02-setup-cards-arrive-as-hints.md).
  *
- * It shows a card in full while the card's own turn is the latest (the agent's
- * "I've put a card on screen" after it does not count), folds to a one-line bar
- * ("<title> · needs you · Show") once the conversation moves past it (a user
- * message, the next turn, a notice) or the user scrolls up to read, opens again
- * in one click, never folds out from under someone using a card, and caps
- * itself at a third of its chat pane. Driven through MSW with the real SetupCard.
+ * The hint carries the kind's icon (the shield for a high-stakes card), the
+ * title, a short summary from the payload or the card's live state, "N more"
+ * when several wait, Not now when the card may be declined, and Review, which
+ * opens the full card in place. Nothing commits from the hint. Open, the tray
+ * folds back on Hide, once the conversation moves on, or on a scroll up, except
+ * while the owner is using a card. It is capped at a third of its chat pane.
+ * Driven through MSW with the real SetupCard.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -18,8 +20,10 @@ import { useRef } from 'react'
 import { server } from '../../integration/mocks/server'
 import PendingSetupCards from '../components/setup/PendingSetupCards'
 import SetupCardRow from '../components/setup/SetupCardRow'
-import { highlightSetupCardRow, setupCardAtTail } from '../components/setup/setupCardTray'
-import { applySetupCardUpdate, type SetupCard as Card } from '../api/setupCards'
+import { conversationMoves, highlightSetupCardRow } from '../components/setup/setupCardTray'
+import { applySetupCardUpdate, type SetupCard as Card, type SetupDecideBody } from '../api/setupCards'
+import { mergeRenderers, resolveRenderer, type MessageRenderContext } from '../app-sdk/messageRenderers'
+import { createTranscriptRenderers } from '../pages/chat/transcriptRenderers'
 import type { ChatMessage } from '../types'
 
 const SLOT = 'chat-1-1790000000'
@@ -32,27 +36,51 @@ function card(over: Partial<Card> & Pick<Card, 'id' | 'kind'>): Card {
   }
 }
 
+/** The slot list, each card, and decide (which settles the card as asked). */
 function serveCards(cards: Card[]) {
   const byId = new Map(cards.map(c => [c.id, c]))
+  const decided: Array<{ id: string; body: SetupDecideBody }> = []
   server.use(
     http.get('/api/setup/cards', () => HttpResponse.json({ cards: [...byId.values()] })),
     http.get('/api/setup/cards/:id', ({ params }) => HttpResponse.json(byId.get(String(params.id)))),
+    http.post('/api/setup/cards/:id/decide', async ({ params, request }) => {
+      const id = String(params.id)
+      const body = (await request.json()) as SetupDecideBody
+      decided.push({ id, body })
+      const next = { ...byId.get(id)!, status: body.decision === 'decline' ? 'declined' as const : 'committed' as const }
+      byId.set(id, next)
+      return HttpResponse.json(next)
+    }),
   )
+  return { decided }
 }
 
-const cardRow = (id: string): ChatMessage =>
-  ({ role: 'inject', cls: '', content: 'model-visible summary', meta: { setupCard: { id, kind: 'profile' } } }) as ChatMessage
+const cardRow = (id: string, kind = 'profile'): ChatMessage =>
+  ({ role: 'inject', cls: '', content: 'model-visible summary', meta: { setupCard: { id, kind } } }) as ChatMessage
 const say = (content: string): ChatMessage => ({ role: 'assistant', cls: '', content }) as ChatMessage
+const USER_REPLY = { role: 'user', cls: '', content: 'Can I change it later?' } as ChatMessage
+/** The next agent turn: a setup result opens it, then the reply. */
+const NEXT_TURN = [
+  { role: 'inject', cls: '', content: 'Setup result: kept.', meta: { injectKind: 'setup_result' } } as ChatMessage,
+  say('Also: which email should the morning brief go to?'),
+]
 
 interface SurfaceProps {
   messages: ChatMessage[]
   atBottom?: boolean
   onLocate?: (id: string, behavior: ScrollBehavior) => void
   paneHeight?: number
+  /** Transcript rows to draw above the tray, the way ChatPage does. */
+  rows?: ChatMessage[]
 }
 
-function Surface({ messages, atBottom = true, onLocate, paneHeight }: SurfaceProps) {
+function Surface({ messages, atBottom = true, onLocate, paneHeight, rows = [] }: SurfaceProps) {
   const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const registry = mergeRenderers(createTranscriptRenderers({ slot: SLOT, setupCardTray: true }))
+  const ctx = (i: number): MessageRenderContext => ({
+    index: i, messages: rows, running: false, key: `k${i}`, hideCardOwnedOAuth: false,
+    autoDeniedIds: new Set(), wrapper: c => c, row: c => c,
+  })
   return (
     <div
       data-setup-tray-pane=""
@@ -60,14 +88,18 @@ function Surface({ messages, atBottom = true, onLocate, paneHeight }: SurfacePro
         if (el && paneHeight) Object.defineProperty(el, 'clientHeight', { configurable: true, value: paneHeight })
       }}
     >
-      <div ref={scrollerRef} data-testid="scroller" />
+      <div ref={scrollerRef} data-testid="scroller">
+        <div data-testid="transcript">
+          {rows.map((m, i) => <div key={i}>{resolveRenderer(m, registry)!.render(m, ctx(i))}</div>)}
+        </div>
+      </div>
       <PendingSetupCards slotKey={SLOT} messages={messages} atBottom={atBottom} scrollerRef={scrollerRef} onLocate={onLocate} />
     </div>
   )
 }
 
 function renderSurface(props: SurfaceProps) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } })
   const wrap = (p: SurfaceProps) => (
     <QueryClientProvider client={qc}>
       <MemoryRouter><Surface {...p} /></MemoryRouter>
@@ -79,111 +111,29 @@ function renderSurface(props: SurfaceProps) {
 
 const tray = () => screen.getByTestId('setup-card-tray')
 const cards = () => screen.getByTestId('setup-card-tray-cards')
+const hint = () => screen.getByTestId('setup-card-hint')
+const toggle = () => screen.getByTestId('setup-card-tray-toggle')
 const expectOpen = () => {
   expect(tray()).toHaveAttribute('data-expanded', 'true')
   expect(cards()).not.toHaveAttribute('inert')
+  expect(toggle()).toHaveAttribute('aria-expanded', 'true')
 }
 const expectFolded = () => {
   expect(tray()).toHaveAttribute('data-expanded', 'false')
   expect(cards()).toHaveAttribute('inert')
   expect(cards()).toHaveAttribute('aria-hidden', 'true')
+  expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+}
+/** Wait for the tray and its first card to load. */
+const loaded = async () => {
+  await screen.findByTestId('setup-card-hint')
+  await within(cards()).findAllByTestId('setup-card')
 }
 
-const ASKED = [say('Where should your crew live?'), cardRow('sc-a')]
-/** The proposing turn's own follow-up: part of the card's turn, never "newer". */
+const PROFILE = card({ id: 'sc-a', kind: 'profile', payload: { fields: { bot_name: 'Nova', language: 'English', role: 'SRE' } } })
+const ASKED = [say('Here is what I gathered about you.'), cardRow('sc-a')]
 const TRAILING = say('I’ve put a profile card on screen: check it and click Save when it looks right.')
-const USER_REPLY = { role: 'user', cls: '', content: 'Can I change it later?' } as ChatMessage
-const HERMES = say('While that builds: do you already use another agent, like Hermes? I can bring its memory over.')
-/** The next agent turn: a setup result opens it (the owner decided some card), then the reply. */
-const NEXT_TURN = [
-  { role: 'inject', cls: '', content: 'Setup result: kept.', meta: { injectKind: 'setup_result' } } as ChatMessage,
-  HERMES,
-]
 
-beforeEach(() => {
-  serveCards([card({ id: 'sc-a', kind: 'profile', payload: { fields: { role: 'SRE' } } })])
-})
-
-describe('the tray folds once the conversation moves past the card', () => {
-  it('shows a fresh card in full, with its own turn’s trailing text, tools and placeholder after it', async () => {
-    renderSurface({
-      messages: [
-        ...ASKED, TRAILING,
-        { role: 'tool', cls: '', content: '🔧 wait' } as ChatMessage,
-        { role: 'streaming', cls: '', content: '' } as ChatMessage,
-      ],
-    })
-    await within(await screen.findByTestId('setup-card-tray')).findByTestId('setup-card')
-    expectOpen()
-    expect(screen.queryByTestId('setup-card-tray-bar')).toBeNull()
-  })
-
-  it('folds to a one-line bar once the user writes after it, and opens in one click', async () => {
-    const { update } = renderSurface({ messages: [...ASKED, TRAILING] })
-    await within(await screen.findByTestId('setup-card-tray')).findByTestId('setup-card')
-    expectOpen()
-    update({ messages: [...ASKED, TRAILING, USER_REPLY] })
-    expectFolded()
-    const bar = screen.getByTestId('setup-card-tray-bar')
-    expect(bar).toHaveTextContent('Your profile')
-    expect(bar).toHaveTextContent('needs you')
-    const toggle = within(bar).getByRole('button', { name: 'Show' })
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(toggle).toHaveAttribute('aria-controls', cards().id)
-
-    fireEvent.click(toggle)
-    expectOpen()
-    // Opened by hand, the bar stays as its header so it can be folded again.
-    expect(within(screen.getByTestId('setup-card-tray-bar')).getByRole('button', { name: 'Hide' }))
-      .toHaveAttribute('aria-expanded', 'true')
-    // The reply to that message, and more of it, do not undo the click.
-    update({ messages: [...ASKED, TRAILING, USER_REPLY, HERMES] })
-    update({ messages: [...ASKED, TRAILING, USER_REPLY, { ...HERMES, content: `${HERMES.content} It takes a minute.` }] })
-    expectOpen()
-  })
-
-  it('folds when the next agent turn starts', async () => {
-    const { update } = renderSurface({ messages: [...ASKED, TRAILING] })
-    await within(await screen.findByTestId('setup-card-tray')).findByTestId('setup-card')
-    expectOpen()
-    update({ messages: [...ASKED, TRAILING, ...NEXT_TURN] })
-    expectFolded()
-  })
-
-  it('opens in full again when the next card is proposed', async () => {
-    serveCards([
-      card({ id: 'sc-a', kind: 'profile', payload: { fields: { role: 'SRE' } } }),
-      card({ id: 'sc-b', kind: 'profile', payload: { fields: { role: 'PM' } } }),
-    ])
-    const { update } = renderSurface({ messages: [...ASKED, USER_REPLY, HERMES] })
-    await screen.findByTestId('setup-card-tray')
-    await waitFor(() => expect(screen.getByTestId('setup-card-tray-bar')).toHaveTextContent('2 cards'))
-    expectFolded()
-    update({ messages: [...ASKED, USER_REPLY, HERMES, cardRow('sc-b'), TRAILING] })
-    expectOpen()
-  })
-})
-
-describe('the tray folds while the user scrolls up to read', () => {
-  it('folds on an upward scroll and opens again once they scroll back to the bottom', async () => {
-    const { update } = renderSurface({ messages: ASKED })
-    await within(await screen.findByTestId('setup-card-tray')).findByTestId('setup-card')
-    fireEvent.wheel(screen.getByTestId('scroller'), { deltaY: -120 })
-    expectFolded()
-    // Folding moves the transcript's bottom edge; that alone must not reopen it.
-    update({ messages: ASKED, atBottom: true })
-    expectFolded()
-    update({ messages: ASKED, atBottom: false })
-    fireEvent.wheel(screen.getByTestId('scroller'), { deltaY: 120 })
-    expectFolded()
-    update({ messages: ASKED, atBottom: true })
-    expectOpen()
-  })
-
-})
-
-// The home card's size step: radio rows and a "What's the difference?" toggle,
-// the controls the recording caught the tray folding out from under.
 const sizeOption = (key: string, label: string, monthly: number) => ({
   key, label, note: 'many_chats', instance_type: 't4g.xlarge', vcpu: 2, ram_gb: 8, monthly_usd: monthly, free_plan_ok: true,
 })
@@ -194,86 +144,194 @@ const HOME = card({
     size: { key: 'starter', label: 'Starter', instance_type: 'm7i-flex.large', ram_gb: 8, vcpu: 2 },
     monthly_usd: 72, billed_by: 'AWS, to your own account', aws_signed_in: true, aws_account: '…1234',
     sign_in_commands: ['aws login'],
-    size_options: [sizeOption('starter', 'Starter', 72), sizeOption('light', 'Standard', 101)],
+    size_options: [sizeOption('lite', 'Lite', 14), sizeOption('starter', 'Starter', 72), sizeOption('light', 'Standard', 101)],
     size_default: 'starter', plan: { type: 'PAID' },
   },
 })
-const HOME_ASKED = [say('Where should your crew live?'), cardRow('sc-home')]
-const radio = (key: string) => within(screen.getByTestId(`setup-card-home-size-${key}`)).getByRole('radio')
+const HOME_ASKED = [say('Where should your crew live?'), cardRow('sc-home', 'home')]
 
-describe('the tray never folds out from under someone using a card', () => {
-  beforeEach(() => serveCards([HOME]))
+beforeEach(() => { serveCards([PROFILE]) })
 
-  it('stays open through a size click, the blur it causes and the next turn', async () => {
-    const { update } = renderSurface({ messages: HOME_ASKED })
-    const summary = await screen.findByText('What’s the difference?')
-    // The recording: open the disclosure, the next turn lands, then pick a size.
-    fireEvent.focus(summary)
-    update({ messages: [...HOME_ASKED, ...NEXT_TURN] })
-    expectOpen()
-    const standard = screen.getByTestId('setup-card-home-size-light')
-    fireEvent.pointerDown(standard)
-    // A label's mousedown blurs the focused summary with nothing to receive
-    // focus; that blur is not the user leaving.
-    fireEvent.blur(summary, { relatedTarget: null })
-    fireEvent.click(radio('light'))
-    expectOpen()
-    expect(radio('light')).toBeChecked()
+describe('a pending card arrives as a one-line hint', () => {
+  it('never opens a fresh card on its own, even as the newest thing with its turn’s own text after it', async () => {
+    renderSurface({ messages: [...ASKED, TRAILING] })
+    await loaded()
+    expectFolded()
+    expect(toggle()).toHaveTextContent('Review')
   })
 
-  it('holds through the next agent turn once the card was touched, with no focus involved', async () => {
-    const { update } = renderSurface({ messages: HOME_ASKED })
-    await screen.findByText('What’s the difference?')
-    fireEvent.pointerDown(screen.getByTestId('setup-card-home-size-light'))
-    update({ messages: [...HOME_ASKED, ...NEXT_TURN] })
-    expectOpen()
-    update({ messages: [...HOME_ASKED, ...NEXT_TURN, USER_REPLY, say('Also: which email should the morning brief go to?')] })
-    expectOpen()
+  it('shows the kind’s icon, the title and a summary from the payload', async () => {
+    renderSurface({ messages: ASKED })
+    await loaded()
+    expect(hint()).toHaveTextContent('Your profile')
+    expect(within(hint()).getByTestId('setup-card-hint-text')).toHaveTextContent('Nova, English, SRE')
+    expect(hint().querySelector('svg.lucide-user-round')).not.toBeNull()
   })
 
-  it('still folds when the user scrolls up themselves', async () => {
-    const { update } = renderSurface({ messages: HOME_ASKED })
-    await screen.findByText('What’s the difference?')
-    fireEvent.keyDown(radio('starter'), { key: 'ArrowDown' })
-    update({ messages: [...HOME_ASKED, ...NEXT_TURN] })
+  it('wears the shield on a high-stakes card, with its own summary', async () => {
+    serveCards([HOME])
+    renderSurface({ messages: HOME_ASKED })
+    await loaded()
+    expect(hint()).toHaveAttribute('data-stakes', 'high')
+    expect(hint().querySelector('svg.lucide-shield-check')).not.toBeNull()
+    expect(within(hint()).getByTestId('setup-card-hint-text')).toHaveTextContent('From $14/mo')
+  })
+
+  it('shows the title alone for a kind with no summary', async () => {
+    serveCards([card({ id: 'sc-svc', kind: 'service' })])
+    renderSurface({ messages: [cardRow('sc-svc', 'service')] })
+    await loaded()
+    expect(hint()).toHaveTextContent('Keep running in the background')
+    expect(screen.queryByTestId('setup-card-hint-text')).toBeNull()
+  })
+
+  it('names the first of several cards and counts the rest', async () => {
+    serveCards([
+      PROFILE,
+      card({ id: 'sc-cron', kind: 'cron', payload: { name: 'Morning brief', schedule_human: 'every weekday at 08:00' } }),
+      card({ id: 'sc-svc', kind: 'service' }),
+    ])
+    renderSurface({ messages: ASKED })
+    await screen.findByTestId('setup-card-hint')
+    await waitFor(() => expect(screen.getByTestId('setup-card-hint-more')).toHaveTextContent('2 more'))
+    expect(hint()).toHaveTextContent('Your profile')
+  })
+
+  it('shows a working card’s state: the home build’s current step', async () => {
+    serveCards([{ ...HOME, status: 'waiting', outcome: { steps: [
+      { key: 'a', label: 'Create the server', state: 'done' },
+      { key: 'b', label: 'Start Kiro Crew', state: 'active' },
+    ] } }])
+    renderSurface({ messages: HOME_ASKED })
+    await screen.findByTestId('setup-card-hint')
+    const text = await screen.findByTestId('setup-card-hint-text')
+    expect(text).toHaveTextContent('Now: Start Kiro Crew')
+    expect(text).toHaveAttribute('data-state', 'busy')
+    // A card at work cannot be declined from its hint.
+    expect(screen.queryByTestId('setup-card-hint-decline')).toBeNull()
+  })
+
+  it('says "needs you" while the build waits on the owner’s sign-in', async () => {
+    serveCards([{ ...HOME, status: 'waiting', outcome: { aws_signin: { state: 'waiting', expires_ts: Date.now() / 1000 + 600 } } }])
+    renderSurface({ messages: HOME_ASKED })
+    const text = await screen.findByTestId('setup-card-hint-text')
+    expect(text).toHaveTextContent('needs you')
+    expect(text).toHaveAttribute('data-state', 'needs-you')
+  })
+})
+
+describe('Review opens the card in place; Hide folds it back', () => {
+  it('opens and folds, with aria-expanded and aria-controls on the one toggle', async () => {
+    renderSurface({ messages: ASKED })
+    await loaded()
+    expect(toggle()).toHaveAttribute('aria-controls', cards().id)
+    fireEvent.click(toggle())
     expectOpen()
+    expect(toggle()).toHaveTextContent('Hide')
+    fireEvent.click(toggle())
+    expectFolded()
+  })
+})
+
+describe('consent stays in the open card', () => {
+  it.each([
+    ['a low-stakes card', PROFILE, ASKED],
+    ['a high-stakes card', HOME, HOME_ASKED],
+  ] as const)('the hint of %s carries no commit, only Review and Not now', async (_label, c, messages) => {
+    serveCards([c])
+    renderSurface({ messages: [...messages] })
+    await loaded()
+    expect(within(hint()).queryByTestId('setup-card-primary')).toBeNull()
+    expect(within(hint()).getAllByRole('button').map(b => b.getAttribute('data-testid')))
+      .toEqual(['setup-card-hint-decline', 'setup-card-tray-toggle'])
+    // The card's own buttons are folded out of reach until Review.
+    expect(cards()).toHaveAttribute('inert')
+  })
+
+  it('declines from the hint with the card’s hash', async () => {
+    const gw = serveCards([PROFILE])
+    renderSurface({ messages: ASKED })
+    await loaded()
+    fireEvent.click(screen.getByRole('button', { name: 'Not now: Your profile' }))
+    await waitFor(() => expect(gw.decided).toEqual([{ id: 'sc-a', body: { decision: 'decline', hash: 'b'.repeat(64) } }]))
+    await waitFor(() => expect(screen.queryByTestId('setup-card-tray')).toBeNull())
+  })
+
+  it('offers no Not now on a card that cannot be declined', async () => {
+    serveCards([card({ id: 'sc-p', kind: 'privacy' })])
+    renderSurface({ messages: [cardRow('sc-p', 'privacy')] })
+    await screen.findByTestId('setup-card-hint')
+    expect(screen.queryByTestId('setup-card-hint-decline')).toBeNull()
+  })
+})
+
+describe('the transcript’s "in the tray below" row opens its card', () => {
+  it('opens the tray and highlights the card', async () => {
+    renderSurface({ messages: ASKED, rows: [cardRow('sc-a')] })
+    await loaded()
+    expectFolded()
+    fireEvent.click(await within(screen.getByTestId('transcript')).findByTestId('setup-card-ref'))
+    expectOpen()
+    expect(within(cards()).getByTestId('setup-card-tray-highlight')).toBeInTheDocument()
+  })
+})
+
+describe('an open card folds when the chat moves past it, unless the owner is using it', () => {
+  const opened = async (props: SurfaceProps) => {
+    const utils = renderSurface(props)
+    await loaded()
+    fireEvent.click(toggle())
+    expectOpen()
+    return utils
+  }
+
+  it('stays open through its own turn’s text, folds once the user writes', async () => {
+    const { update } = await opened({ messages: ASKED })
+    update({ messages: [...ASKED, TRAILING] })
+    expectOpen()
+    update({ messages: [...ASKED, TRAILING, USER_REPLY] })
+    expectFolded()
+  })
+
+  it('folds when the next agent turn starts', async () => {
+    const { update } = await opened({ messages: ASKED })
+    update({ messages: [...ASKED, ...NEXT_TURN] })
+    expectFolded()
+  })
+
+  it('holds through the next turn once the card was touched, then Hide lets go', async () => {
+    const { update } = await opened({ messages: ASKED })
+    fireEvent.pointerDown(within(cards()).getAllByTestId('setup-card')[0])
+    update({ messages: [...ASKED, ...NEXT_TURN] })
+    expectOpen()
+    fireEvent.click(toggle())
+    expectFolded()
+    update({ messages: [...ASKED, ...NEXT_TURN, USER_REPLY] })
+    expectFolded()
+  })
+
+  it('folds on an upward scroll, even a touched card', async () => {
+    await opened({ messages: ASKED })
+    fireEvent.pointerDown(within(cards()).getAllByTestId('setup-card')[0])
     fireEvent.wheel(screen.getByTestId('scroller'), { deltaY: -120 })
     expectFolded()
   })
 
-  it('lets go once the card is decided, and folds for what was already newer', async () => {
-    serveCards([HOME, card({ id: 'sc-b', kind: 'profile', payload: { fields: { role: 'PM' } } })])
-    const { update, qc } = renderSurface({ messages: [...HOME_ASKED, cardRow('sc-b')] })
-    await screen.findByText('What’s the difference?')
-    fireEvent.pointerDown(screen.getByTestId('setup-card-home-size-light'))
-    update({ messages: [...HOME_ASKED, cardRow('sc-b'), ...NEXT_TURN] })
+  it('lets go once the touched card is decided, and the rest fold to the hint', async () => {
+    serveCards([PROFILE, card({ id: 'sc-b', kind: 'service' })])
+    const { qc, update } = await opened({ messages: ASKED })
+    fireEvent.pointerDown(within(cards()).getAllByTestId('setup-card')[0])
+    update({ messages: [...ASKED, ...NEXT_TURN] })
     expectOpen()
-    act(() => { applySetupCardUpdate(qc, { ...HOME, status: 'committed' }, SLOT) })
+    act(() => { applySetupCardUpdate(qc, { ...PROFILE, status: 'committed' }, SLOT) })
     await waitFor(() => expectFolded())
-  })
-
-  it('decides at open time: a tray that opens after the conversation moved on opens folded, and Show plus a press holds it', async () => {
-    const { update } = renderSurface({ messages: [...HOME_ASKED, ...NEXT_TURN] })
-    await screen.findByTestId('setup-card-tray')
-    expectFolded()
-    fireEvent.click(screen.getByRole('button', { name: 'Show' }))
-    expectOpen()
-    fireEvent.pointerDown(screen.getByTestId('setup-card-home-size-light'))
-    // A row naming some other card moves the tail and resets Show; the press still holds.
-    update({ messages: [...HOME_ASKED, ...NEXT_TURN, cardRow('sc-home-note'), say('One more thing.')] })
-    expectOpen()
-    // Hide is the user folding it: that releases the card too.
-    fireEvent.click(screen.getByRole('button', { name: 'Hide' }))
-    expectFolded()
-    update({ messages: [...HOME_ASKED, ...NEXT_TURN, USER_REPLY, say('And another.')] })
-    expectFolded()
   })
 })
 
-describe('the bar points at the card’s own row', () => {
+describe('the hint points at the card’s own row', () => {
   it('asks the host to scroll to the row, smoothly unless motion is reduced', async () => {
     const onLocate = vi.fn()
-    renderSurface({ messages: [...ASKED, USER_REPLY, HERMES], onLocate })
+    renderSurface({ messages: ASKED, onLocate })
     const locate = await screen.findByTestId('setup-card-tray-locate')
     expect(locate).toHaveAccessibleName('Find “Your profile” in the chat')
     fireEvent.click(locate)
@@ -289,7 +347,6 @@ describe('the bar points at the card’s own row', () => {
           <MemoryRouter><SetupCardRow cardId="sc-a" placement="transcript" /></MemoryRouter>
         </QueryClientProvider>,
       )
-      expect(document.querySelector('[data-setup-card-row="sc-a"]')).not.toBeNull()
       expect(screen.queryByTestId('setup-card-row-highlight')).toBeNull()
       act(() => highlightSetupCardRow('sc-a'))
       expect(screen.getByTestId('setup-card-row-highlight')).toHaveClass('animate-msg-highlight')
@@ -301,40 +358,30 @@ describe('the bar points at the card’s own row', () => {
   })
 })
 
-describe('the tray is capped at a third of its pane', () => {
+describe('the open tray is capped at a third of its pane', () => {
   it('caps its height from the measured pane', async () => {
     renderSurface({ messages: ASKED, paneHeight: 900 })
-    await within(await screen.findByTestId('setup-card-tray')).findByTestId('setup-card')
+    await loaded()
     expect(tray()).toHaveStyle({ maxHeight: '300px' })
     expect(tray()).toHaveClass('overflow-y-auto')
   })
 
   it('falls back to a third of the viewport where there is no pane to measure', async () => {
     renderSurface({ messages: ASKED })
-    await within(await screen.findByTestId('setup-card-tray')).findByTestId('setup-card')
+    await loaded()
     expect(tray()).toHaveClass('max-h-[33dvh]')
     expect(tray().style.maxHeight).toBe('')
   })
 })
 
-describe('setupCardAtTail', () => {
-  it('names the card while its own turn is the latest, whatever that turn writes after it', () => {
-    expect(setupCardAtTail(ASKED)).toBe('sc-a')
-    expect(setupCardAtTail([...ASKED, TRAILING, { role: 'tool', cls: '', content: '🔧 x' } as ChatMessage])).toBe('sc-a')
-    expect(setupCardAtTail([...ASKED, { role: 'thinking', cls: '', content: 'hmm' } as ChatMessage, HERMES])).toBe('sc-a')
-    expect(setupCardAtTail([...ASKED, { role: 'error', cls: '', content: 'limit' } as ChatMessage])).toBe('sc-a')
-    expect(setupCardAtTail([...ASKED, TRAILING, cardRow('sc-b'), TRAILING])).toBe('sc-b')
-  })
-
-  it('is null once the user writes, a later turn opens, or a notice lands', () => {
-    const after = (...rows: ChatMessage[]) => setupCardAtTail([...ASKED, TRAILING, ...rows])
-    expect(after(USER_REPLY)).toBeNull()
-    expect(after({ ...USER_REPLY, meta: { steer: true } })).toBeNull()
-    expect(after(...NEXT_TURN)).toBeNull()
-    expect(after({ role: 'inject', cls: '', content: '[Cron notification]', meta: { injectKind: 'cron' } } as ChatMessage, HERMES)).toBeNull()
-    expect(after({ role: 'nudge', cls: '', content: 'auto-nudge' } as ChatMessage)).toBeNull()
-    expect(after({ role: 'notice', cls: '', content: 'Paused' } as ChatMessage)).toBeNull()
-    expect(after({ ...say('The brief finished.'), meta: { kind: 'handoff_done' } })).toBeNull()
-    expect(setupCardAtTail([])).toBeNull()
+describe('conversationMoves', () => {
+  it('counts the user writing, a later turn opening and a notice, never the turn’s own rows', () => {
+    expect(conversationMoves([...ASKED, TRAILING, { role: 'tool', cls: '', content: '🔧 x' } as ChatMessage])).toBe(0)
+    expect(conversationMoves([...ASKED, USER_REPLY])).toBe(1)
+    expect(conversationMoves([...ASKED, { ...USER_REPLY, meta: { steer: true } }])).toBe(1)
+    expect(conversationMoves([...ASKED, ...NEXT_TURN])).toBe(1)
+    expect(conversationMoves([...ASKED, { role: 'nudge', cls: '', content: 'auto-nudge' } as ChatMessage])).toBe(1)
+    expect(conversationMoves([...ASKED, { role: 'notice', cls: '', content: 'Paused' } as ChatMessage])).toBe(1)
+    expect(conversationMoves([...ASKED, { ...say('The brief finished.'), meta: { kind: 'handoff_done' } }])).toBe(1)
   })
 })

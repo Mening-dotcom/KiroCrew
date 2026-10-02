@@ -85,3 +85,4 @@ Links to the pull requests, issues and commits that carry the decision.
 |---|---|
 | [2026-07-20-sessions-sidebar-create-button-says-new.md](2026-07-20-sessions-sidebar-create-button-says-new.md) | The Sessions sidebar's primary create button shows the visible label "New". |
 | [2026-09-25-incognito-and-temporary-chats-keep-their-transcript.md](2026-09-25-incognito-and-temporary-chats-keep-their-transcript.md) | Incognito and Temporary chats keep their transcript in History; the modes promise "learn nothing", not "leave no disk record". |
+| [2026-10-02-setup-cards-arrive-as-hints.md](2026-10-02-setup-cards-arrive-as-hints.md) | Setup cards arrive in the tray as one-line hints that the owner opens to act; consent stays in the opened card. |

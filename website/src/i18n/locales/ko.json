@@ -9233,10 +9233,25 @@
     "setupCardTray": {
       "needs_you": "확인 필요",
       "in_progress": "진행 중",
-      "cards_other": "카드 {{count}}개",
-      "show": "보기",
       "hide": "숨기기",
       "locate": "채팅에서 ‘{{title}}’ 찾기"
+    },
+    "setupCardHint": {
+      "review": "검토",
+      "decline_label": "나중에: {{title}}",
+      "more_other": "외 {{count}}개",
+      "import_instructions_other": "지침 파일 {{count}}개",
+      "import_memories_other": "기억 {{count}}개",
+      "import_workspaces_other": "워크스페이스 {{count}}개",
+      "import_mcp_servers_other": "MCP 서버 {{count}}개",
+      "import_skills_other": "스킬 {{count}}개",
+      "import_schedules_other": "일정 {{count}}개",
+      "import_settings_other": "설정 {{count}}개",
+      "import_other": "{{label}}: {{count}}",
+      "home_from": "월 {{amount}}부터",
+      "home_moving": "이전 중",
+      "home_moving_step": "이전 중: {{step}}",
+      "home_ready": "이전 준비 완료"
     },
     "setupGuardrail": {
       "no_output": "{{elapsed}} 동안 응답이 없어 무언가 멈췄을 수 있습니다. 응답을 중지하고 메시지를 다시 보내거나, 대신 클래식 설정을 사용하세요.",

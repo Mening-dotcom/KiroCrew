@@ -55,6 +55,7 @@ import type { SetupActions, SetupFooter } from './SetupCardBodies'
 import { HomeLeftoverRemoval } from './SetupCardBodies'
 import { classicAction, errorText, failedText, homeLeftover, homeRemovalState, resultStatusKey } from './setupCardCopy'
 import { cardTitle, committedDetail, SetupCardBody, setupCardEntry } from './setupCardRegistry'
+import { openSetupCardInTray } from './setupCardTray'
 
 /** How often a `working` / `waiting` card re-reads itself, beside the WS push. */
 export const SETUP_CARD_POLL_MS = 3000
@@ -226,9 +227,12 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
     && !terminal
     && !!trayList.data?.cards?.some(c => c.id === card.id && !isTerminalSetupStatus(c.status))
   if (heldByTray) {
+    // A pointer to the card's hint in the tray; clicking it opens the card there.
     return (
-      <div
-        className="w-full max-w-2xl min-w-0 flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-[13px] text-muted"
+      <Btn
+        type="button"
+        onClick={() => openSetupCardInTray(card.id)}
+        className="w-full max-w-2xl min-w-0 justify-start gap-2 rounded-md bg-card px-3 py-2 text-left text-muted hover:text-text"
         data-testid="setup-card-ref"
         data-kind={card.kind}
         data-status={card.status}
@@ -237,7 +241,7 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
           ? <ShieldCheck className="lucide-inline shrink-0 text-accent" aria-hidden="true" />
           : <ArrowDown className="lucide-inline shrink-0" aria-hidden="true" />}
         <span className="min-w-0 break-words">{t('components.setupCard.in_tray_ref', { title })}</span>
-      </div>
+      </Btn>
     )
   }
   // The tray card and the transcript's result line are the SAME card in two

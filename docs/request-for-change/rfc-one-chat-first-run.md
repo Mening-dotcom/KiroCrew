@@ -622,7 +622,10 @@ A card is a **server-side pending action with a rendered face**:
    payload hash.
 2. The tool returns "awaiting user".
 3. The dashboard renders the card from the stored payload, never from model
-   text.
+   text. Above the composer it arrives as a one-line hint (title, a short
+   summary, Not now, Review) that the owner opens to act; every decision but
+   Not now is made in the opened card
+   ([decision](../decisions/2026-10-02-setup-cards-arrive-as-hints.md)).
 4. A click posts to a gateway endpoint bound to (owner, card id, payload hash).
 5. The handler commits the change.
 6. The model's next tool result says "approved" or "declined", plus the outcome.
