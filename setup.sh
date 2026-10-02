@@ -164,6 +164,12 @@ if [ -z "$_kirocrew_dir" ] || [ ! -d "$_kirocrew_dir/src/kiro_crew" ] \
     _kc_args="--quick"
     case " $* " in *" --with-extras "*) _kc_args="" ;; esac
     [ "$_kc_start" = 0 ] && _kc_args="$_kc_args --no-start"
+    # Piped from curl, the rest of this file is still unread in the pipe. Read it
+    # off first, or curl ends the install with "Failure writing output" when bash
+    # hands over below.
+    if [ -z "$_kirocrew_dir" ] && [ ! -t 0 ]; then
+        cat >/dev/null 2>&1
+    fi
     if [ -n "$_kc_demo" ]; then
         exec bash "$_kc_src/setup.sh" --demo "$@"
     fi
