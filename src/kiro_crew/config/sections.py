@@ -1868,10 +1868,12 @@ class SessionConfig:
         default=DEFAULT_WATCHDOG_RSS_MAX_MB,
         metadata=_meta(
             "Watchdog RSS Limit (MiB)",
-            "Recycle a session when its process tree resident memory exceeds "
-            "this many MiB. 0 disables (the default); the internal background "
-            "runtime still recycles at 1536 MiB. Busy sessions (turn in "
-            "flight) are never recycled.",
+            "Restart an idle session when its process tree resident memory "
+            "exceeds this many MiB; the chat is kept, running work stops. 0 "
+            "disables (the default); the internal background runtime still "
+            "recycles at 1536 MiB. Range 0-262144. Busy sessions (turn in "
+            "flight) are never recycled. Shown on Developer > Config as Idle "
+            "Session RAM Limit.",
         ),
     )
     reconcile_max_kills: int = field(
@@ -3612,6 +3614,9 @@ SESSION_TIMEOUT_MIN = 0
 SESSION_TIMEOUT_MAX = 86400
 POOL_TTL_SECS_MIN = 0
 POOL_TTL_SECS_MAX = 7200
+# session.watchdog_rss_max_mb: 0 disables the ceiling; the top is 256 GiB.
+WATCHDOG_RSS_MAX_MB_MIN = 0
+WATCHDOG_RSS_MAX_MB_MAX = 262144
 SOFT_STOP_BUDGET_MIN = 0.5
 SOFT_STOP_BUDGET_MAX = 60.0
 EXTRACTION_POOL_SIZE_MIN = 1
