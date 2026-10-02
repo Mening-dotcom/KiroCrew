@@ -154,6 +154,12 @@ from kiro_crew.security import (
 )
 from kiro_crew.sel import sel
 from kiro_crew.session import _CIRCUIT_BREAKER_THRESHOLD, SessionClosingError, SessionManager
+from kiro_crew.session_lifecycle import (
+    STOP_DECLINED_COMPACTING_TEXT,
+    compaction_in_flight,
+    consume_stop_declined,
+    decline_stop,
+)
 from kiro_crew.slack.blocks import build_working_blocks, deprecation_warning_block
 from kiro_crew.slack.client import SlackClientOps
 from kiro_crew.slack.format import (
@@ -180,6 +186,12 @@ from kiro_crew.slack.thread_parent import (
     is_slack_born,
     parent_prompt_text,
     record_thread_parent,
+)
+from kiro_crew.slack.thread_replies import (
+    ThreadReplies,
+    has_noted_turn,
+    note_turn,
+    replies_since_last_turn,
 )
 from kiro_crew.stats import Stats
 from kiro_crew.subagent import SubagentManager
@@ -1853,6 +1865,32 @@ async def _handle_slash_command(
         # Against the thread's OWNING session -- a linked thread's turns run
         # under the dashboard session that owns it, and that is the key the
         # replay reads -- resolved the way the OPTIONS expiry below resolves it.
+        force_stop = False
+        if compaction_in_flight(sessions, session_key):
+            force_stop = consume_stop_declined(session_key, user_id)
+        if compaction_in_flight(sessions, session_key) and not force_stop:
+            # Declined before the Stop is recorded: see slack/events.py. A repeat
+            # within the window by the SAME presser is the second press and forces.
+            sel().log_tool_invocation(
+                session_key=session_key,
+                source="slack",
+                tool_name="!stop",
+                tool_kind="command",
+                outcome="compacting",
+                metadata={"user": user_id, "channel": channel},
+            )
+            # Posted before the marker is armed: an undelivered warning plus an
+            # armed escalation is a retry that hard-resets the session with this
+            # user never told that it would. The post hands back the ts of what
+            # landed, so a falsy one is a reply the user never saw.
+
+            async def _say_declined() -> bool:
+                return bool(
+                    await slack.post_message(channel, STOP_DECLINED_COMPACTING_TEXT, reply_ts)
+                )
+
+            await decline_stop(session_key, user_id, _say_declined)
+            return ""
         note_user_stop(sessions, sessions.get_session_for_thread(reply_ts) or session_key)
         has_session = sessions.has_session(session_key)
         if not has_session:
@@ -1884,11 +1922,27 @@ async def _handle_slash_command(
         async def _on_hard() -> None:
             await slack.post_message(channel, "⛔ Execution stopped — session reset.", reply_ts)
 
-        outcome = await sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard)
+        # ``preserve_queue`` with the force: the hard reset pops the session and
+        # its queue, which in a shared thread holds co-tenants' messages;
+        # ``stop_turn`` parks them for the successor instead.
+        _kw = {"force": True, "preserve_queue": True} if force_stop else {}
+        outcome = await sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard, **_kw)
         # If stop_turn returned "idle" (no active turn), neither callback
         # fired — dismiss the stale "Stopping…" ephemeral explicitly.
         if outcome == "idle":
             await slack.post_message(channel, "Nothing running.", reply_ts)
+        elif outcome == "compacting":
+            # The race decline arms the marker too: the reply promises that a
+            # repeat forces, so the repeat must find one -- after the reply
+            # landed, never before it, and only when the post returns the ts of
+            # a message that really landed.
+
+            async def _say_declined_race() -> bool:
+                return bool(
+                    await slack.post_message(channel, STOP_DECLINED_COMPACTING_TEXT, reply_ts)
+                )
+
+            await decline_stop(session_key, user_id, _say_declined_race)
         sel().log_tool_invocation(
             session_key=session_key,
             source="slack",
@@ -3820,6 +3874,8 @@ async def handle_message(
     # turn consumed the one-shot flag, and whether it landed (recorded success).
     _needs_reinjection = False
     _turn_landed = False
+    # This turn's thread-replies read; its watermark moves in the finally.
+    _thread_replies: ThreadReplies | None = None
     try:
         task.start()
         while True:
@@ -3964,6 +4020,8 @@ async def handle_message(
         # turns exist. A Slack-born session also records the parent as the
         # transcript's first row (see ``slack/thread_parent.py``).
         thread_parent_text: str | None = None
+        # One transcript read serves the parent and the thread-replies checks.
+        _prior: bool | None = None
         if is_new and not resumed and thread_ts and context_builder:
             if not compressed:
                 _record_parent = bool(
@@ -3971,7 +4029,7 @@ async def handle_message(
                     and thread_ts != msg_ts
                     and is_slack_born(session_key)
                     and not _is_slack_restricted(session_key)
-                    and not await has_prior_turns(conversation_log, session_key)
+                    and not (_prior := await has_prior_turns(conversation_log, session_key))
                 )
                 _thread_parent = await fetch_thread_parent(
                     slack, channel, thread_ts, with_author=_record_parent
@@ -3983,6 +4041,22 @@ async def handle_message(
                         await record_thread_parent(
                             conversation_log, session_key, _thread_parent, agent=_agent
                         )
+
+        # Thread replies since this conversation's last turn in the thread
+        # (``slack/thread_replies.py``). Context only: who gets answered was
+        # decided before this point.
+        if context_builder and thread_ts and thread_ts != msg_ts:
+            if _prior is None and not has_noted_turn(session_key, thread_ts):
+                _prior = await has_prior_turns(conversation_log, session_key)
+            _first_turn = not has_noted_turn(session_key, thread_ts) and not _prior
+            _thread_replies = await replies_since_last_turn(
+                slack,
+                channel,
+                thread_ts,
+                msg_ts,
+                session_key=session_key,
+                first_turn=_first_turn,
+            )
 
         if context_builder:
             # Thread-scoped temporary mode: blocks memory reads.
@@ -4058,6 +4132,7 @@ async def handle_message(
                 action_context=action_context,
                 thread_parent_text=thread_parent_text,
                 thread_meta=_thread_meta,
+                thread_replies_text=_thread_replies.text if _thread_replies else None,
                 blocks_reads=_slack_blocks_reads,
                 model_window=_model_window,
                 runtime_source="slack",
@@ -4896,6 +4971,10 @@ async def handle_message(
         # error arm, a cancel) discarded the prompt carrying the re-injected
         # context; put the flag back so the next turn re-injects it.
         rearm_reinjection(sessions, session_key, consumed=_needs_reinjection, landed=_turn_landed)
+        # The replies watermark moves only past a turn that landed after a good
+        # read; a cancelled or failed turn discarded the prompt that carried them.
+        if _turn_landed and _thread_replies is not None and _thread_replies.read_ok:
+            note_turn(session_key, thread_ts or msg_ts, msg_ts)
         # The permit is held past this ``finally`` when the turn reached a clean
         # model completion, because success/failure accounting is booked only
         # after the answer-carrying delivery below and mutates per-session breaker

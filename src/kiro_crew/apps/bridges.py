@@ -354,11 +354,11 @@ def _ceiling_filtered_allowed(refs: object, agent_name: str = "") -> list[Any]:
     The decision itself is NOT made here. It is
     :func:`~kiro_crew.platform.governance.may_skip_gate`, because this is one of
     two places that write an ``allowedTools`` list — the host agent's shared-MCP
-    sync in ``agent.py`` is the other — and the earlier revision reimplemented
-    the rule locally, including a private copy of the builtin-tool→scope map. One
-    copy meant one write point was protected and the other was not, and a newly
-    governed scope silently re-opened the shortcut for the copy that had not heard
-    of it.
+    sync (``sync_shared_server_refs`` in ``agent_materialization/mcp_sources.py``)
+    is the other — so the rule is not reimplemented here. A local copy, including
+    a private builtin-tool→scope map, would protect one write point and not the
+    other, and a newly governed scope would silently re-open the shortcut for the
+    copy that had not heard of it.
     """
     out: list[Any] = []
     withheld: list[str] = []
@@ -2918,12 +2918,21 @@ def _register_mcp_servers(
     a hard error — breaking ALL kiro requests, not just this app's. (An alternate ACP
     backend reads a different config file, so it was unaffected — the asymmetry in the
     report.)
-    So: an HTTP server with NO resolvable LIVE port is NOT written at all (and any stale
-    entry for it is scrubbed) — never a dead URL the kiro binary might still dial whether
-    or not it honours a ``disabled`` flag. The boot/enable path calls
-    :func:`reregister_app_mcp_servers` with the real ``live_port`` once the backend is up,
-    which writes the entry with the correct, reachable port. stdio/command servers (no
-    ``url``) are always registered — they have no port to be dead.
+    So: a GATEWAY-MANAGED backend's HTTP server (``backend.entryPoint`` set) with NO
+    resolvable LIVE port is NOT written at all (and any stale entry for it is scrubbed) —
+    never a dead URL the kiro binary might still dial whether or not it honours a
+    ``disabled`` flag. The boot/enable path calls :func:`reregister_app_mcp_servers` with
+    the real ``live_port`` once the backend is up, which writes the entry with the
+    correct, reachable port.
+
+    A SELF-MANAGED app (empty ``backend.entryPoint``) is the exception: the gateway
+    launches no backend for it, so its ``url`` is an AUTHORITATIVE fixed endpoint, not an
+    illustrative port awaiting resolution. It never gets a live registration, so its url
+    is preserved rather than scrubbed — mirroring :func:`_collect_app_mcp_servers`
+    (``agent_materialization/mcp_sources.py``), the other writer of this config. The two
+    writers must agree, or one scrubs an entry the other immediately writes back.
+
+    stdio/command servers (no ``url``) are always registered — they have no port to be dead.
     """
     if not manifest.mcpServers:
         return []
@@ -2942,16 +2951,31 @@ def _register_mcp_servers(
             if isinstance(cfg, dict):
                 cfg = _pin_host_cli_command(app_name, cfg)
             is_http = isinstance(cfg, dict) and bool(cfg.get("url"))
-            if is_http and not resolved_port:
-                # No live backend → registering the manifest's dead default-port URL would
-                # break every kiro session. Skip it AND scrub any stale entry so a prior
-                # (now-dead) registration can't keep poisoning the provider path.
+            if is_http and not resolved_port and manifest.backend.entryPoint:
+                # GATEWAY-MANAGED backend (backend.entryPoint set) with no live port: the
+                # manifest's url carries only an ILLUSTRATIVE fixed port, so writing it
+                # verbatim is a dead default-port URL that breaks every kiro session. Skip
+                # it AND scrub any stale entry so a prior (now-dead) registration can't keep
+                # poisoning the provider path. The boot/enable path re-registers with the
+                # live port once the backend is up.
+                #
+                # A SELF-MANAGED app (empty backend.entryPoint) is the opposite case: it has
+                # no backend the gateway launches, so its url is an AUTHORITATIVE fixed
+                # endpoint that never gets a live registration — preserve it instead of
+                # dropping it. This mirrors ``_collect_app_mcp_servers`` in
+                # ``agent_materialization/mcp_sources.py`` (the other writer of this config),
+                # which keeps a self-managed url for exactly this reason. The two writers
+                # must agree, or registration scrubs the entry and the next rebuild writes
+                # it straight back.
                 servers.pop(namespaced, None)
                 skipped.append(namespaced)
                 continue
             if is_http:
+                # _resolve_live_mcp_url is a no-op without a live port, so a self-managed
+                # app's authoritative url is written through unchanged here.
                 cfg["url"] = _resolve_live_mcp_url(app_name, cfg["url"], live_port=resolved_port)
-                cfg.pop("disabled", None)  # backend is live — ensure enabled
+                if resolved_port:
+                    cfg.pop("disabled", None)  # backend is live — ensure enabled
             else:
                 # A stdio entry: resolve a bare interpreter to an absolute one — the
                 # app's venv python when present, else the running interpreter (see

@@ -54,12 +54,34 @@ _SEED_ROWS = 20
 
 
 def _point_home_at(monkeypatch: pytest.MonkeyPatch, data_home: Path) -> None:
-    """Make *data_home* the data home, with the default store and one silo declared."""
-    (data_home / "config.json").write_text(json.dumps(_CONFIG), encoding="utf-8")
-    monkeypatch.setenv("KIROCREW_HOME", str(data_home))
+    """Make *data_home* the data home, with the default store and one silo declared.
+
+    The config is written to the SAME path the loader resolves ``KIROCREW_HOME`` to
+    (``Path.resolve()``), not to the raw ``data_home`` the fixture was handed. On
+    Windows the two can differ -- short-name (8.3) components, drive-letter casing,
+    or a long parametrized temp path -- so writing to the raw path leaves the loader
+    reading a home with no ``config.json``, degrading the load to the default store
+    alone; the declared ``fin`` silo is then unknown.
+
+    The three resolution memos are dropped alongside the home switch so a stale entry
+    keyed on an earlier case's home cannot answer for this one. ``config_dir()`` keys
+    on ``_resolved_home`` identity, ``_declared_stores`` memoizes on the config
+    fingerprint, and the loaded config is cached on that same fingerprint; a coarse
+    filesystem clock can leave two different homes sharing a fingerprint, so each is
+    reset explicitly rather than relied on to invalidate itself.
+    """
     import kiro_crew.config.paths as paths
+    from kiro_crew import memory_stores
+    from kiro_crew.config.loader import _invalidate_config_cache
+
+    resolved_home = data_home.resolve()
+    (resolved_home / "config.json").write_text(json.dumps(_CONFIG), encoding="utf-8")
+    monkeypatch.setenv("KIROCREW_HOME", str(resolved_home))
 
     monkeypatch.setattr(paths, "_resolved_home", None, raising=False)
+    monkeypatch.setattr(paths, "_config_dir_memo", None, raising=False)
+    monkeypatch.setattr(memory_stores, "_DECLARED_MEMO", None, raising=False)
+    _invalidate_config_cache()
 
 
 def _write_seed_rows(store: VectorMemoryStore) -> None:
@@ -70,9 +92,14 @@ def _write_seed_rows(store: VectorMemoryStore) -> None:
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A data home declaring the default store and one silo."""
+    """A data home declaring the default store and one silo.
+
+    Returns the RESOLVED home -- the spelling the loader uses -- so paths the test
+    composes from it (candidate databases, superseded-sibling globs) sit beside the
+    stores the loader resolves rather than on a divergent Windows spelling.
+    """
     _point_home_at(monkeypatch, tmp_path)
-    return tmp_path
+    return tmp_path.resolve()
 
 
 @pytest.fixture(scope="module")
@@ -143,6 +170,19 @@ def _integrity(db_file: Path) -> str:
         conn.close()
 
 
+def _as_legacy_wal_backup(backup: Path | None) -> Path:
+    """Give *backup* the WAL header every backup carried before rollback-journal publishing."""
+    assert backup is not None
+    conn = sqlite3.connect(backup)
+    try:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    finally:
+        conn.close()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{backup}{suffix}").unlink(missing_ok=True)
+    return backup
+
+
 class TestABackupIsConsistentUnderALiveWriter:
     @pytest.fixture
     def live_store(self, home: Path):
@@ -182,6 +222,25 @@ class TestABackupIsConsistentUnderALiveWriter:
         """
         out = mb.backup_store(resolve_store_path(DEFAULT_MEMORY_STORE))
         assert out is not None
+        assert not Path(f"{out}-wal").exists()
+        assert not Path(f"{out}-shm").exists()
+
+    def test_a_run_leaves_only_the_published_backup_in_the_directory(
+        self, live_store: VectorMemoryStore
+    ) -> None:
+        """The staged copy's verify probe must not leave ``.partial-wal``/``-shm`` behind."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        out = mb.backup_store(src)
+        assert out is not None
+        assert sorted(p.name for p in mb.backup_dir_for(src).iterdir()) == [out.name]
+
+    def test_reading_the_backup_creates_no_sidecars(self, live_store: VectorMemoryStore) -> None:
+        """A published backup is a rollback-journal file, so opening it pairs with nothing."""
+        out = mb.backup_store(resolve_store_path(DEFAULT_MEMORY_STORE))
+        assert out is not None
+        assert _integrity(out) == "ok" and _rows(out) == 20
+        with sqlite3.connect(out) as conn:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert not Path(f"{out}-wal").exists()
         assert not Path(f"{out}-shm").exists()
 
@@ -524,6 +583,20 @@ class TestRetentionIsBoundedAndCannotEmptyItself:
         assert survivors[0] > survivors[1] > survivors[2]
         assert "20260115" in survivors[0]
 
+    def test_a_pruned_legacy_backup_takes_its_sidecars_with_it(
+        self, live_store: VectorMemoryStore
+    ) -> None:
+        """Reading a WAL-header backup leaves ``-wal``/``-shm`` that only prune can reclaim."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        base = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        old = _as_legacy_wal_backup(mb.backup_store(src, now=base))
+        mb.backup_store(src, now=base + timedelta(days=1))
+        assert _integrity(old) == "ok"
+        assert Path(f"{old}-shm").exists()
+
+        assert mb.prune_backups(src, keep=1) == 1
+        assert [p for p in mb.backup_dir_for(src).iterdir() if p.name.startswith(old.name)] == []
+
     @pytest.mark.parametrize("keep", [0, -1])
     def test_a_keep_below_one_is_clamped_rather_than_emptying_the_directory(
         self, live_store: VectorMemoryStore, keep: int
@@ -593,6 +666,94 @@ class TestAnInterruptedBackupLeavesNothingThatLooksLikeOne:
         out_dir = mb.backup_dir_for(src)
         assert mb.list_backups(src) == []
         assert list(out_dir.glob("*.partial")) == []
+        assert list(out_dir.glob(".*.partial*")) == []
+
+    def test_prune_reclaims_orphaned_staging_sidecars_only(
+        self, live_store: VectorMemoryStore
+    ) -> None:
+        """A ``.partial-wal``/``-shm`` with no ``.partial`` beside it belongs to no live run."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        out = mb.backup_store(src)
+        assert out is not None
+        out_dir = mb.backup_dir_for(src)
+        orphan = out_dir / f".{src.stem}.20260101T000000000000Z-{'a' * 32}.db.{'b' * 32}.partial"
+        live = out_dir / f".{src.stem}.20260102T000000000000Z-{'c' * 32}.db.{'d' * 32}.partial"
+        live.write_bytes(b"")
+        for stage in (orphan, live):
+            for suffix in ("-wal", "-shm"):
+                Path(f"{stage}{suffix}").write_bytes(b"")
+
+        assert mb.prune_backups(src) == 0
+        assert not Path(f"{orphan}-wal").exists()
+        assert not Path(f"{orphan}-shm").exists()
+        assert Path(f"{live}-wal").exists() and Path(f"{live}-shm").exists()
+        assert out.exists()
+
+    def test_prune_reclaims_a_stage_left_by_a_killed_run(
+        self, live_store: VectorMemoryStore
+    ) -> None:
+        """A run killed before its cleanup leaves the ``.partial`` itself; age reclaims it."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        out = mb.backup_store(src)
+        assert out is not None
+        out_dir = mb.backup_dir_for(src)
+        stale = out_dir / f".{src.stem}.20260101T000000000000Z-{'e' * 32}.db.{'f' * 32}.partial"
+        fresh = out_dir / f".{src.stem}.20260102T000000000000Z-{'1' * 32}.db.{'2' * 32}.partial"
+        old = datetime.now(timezone.utc).timestamp() - mb.STALE_STAGE_SECONDS - 60
+        for stage in (stale, fresh):
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{stage}{suffix}").write_bytes(b"x")
+        os.utime(stale, (old, old))
+
+        mb.prune_backups(src)
+        assert [p for p in out_dir.iterdir() if p.name.startswith(stale.name)] == []
+        assert all(Path(f"{fresh}{suffix}").exists() for suffix in ("", "-wal", "-shm"))
+        assert out.exists()
+
+    def test_a_stage_exactly_at_the_stale_age_is_kept(self, live_store: VectorMemoryStore) -> None:
+        """Only a stage OLDER than ``STALE_STAGE_SECONDS`` goes; the boundary itself stays."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        out_dir = mb.backup_dir_for(src)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        now = 1_800_000_000
+        boundary = out_dir / f".{src.stem}.20260101T000000000000Z-{'3' * 32}.db.{'4' * 32}.partial"
+        older = out_dir / f".{src.stem}.20260101T000000000000Z-{'5' * 32}.db.{'6' * 32}.partial"
+        for stage, mtime in (
+            (boundary, now - mb.STALE_STAGE_SECONDS),
+            (older, now - mb.STALE_STAGE_SECONDS - 1),
+        ):
+            stage.write_bytes(b"x")
+            os.utime(stage, ns=(mtime * 10**9, mtime * 10**9))
+
+        mb._prune_orphaned_stages(src, out_dir, now=now)
+        assert boundary.exists()
+        assert not older.exists()
+
+    def test_a_run_removes_its_sidecars_before_its_partial(
+        self, live_store: VectorMemoryStore
+    ) -> None:
+        """The prune sweep reads a sidecar without its ``.partial`` as an ended run."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        removed: list[str] = []
+        original = Path.unlink
+
+        def recording_unlink(self: Path, missing_ok: bool = False) -> None:
+            if ".partial" in self.name:
+                removed.append(self.name)
+            original(self, missing_ok=missing_ok)
+
+        with (
+            mock.patch.object(
+                mb.platform_compat, "restrict_to_owner", side_effect=OSError("interrupted")
+            ),
+            mock.patch.object(Path, "unlink", recording_unlink),
+        ):
+            with pytest.raises(mb.MemoryBackupFailed):
+                mb.backup_store(src)
+        stage = [name for name in removed if name.endswith(".partial")]
+        assert len(stage) == 1
+        assert removed[-1] == stage[0]
+        assert {f"{stage[0]}-wal", f"{stage[0]}-shm"} <= set(removed)
 
 
 class TestRestoreIsNonDestructive:
@@ -920,6 +1081,21 @@ class TestRestoreIsNonDestructive:
         # Nothing displaced, and the store still works.
         assert list(src.parent.glob("memory.db.superseded.*")) == []
         assert _integrity(src) == "ok"
+
+    def test_restoring_a_legacy_wal_header_backup_leaves_no_stage_sidecars(
+        self, live_store: VectorMemoryStore
+    ) -> None:
+        """A backup taken before rollback-journal publishing still restores without residue."""
+        src = resolve_store_path(DEFAULT_MEMORY_STORE)
+        legacy = _as_legacy_wal_backup(mb.backup_store(src))
+        out_dir = mb.backup_dir_for(src)
+
+        mb.restore_from_backup(legacy, DEFAULT_MEMORY_STORE)
+        assert list(out_dir.glob("restore-*.db-*")) == []
+        live_store.close()
+        mb.apply_pending_member_restores()
+        assert _rows(src) == 20
+        assert list(out_dir.glob("restore-*")) == []
 
     def test_the_stale_wal_of_the_displaced_file_is_removed(
         self, live_store: VectorMemoryStore

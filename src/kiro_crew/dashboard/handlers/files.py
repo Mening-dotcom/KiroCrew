@@ -4052,7 +4052,16 @@ async def api_file_raw(request: web.Request) -> web.Response:
         _log("denied", path)
         return web.json_response({"error": "file content is not a recognized format"}, status=403)
     _log("success", path)
-    headers = {"Content-Type": content_type, "X-Content-Type-Options": "nosniff"}
+    # inline (not attachment) keeps the PDF/image rendering in the viewer's
+    # <iframe>/<img>, while naming the file so the browser's native Download /
+    # Save-as saves under the real name instead of "file-raw" -- the last
+    # segment of this endpoint's URL. Sibling parity with api_file_stream.
+    safe_name = urllib.parse.quote(os.path.basename(path), safe="")
+    headers = {
+        "Content-Type": content_type,
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f"inline; filename*=UTF-8''{safe_name}",
+    }
     if content_type == "image/svg+xml":
         headers["Content-Security-Policy"] = "script-src 'none'; style-src 'unsafe-inline'"
     return web.Response(body=data, headers=headers)
@@ -4347,6 +4356,13 @@ async def api_file_stream(request: web.Request) -> web.StreamResponse:
         resp.content_length = end - start + 1
         resp.headers["Accept-Ranges"] = "bytes"
         resp.headers["X-Content-Type-Options"] = "nosniff"
+        # inline (not attachment) keeps playback in the <video>/<audio> element,
+        # while naming the file so a player-initiated download (the native media
+        # controls' Download) saves under the real name instead of "file-stream"
+        # -- the last segment of this endpoint's URL, which the browser would
+        # otherwise use. Sibling parity with api_file_download's Content-Disposition.
+        safe_name = urllib.parse.quote(os.path.basename(path), safe="")
+        resp.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{safe_name}"
         if status == 206:
             resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         # SEL: record the ALLOW decision before any bytes move. prepare() and
@@ -6884,7 +6900,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             )
             return body_err
         assert body is not None  # read_bounded_json returns (dict, None) on success
-        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "default_memory_mode", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "link_previews", "link_patterns", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links", "model_picker_hidden_models_add", "model_picker_hidden_models_remove"}
+        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "default_memory_mode", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "default_crew_mode", "link_previews", "link_patterns", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links", "model_picker_hidden_models_add", "model_picker_hidden_models_remove"}
         # One-release backward-compat shim for removed key; delete after all clients update.
         deprecated_ignored_keys = {"tail_fork_head_handling"}
         # Read-only keys the GET exposes: both settings surfaces save with
@@ -7120,6 +7136,20 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     {"error": "tail_fork_enabled must be a boolean"}, status=400
                 )
             updates["tail_fork_enabled"] = val
+        if "default_crew_mode" in body:
+            val = body["default_crew_mode"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "default_crew_mode must be a boolean",
+                        "code": "invalid_default_crew_mode",
+                    },
+                    status=400,
+                )
+            updates["default_crew_mode"] = val
         if "folder_suggestions_enabled" in body:
             val = body["folder_suggestions_enabled"]
             if not isinstance(val, bool):
@@ -7355,14 +7385,19 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
     # enforcement point. Resolved off-thread (profile resolution may read from
     # disk); every decision is SEL-audited by the probe itself.
     from kiro_crew.dashboard import social_share
-    from kiro_crew.decisions.capability import is_decisions_denied
+    from kiro_crew.decisions.capability import denied_sides
 
     social_share_denied = await asyncio.to_thread(social_share.is_share_denied)
     # Same shape, same reason: the Decisions feature-preview card is drawn only when
     # the ceiling permits the seam, and this endpoint is the only place the dashboard
     # can learn that. Presentation, not the control -- the consent PUT and the gate's
-    # own consent read are the two chokepoints (``decisions/capability.py``).
-    decisions_denied = await asyncio.to_thread(is_decisions_denied)
+    # own consent read are the two chokepoints (``decisions/capability.py``). The card
+    # is drawn while EITHER side permits: a fleet that allows hosted Jev but withdraws
+    # local models (``capabilities.decisions_local``) still needs the card. A pinned
+    # ``capabilities.decisions`` deny covers the local side too, so it hides the card.
+    # Both rows evaluated in one hop, each audited once, never short-circuited.
+    hosted_denied, local_denied = await asyncio.to_thread(denied_sides)
+    decisions_denied = hosted_denied and local_denied
     return web.json_response(
         {
             "restore_sessions": cfg.dashboard.restore_sessions,
@@ -7378,6 +7413,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "auto_open_git_panel": cfg.dashboard.auto_open_git_panel,
             "session_card_source_links": cfg.dashboard.session_card_source_links,
             "tail_fork_enabled": cfg.dashboard.tail_fork_enabled,
+            "default_crew_mode": cfg.dashboard.default_crew_mode,
             "link_previews": cfg.dashboard.link_previews,
             "folder_suggestions_enabled": cfg.dashboard.folder_suggestions_enabled,
             "model_picker_hidden_models": list(cfg.dashboard.model_picker_hidden_models),

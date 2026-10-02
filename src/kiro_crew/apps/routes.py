@@ -2278,6 +2278,12 @@ async def handle_open_app(request: web.Request) -> web.Response:
     On cloud/remote environments (no display), returns the command
     for the user to run locally instead of executing it.
     """
+    # local import: avoids a circular import with dashboard.handlers
+    from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+
+    owner_denied = await require_owner_dashboard_request(request, "app_open")
+    if owner_denied is not None:
+        return owner_denied
     name = request.match_info["name"]
     info = get_app(name)
     if not info:
@@ -2946,7 +2952,7 @@ def _read_declared_art(name: str, file_path: str) -> tuple[bytes, str] | None:
         # Checked on the DESCRIPTOR, which is what makes it race-free: this fd already
         # refers to the inode being judged. Every other descriptor-validated read in
         # the tree applies the same gate (`hooks.py`, `memory.py`, `spec_builder`,
-        # `onboarding_import.py`, `pinned_fs.copy_file_pinned`), so this route was the
+        # `onboarding_scan.py`, `pinned_fs.copy_file_pinned`), so this route was the
         # outlier rather than a new rule.
         #
         # Inline rather than `pinned_fs.refuse_hardlink_alias`, which is the same

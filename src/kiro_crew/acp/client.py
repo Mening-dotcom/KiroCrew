@@ -41,8 +41,10 @@ from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Collection,
+    Iterator,
     Mapping,
     Sequence,
     TypeVar,
@@ -65,11 +67,13 @@ from kiro_crew.acp import runtime_models, runtime_process_tree, seed_provenance,
 from kiro_crew.acp._dispatch import (
     ACP_BACKENDS_META_IDENTITY,
     DRAIN_YIELD_AFTER_S,
+    BackgroundLaunchRecord,
     _dumps_degraded,
     _loggable_request_id,
     _measure_tool_output,
     agent_version_from_init,
     build_permission_event,
+    build_session_new_params,
     classify_tool_call,
     derive_edit_diff,
     error_is_refusal_terminal,
@@ -131,10 +135,13 @@ from kiro_crew.acp.transport_errors import (
     sandbox_init_failure,
 )
 from kiro_crew.acp.transport_framing import (
-    _RESPONSE_WRITE_MIN_PROGRESS_BYTES,
     _STDOUT_BUFFER_LIMIT,
+    RequestWriteResult,
+    _stall_window_phrase,
     response_write_window_secs,
+    settle_drain,
     write_notification_best_effort,
+    write_request_frame_bounded,
     write_response_frame_bounded,
 )
 from kiro_crew.acp.types import (
@@ -409,11 +416,16 @@ CLAUDE_ACP_NPM_PKG = ACP_BACKEND_NODE_ADAPTER_PACKAGES[ACP_BACKEND_CLAUDE]
 # Entry script relative to the installed package directory (its package.json
 # "bin" field).  Used to locate a copy under a project ``node_modules``.
 _CLAUDE_ACP_PKG_ENTRY = Path(CLAUDE_ACP_NPM_PKG, *NODE_ADAPTER_ENTRY_SEGMENTS)
-# A direct runtime dependency of the adapter that npm hoists flat into the
-# same node_modules root.  Its presence is a cheap completeness check: a
-# copy missing it would crash at import with
-# ``ERR_MODULE_NOT_FOUND: @agentclientprotocol/sdk``, so we reject such an
-# incomplete root and fall through to the next candidate.
+# A direct runtime dependency of the adapter.  Its reachability is a cheap
+# completeness check: a copy that cannot import it would crash at import with
+# ``ERR_MODULE_NOT_FOUND: @agentclientprotocol/sdk`` -- after the spawn -- so
+# such a copy is rejected and the ladder moves to the next candidate.  "Reachable"
+# means what it means to Node: present in some ``node_modules`` on the walk UP
+# from the entry script's REAL path (``_vendored_adapter_entry``).  An ordinary
+# ``npm install`` hoists the dependency flat into the same root as the adapter; a
+# ``file:`` / ``npm link`` install is a symlink whose dependencies sit under the
+# link target's own ``node_modules`` and hoists nothing, so a check pinned to the
+# hoisted root alone would reject every linked adapter as incomplete.
 _CLAUDE_ACP_DEP_MARKER = Path("@agentclientprotocol") / "sdk"
 
 # ── codex-acp (ACP_BACKEND_CODEX) ──
@@ -1048,20 +1060,13 @@ def _vendored_acp_roots(pkg_dir: Path | None = None) -> list[Path]:
 def _resolve_vendored_claude_acp(pkg_dir: Path | None = None) -> str | None:
     """Return the path to a vendored claude-agent-acp entry script, or None.
 
-    Looks for ``<root>/@agentclientprotocol/claude-agent-acp/dist/index.js``
-    under each candidate ``node_modules`` root.  Returns the first existing
-    entry script (a plain Node script — the caller wraps it with ``node``).
-
-    A root is accepted only when the adapter's hoisted dependency marker
-    (``@agentclientprotocol/sdk``) is also present, so an incomplete vendored
-    copy (entry script but missing deps) is skipped in favour of a complete
-    one rather than picked and crashed at ESM import time.
+    The claude spelling of the ONE shared check, :func:`_vendored_adapter_entry`:
+    ``<root>/@agentclientprotocol/claude-agent-acp/dist/index.js`` under each
+    candidate ``node_modules`` root, accepted only when Node could import the
+    adapter's dependency from the entry's real location.  *pkg_dir* is threaded
+    through so tests can inject a fake package layout.
     """
-    for root in _vendored_acp_roots(pkg_dir):
-        entry = root / _CLAUDE_ACP_PKG_ENTRY
-        if entry.is_file() and (root / _CLAUDE_ACP_DEP_MARKER).is_dir():
-            return str(entry)
-    return None
+    return _vendored_adapter_entry(_CLAUDE_ACP_PKG_ENTRY, _CLAUDE_ACP_DEP_MARKER, pkg_dir=pkg_dir)
 
 
 def _resolve_node_adapter_argv(
@@ -1086,9 +1091,11 @@ def _resolve_node_adapter_argv(
       1. *override_env* (explicit override; need not be executable -- a
          non-executable script is auto-wrapped with node).
       2. *vendored_entry*: a project-local ``node_modules`` copy (from ``npm
-         install`` in the repo or a copy bundled next to the package), accepted
-         only with the adapter's hoisted dependency beside it -- no global install
-         required, and no ESM import crash after the spawn.
+         install`` in the repo, a ``file:`` / ``npm link`` install, or a copy
+         bundled next to the package), accepted only when Node could import the
+         adapter's dependency from the entry's real path -- no global install
+         required, and no ESM import crash after the spawn. A copy that is
+         skipped is logged, so the fall-through to a global copy is never silent.
       3. ``mise which <bin_name>`` (respects all mise config).
       4. Direct glob under mise installs (fallback if mise exec fails).
       5. Augmented PATH (includes mise shims, nvm, fnm, volta, npm -g).
@@ -1148,12 +1155,62 @@ def _resolve_node_adapter_argv(
     return None, search_path
 
 
-def _vendored_adapter_entry(pkg_entry: Path, dep_marker: Path) -> str | None:
-    """The first vendored copy of an adapter whose dependency marker sits beside it."""
-    for root in _vendored_acp_roots():
+def _node_module_search_dirs(start: Path) -> Iterator[Path]:
+    """The ``node_modules`` directories Node searches for a bare import from *start*.
+
+    Node's ``NODE_MODULES_PATHS``: every ancestor of *start* (itself included)
+    contributes ``<ancestor>/node_modules``, except an ancestor that IS a
+    ``node_modules`` directory, from the innermost outward to the filesystem root.
+    *start* must already be a REAL path: Node resolves a module's symlinks before
+    looking for that module's imports (``--preserve-symlinks`` is off by default),
+    which is why a ``file:`` / ``npm link`` install finds its dependencies beside
+    the link TARGET rather than at the hoisted root it is linked from.
+    """
+    for ancestor in (start, *start.parents):
+        if ancestor.name == "node_modules":
+            continue
+        yield ancestor / "node_modules"
+
+
+def _vendored_adapter_entry(
+    pkg_entry: Path, dep_marker: Path, pkg_dir: Path | None = None
+) -> str | None:
+    """The first project-local copy of a Node ACP adapter that Node itself could run.
+
+    ONE check for the three adapter resolvers (claude-agent-acp, codex-acp,
+    pi-acp): each joins its own package entry and dependency marker onto the
+    shared roots (:func:`_vendored_acp_roots`), so there is no per-harness copy of
+    the completeness rule to drift. The helper is harness-neutral and adds nothing
+    to the Kiro path (H13).
+
+    A copy is accepted when its dependency marker is reachable the way Node
+    resolves a bare import from the ENTRY'S REAL PATH -- some ``node_modules`` on
+    the walk up from where the entry script really lives holds it. An ordinary
+    ``npm install`` satisfies that at the hoisted root; a ``file:`` / ``npm link``
+    install is a symlink that hoists nothing and satisfies it under the link
+    target's own ``node_modules``, which a check pinned to the hoisted root alone
+    cannot see. An entry whose dependency is reachable nowhere would die at ESM
+    import -- after the spawn -- so it is refused, and the refusal is logged: a
+    silent fall-through to a global copy on PATH is how a locally patched adapter
+    runs as the unpatched global build with nothing to say so.
+    """
+    for root in _vendored_acp_roots(pkg_dir):
         entry = root / pkg_entry
-        if entry.is_file() and (root / dep_marker).is_dir():
-            return str(entry)
+        if not entry.is_file():
+            continue
+        real_entry = Path(os.path.realpath(entry))
+        for node_modules in _node_module_search_dirs(real_entry.parent):
+            if (node_modules / dep_marker).is_dir():
+                return str(entry)
+        logger.warning(
+            "Skipping project-local ACP adapter %s: %s is not importable from its real "
+            "location %s (no node_modules on the walk up from there holds it); the next "
+            "candidate on the ladder that resolves, if any, is used instead. For a file: "
+            "or npm link install, run npm install inside the linked checkout.",
+            entry,
+            dep_marker.as_posix(),
+            real_entry.parent,
+        )
     return None
 
 
@@ -3536,6 +3593,12 @@ class AcpClient:
         # offers rather than a hardcoded guess. Each entry: {modelId, name,
         # description}.
         self._available_models: list[dict[str, str]] = []
+        # When that snapshot was captured (monotonic) and whether a live re-probe
+        # confirmed it. A ``session/new`` answer is one unconfirmed reading taken
+        # inside the startup race where an entitlement lookup can answer the
+        # free-tier default; only :meth:`refresh_available_models` confirms it.
+        self._available_models_captured_at: float = 0.0
+        self._available_models_probe_confirmed: bool = False
         # Set by _capture_available_models (claude only) when the discovered ids
         # changed the cross-session provider-model cache, signalling the async
         # init path to offload a disk persist. Reset to False after each persist.
@@ -3644,6 +3707,12 @@ class AcpClient:
         self._jsonl_pos: int = 0  # track read position in session JSONL for tool results
         self._stderr_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._last_activity: float = time.monotonic()
+        # Set when a request write stalls (``_write_request_bounded``): the child
+        # stopped reading stdin and may still read a buffered frame. The client
+        # then reads as neither responsive nor mid-turn, and the next
+        # ``ensure_ready`` kills it before spawning a replacement, so no new
+        # prompt is ever appended behind the stalled one.
+        self._stdin_stalled = False
         # Idle == done. An idle client (spawned, no prompt sent yet) must read
         # as NOT in a turn: has_active_turn() is the 409 turn_in_flight gate
         # on set-model / set-agent, so an unset Event on a live warm process
@@ -3714,6 +3783,12 @@ class AcpClient:
         # ``session/prompt`` request goes unanswered -- which leaves this armed
         # for ``_settle_codex_compaction`` to close out at the turn's terminal.
         self._codex_compaction_pending: bool = False
+        # When this session's harness last launched work that outlives the
+        # prompt (a backgrounded command, a Workflow). Never reset per turn: a
+        # turn ending says nothing about whether that work has finished, and
+        # this client reads its pipe only while a call is waiting, so the
+        # harness's eventual report of it is not seen until the next prompt.
+        self._background_launches = BackgroundLaunchRecord()
         # Liveness oracle for the stale-turn gate: before ending a silent turn
         # at _STALE_TURN_TIMEOUT, consult /proc evidence so a backend that is
         # provably working (CPU/IO movement in the subprocess subtree) is not
@@ -5964,7 +6039,7 @@ class AcpClient:
 
     def is_responsive(self, stale_threshold: float = 600.0) -> bool:
         """True if process is alive AND has had I/O activity within threshold seconds."""
-        if not self._is_process_alive():
+        if not self._is_process_alive() or getattr(self, "_stdin_stalled", False):
             return False
         return (time.monotonic() - self._last_activity) < stale_threshold
 
@@ -6117,10 +6192,21 @@ class AcpClient:
         # This path deliberately does not scope: an explicit pick must reach the
         # adapter because its advertised list can omit an entitlement the adapter
         # accepts, and inherited pins are already scoped by their callers.
+        #
+        # A refusal is never issued on the session-init snapshot alone -- the
+        # same refresh-before-refuse AcpSessionProvider.set_model applies on the
+        # shared runtime. That snapshot is one unconfirmed answer captured inside
+        # the startup race, so a would-be refusal first revalidates against a
+        # fresh backend answer and stands only if that answer ALSO lacks the
+        # model. A failed probe keeps the snapshot's verdict (no evidence, no
+        # entitlement granted).
         if self._is_kiro and self._model_is_unusable(model_id):
-            _rejected_log, _ = redact_exfiltration_urls(str(model_id))
-            _rejected_log, _ = redact_credentials(_rejected_log)
-            raise AcpModelUnavailable(_rejected_log, self._advertised_model_ids())
+            advertised = self._advertised_model_ids()
+            fresh = runtime_models.advertised_model_ids(await self.refresh_available_models())
+            if model_is_unusable(model_id, fresh or advertised):
+                _rejected_log, _ = redact_exfiltration_urls(str(model_id))
+                _rejected_log, _ = redact_credentials(_rejected_log)
+                raise AcpModelUnavailable(_rejected_log, fresh or advertised)
         if self._uses_advertised_model_selection:
             # Mirror the spawn path (_spawn): fold the requested id onto the exact
             # spelling the backend advertised, so a warm-pool claim that switches
@@ -6223,6 +6309,8 @@ class AcpClient:
         captured = parse_advertised_models({"models": models})
         if captured:
             self._available_models = captured
+            self._available_models_captured_at = time.monotonic()
+            self._available_models_probe_confirmed = False
             # Feed the discovered ids into the cross-session provider-model cache
             # so the next session's settings seed can source availableModels (and
             # the wire model id) from what this backend actually serves rather
@@ -6280,6 +6368,171 @@ class AcpClient:
         ``providers.acp`` live path share one definition of entitlement.
         """
         return model_is_unusable(model_id, self._advertised_model_ids())
+
+    async def refresh_available_models(self) -> list[dict[str, str]]:
+        """Re-resolve this session's advertised-model snapshot against the backend.
+
+        The direct-spawn counterpart to
+        :meth:`AcpSessionHandle.refresh_available_models`, called by the
+        explicit-pick refusal in :meth:`set_model`, the startup pin withhold and
+        the dedicated-transport picker read. This client owns one process and no
+        shared probe cache, so its own snapshot IS the cache, and the runtime
+        probe's freshness rules apply to it directly:
+
+        * A snapshot a probe confirmed within ``_ENTITLEMENT_PROBE_TTL_SECS`` is
+          fresh evidence and is returned without a round-trip -- a fresh list is
+          never re-probed. That is the result-clock replay with the freshness
+          floor at the snapshot's own capture time.
+        * There is no failure replay. A user action on the shared runtime passes
+          ``force=True`` to skip the attempt-clock replay, so a failed attempt is
+          never replayed here either.
+        * Single-flight is owned HERE, not by the callers: every caller that
+          arrives while a probe is in flight awaits that same probe, so a picker
+          poll and an explicit pick overlapping never start two probe processes.
+          The in-flight probe is shielded, so one caller's cancellation does not
+          take the answer away from the others (the probe still tears its own
+          process down).
+
+        The snapshot is replaced only by a NON-EMPTY answer, dated by the moment
+        that answer ARRIVED and marked probe-confirmed. A failed or empty probe is
+        not evidence about entitlement and leaves the snapshot as it was. Returns
+        the probe result (``[]`` = no evidence), or the fresh snapshot on a TTL hit.
+        """
+        # Lazy: acp.runtime imports this module at module level.
+        from kiro_crew.acp.runtime import _ENTITLEMENT_PROBE_TTL_SECS
+
+        now = time.monotonic()
+        captured_at = getattr(self, "_available_models_captured_at", 0.0)
+        if (
+            getattr(self, "_available_models_probe_confirmed", False)
+            and self._available_models
+            and captured_at > 0.0
+            and now - captured_at < _ENTITLEMENT_PROBE_TTL_SECS
+        ):
+            return list(self._available_models)
+        inflight: asyncio.Future[tuple[list[dict[str, str]], float]] | None = getattr(
+            self, "_entitlement_probe_inflight", None
+        )
+        if inflight is None or inflight.done():
+            inflight = asyncio.ensure_future(self._probe_advertised_models())
+            self._entitlement_probe_inflight = inflight
+        fresh, answered_at = await asyncio.shield(inflight)
+        if fresh and answered_at >= getattr(self, "_available_models_captured_at", 0.0):
+            self._available_models = list(fresh)
+            self._available_models_captured_at = answered_at
+            self._available_models_probe_confirmed = True
+        return list(fresh)
+
+    def _entitlement_probe_client(self) -> AcpClient:
+        """A throwaway client for one entitlement probe, on its OWN transport.
+
+        Built from this client's own launch inputs (binary, env, work dir, agent
+        spelling, sandbox mode, gateway overlay) through the ordinary constructor,
+        so :meth:`_spawn` launches it exactly as it launched this session -- there
+        is no second spelling of the spawn. It gets its own process and its own
+        stdout reader and notification buffer: nothing the probe process emits
+        (session updates, MCP OAuth prompts and readiness reports for whatever
+        servers kiro-cli starts from the spec, substitution advisories) can reach
+        this session's buffer, its OAuth dedupe set or its event stream. No audit
+        source and no shared scratch: the probe never runs a turn.
+        """
+        return type(self)(
+            work_dir=self._work_dir,
+            model=None,
+            agent=self._agent,
+            sandbox_mode=self._sandbox_mode,
+            session_key=self._session_key,
+            channel_id=self._channel_id,
+            extra_env=dict(self._extra_env),
+            acp_backend=self._acp_backend,
+            mcp_gateway_overlay=self._mcp_gateway_overlay,
+            mcp_gateway_socket=self._mcp_gateway_socket,
+            permission_mode=self._permission_mode,
+        )
+
+    async def _probe_advertised_models(self) -> tuple[list[dict[str, str]], float]:
+        """One throwaway session on a dedicated process, read for its model list.
+
+        The same question :meth:`AcpRuntime.probe_advertised_models` asks on the
+        shared process, asked of a short-lived kiro-cli started for the purpose
+        (:meth:`_entitlement_probe_client`): ``initialize``, one minimal
+        ``session/new`` (no mode activation), its model list parsed through the
+        shared :func:`advertised_models_from_session` fold, the harness's own
+        teardown verb, then the process is shut down. Everything else that
+        process emitted dies with its client. Returns ``(list, arrival_time)``;
+        ``[]`` means the probe failed or advertised nothing, never "entitled to
+        nothing". kiro-only: the entitlement race it answers is kiro-cli's.
+        """
+        # Lazy: acp.runtime imports this module at module level.
+        from kiro_crew.acp.runtime import _ENTITLEMENT_PROBE_TIMEOUT
+
+        # kiro-only, positively: the entitlement race this answers is kiro-cli's,
+        # and a session must already exist to have something to re-probe for.
+        if self.backend == ACP_BACKEND_KIRO and self._session_id:
+            probe: AcpClient | None = None
+            try:
+                probe = self._entitlement_probe_client()
+                return await asyncio.wait_for(
+                    probe._entitlement_probe_answer(),
+                    timeout=_INIT_TIMEOUT + _ENTITLEMENT_PROBE_TIMEOUT,
+                )
+            except Exception:
+                logger.debug("direct-client entitlement probe failed", exc_info=True)
+                return [], 0.0
+            finally:
+                if probe is not None:
+                    try:
+                        await asyncio.shield(probe.shutdown())
+                    except Exception:
+                        logger.debug(
+                            "direct-client entitlement probe shutdown failed", exc_info=True
+                        )
+        return [], 0.0
+
+    async def _entitlement_probe_answer(self) -> tuple[list[dict[str, str]], float]:
+        """Run the probe handshake on THIS (throwaway) client's own process."""
+        # Lazy: acp.runtime and acp.session_handle import this module.
+        from kiro_crew.acp.harness import harness_for
+        from kiro_crew.acp.runtime import _ENTITLEMENT_PROBE_TIMEOUT, _TERMINATE_TIMEOUT
+        from kiro_crew.acp.session_handle import advertised_models_from_session
+
+        await self._spawn()
+        init_id = await self._send_request(METHOD_INITIALIZE, self._initialize_params())
+        await self._wait_for_response(init_id, timeout=_INIT_TIMEOUT)
+        # Close the verify->create bracket every other spawn path closes between
+        # initialize and session/new: a spec revoked during probe init must not
+        # create a session (which starts that spec's MCP server commands). A stale
+        # snapshot raises DerivedSpecStale, which _probe_advertised_models absorbs
+        # as a failed probe (empty answer -> the refusal is kept), so no session is
+        # ever created on a spec nobody verified.
+        await asyncio.to_thread(require_unchanged_derived_spec, self._derived_spec_snapshot)
+        params = build_session_new_params(
+            await self._session_work_dir(),
+            # The pooled broker stubs, for cost alone: they outrank the spec entries,
+            # so the probe does not start a private copy of every pooled server.
+            # Isolation does not depend on it -- whatever this process starts is
+            # confined to its own transport and reaped with it.
+            mcp_servers=await asyncio.to_thread(self._pooled_mcp_servers),
+        )
+        req_id = await self._send_request(METHOD_SESSION_NEW, params)
+        resp = await self._wait_for_response(
+            req_id, timeout=_ENTITLEMENT_PROBE_TIMEOUT, method=METHOD_SESSION_NEW
+        )
+        answered_at = time.monotonic()
+        fresh = advertised_models_from_session(resp, self.backend)
+        probe_sid = str(resp.get("sessionId") or "")
+        if probe_sid:
+            policy = harness_for(self.backend).teardown
+            try:
+                # Every harness this probe runs on tears a session down with an
+                # awaited request (``TeardownPolicy.notification`` is False for
+                # kiro, KAS and codex; test_deny_bounded_write pins it), so the
+                # request is the only path here.
+                teardown_id = await self._send_request(policy.method, {"sessionId": probe_sid})
+                await self._wait_for_response(teardown_id, timeout=_TERMINATE_TIMEOUT)
+            except Exception:
+                logger.debug("direct-client probe session teardown failed", exc_info=True)
+        return fresh, answered_at
 
     @staticmethod
     def _model_config_candidates(model_id: str) -> list[str]:
@@ -6512,6 +6765,18 @@ class AcpClient:
             _resolved = runtime_models.resolve_pin_spelling(
                 self._model, self._advertised_model_ids()
             )
+            if not _resolved:
+                # The fold found nothing, but the snapshot was captured seconds
+                # ago at session/new -- inside the startup race where an
+                # entitlement lookup can answer the free-tier default. Same
+                # revalidate-once-before-withholding as the shared runtime's
+                # spawn-time pin withhold: a pin the fresh answer serves is
+                # applied, and a failed probe leaves the withhold as it was.
+                fresh = runtime_models.advertised_model_ids(await self.refresh_available_models())
+                if fresh and not model_is_unusable(self._model, fresh):
+                    _resolved = self._model
+                elif fresh:
+                    _resolved = runtime_models.resolve_pin_spelling(self._model, fresh)
             if _resolved:
                 logger.info(
                     "ACP model %s resolves to advertised %s; sending the advertised spelling",
@@ -8603,6 +8868,7 @@ class AcpClient:
         saved_child_pids = self._child_pids
         self._process = None
         self._pid = None
+        self._stdin_stalled = False
         self._spawn_start_token = None
         # The instance id names the process that just ended; a replacement spawn
         # mints its own, so nothing may keep answering with this one in between.
@@ -8611,6 +8877,13 @@ class AcpClient:
         # replacement process, so release it with the oracle it sampled into.
         self._retire_liveness_state()
         self._session_id = None
+        # The launches this record holds died with the process whose harness
+        # started them (a backgrounded command or Workflow runs in that
+        # process's own tree). Carrying it across a respawn would grant the
+        # FRESH tree the watchdog's background-work hold — and its hard-ceiling
+        # grace — on behalf of work that is already dead. "Never reset per
+        # turn" (see __init__) is a statement about turns, not processes.
+        self._background_launches = BackgroundLaunchRecord()
         # The adapter's cumulative cost counter is in-process: a replacement
         # process restarts it at zero, so the delta baseline must restart with
         # it or spend up to the old total is silently dropped — the monotonic
@@ -8841,20 +9114,26 @@ class AcpClient:
 
         return session_resp
 
-    async def _initialize_session(self) -> None:
-        """Handshake: initialize → session/load or session/new → set_mode → set_model."""
-        # 1. Initialize
+    def _initialize_params(self) -> dict[str, Any]:
+        """The ``initialize`` request params, one spelling for every handshake.
+
+        Read by :meth:`_initialize_session` and by the entitlement probe's own
+        handshake (:meth:`_entitlement_probe_answer`), so the probe process is
+        introduced to kiro-cli exactly as the session it probes for was.
+        """
         protocol_version: int | str = _PROTOCOL_VERSION_BY_BACKEND.get(
             self.backend, PROTOCOL_VERSION
         )
-        init_id = await self._send_request(
-            METHOD_INITIALIZE,
-            {
-                "protocolVersion": protocol_version,
-                "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
-                "clientCapabilities": ACP_CLIENT_CAPABILITIES,
-            },
-        )
+        return {
+            "protocolVersion": protocol_version,
+            "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
+            "clientCapabilities": ACP_CLIENT_CAPABILITIES,
+        }
+
+    async def _initialize_session(self) -> None:
+        """Handshake: initialize → session/load or session/new → set_mode → set_model."""
+        # 1. Initialize
+        init_id = await self._send_request(METHOD_INITIALIZE, self._initialize_params())
         init_resp = await self._wait_for_response(init_id, timeout=_INIT_TIMEOUT)
         logger.info("ACP initialized (protocol=%s)", init_resp.get("protocolVersion"))
 
@@ -9176,8 +9455,22 @@ class AcpClient:
                 self._process.returncode is not None
                 or getattr(self, "_windows_tree_cleanup_failed", False) is True
             )
-        ):
+        ) or getattr(self, "_stdin_stalled", False):
+            # A stalled child stopped reading stdin with a frame possibly
+            # buffered: it is killed BEFORE a replacement starts, so it cannot
+            # act on that frame while the new turn runs.
             await self._kill_process(force=True)
+            if (
+                getattr(self, "_stdin_stalled", False)
+                and self._process is not None
+                and self._process.returncode is None
+            ):
+                # Not confirmed dead: stay stalled, so the next ensure_ready
+                # retries the kill rather than spawning beside the old child.
+                raise AcpProcessDied(
+                    "the stalled ACP child could not be confirmed dead; "
+                    "not starting a replacement beside it"
+                )
             try:
                 await self._discard_claude_settings_seed()
             finally:
@@ -9254,7 +9547,7 @@ class AcpClient:
                     # ``AcpTimeoutError`` when the child dies before answering
                     # ``initialize``, and as an ``OSError`` on the write that
                     # follows it.
-                    sandbox_failure = await self._sandbox_init_failure()
+                    sandbox_failure = await self._classify_failed_start(self._sandbox_init_failure)
                     if sandbox_failure is not None:
                         _startup_outcome = "sandbox_init_failed"
                         await self._cleanup_failed_live_spawn()
@@ -9288,7 +9581,9 @@ class AcpClient:
                         # startup that died with a throttled registration on its
                         # stderr is pre-prompt by construction, so the typed
                         # transient subclass is the accurate verdict here too.
-                        _throttled = await self._registration_throttle_line()
+                        _throttled = await self._classify_failed_start(
+                            self._registration_throttle_line
+                        )
                         # AcpAuthRequired subclasses AcpError; label it distinctly
                         # so a not-logged-in exit is never counted as a generic
                         # startup error. (Only a harness's declared signed-out
@@ -9323,21 +9618,39 @@ class AcpClient:
             except Exception:  # never let telemetry break session startup
                 logger.debug("session startup metric emit failed", exc_info=True)
 
+    async def _classify_failed_start(self, classify: Callable[[], Awaitable[_T]]) -> _T:
+        """Run one of ``ensure_ready``'s failure-arm classifiers, cleaning up on a cancel.
+
+        Each classifier settles the stderr drain first, which waits, and a cancel
+        landing in that wait propagates (see :func:`settle_drain`). The failure arm
+        has already decided to discard this child by then, and leaving it would
+        keep a live process with a half-built session that the next
+        ``ensure_ready`` takes the warm path straight back onto. So the cleanup the
+        arm would have run runs before the cancel goes on, with the reset in a
+        ``finally`` so a second cancel during the kill still clears the state. A
+        cleanup failure is logged rather than raised: it must not replace the
+        cancel, which is what the caller is owed.
+        """
+        try:
+            return await classify()
+        except asyncio.CancelledError:
+            try:
+                await self._cleanup_failed_live_spawn()
+            except Exception:
+                logger.warning("ACP failed-start cleanup after a cancel failed", exc_info=True)
+            finally:
+                self._reset_state()
+            raise
+
     async def _settle_stderr(self, timeout: float = 0.5) -> None:
         """Bounded wait for the stderr drain, so its ring can be read consistently.
 
-        Same shape and budget as the EOF branch of :meth:`_read_message`, lifted
-        here because the other failure shapes that reach a classifier -- an
-        ``initialize`` timeout, an ``OSError`` on the write after the child died --
-        never pass through it.
+        Same budget as the EOF branch of :meth:`_read_message`, lifted here because
+        the other failure shapes that reach a classifier -- an ``initialize``
+        timeout, an ``OSError`` on the write after the child died -- never pass
+        through it. A cancel of the caller propagates; see :func:`settle_drain`.
         """
-        task = self._stderr_task
-        if task is None or task.done():
-            return
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-        except (Exception, asyncio.CancelledError):
-            pass
+        await settle_drain(self._stderr_task, timeout)
 
     async def _sandbox_init_failure(self) -> AcpSandboxInitFailed | None:
         """The classified sandbox-init error for this child's stderr, or ``None``.
@@ -9356,7 +9669,8 @@ class AcpClient:
         ``_read_message`` does: the ring is filled by the drain task while the
         failure that brings us here can arrive from the stdout side or from a
         timeout that never touched it, so a straight read can miss a line already
-        in the pipe. Bounded and swallowing -- this is already a failure path.
+        in the pipe. Bounded, and swallowing everything except a cancel of the
+        caller -- this is already a failure path (see :func:`settle_drain`).
         """
         await self._settle_stderr()
         if not self._stderr_lines:
@@ -9414,6 +9728,23 @@ class AcpClient:
     async def shutdown(self) -> None:
         """Gracefully stop the ACP process."""
         self._process_tree_confirmed_dead = False
+        # Tear down an in-flight entitlement probe first: its throwaway client
+        # spawned its OWN kiro-cli (and whatever MCP servers that started), and
+        # nothing else reaps it -- `_kill_process` below kills only THIS session's
+        # tree. Cancelling the future runs `_probe_advertised_models`'s `finally`,
+        # which shields the probe client's own `shutdown()`, so the probe process
+        # dies with the client that spawned it instead of outliving it ~270s (or,
+        # on loop teardown, forever, until the next-startup PID sweep). Bounded so
+        # a wedged probe cannot hold this shutdown.
+        inflight = getattr(self, "_entitlement_probe_inflight", None)
+        if inflight is not None and not inflight.done():
+            from kiro_crew.acp.runtime import _TERMINATE_TIMEOUT
+
+            inflight.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(inflight), timeout=_TERMINATE_TIMEOUT)
+            except (Exception, asyncio.CancelledError):
+                logger.debug("entitlement probe teardown on shutdown failed", exc_info=True)
         # `_reset_state` in a `finally`, because `_kill_process` can leave
         # through several doors: it awaits four `run_in_executor` calls (child
         # scan, record capture, escaped-child sweep) that are not individually
@@ -9457,16 +9788,78 @@ class AcpClient:
         req = JsonRpcRequest(method=method, params=params, id=req_id)
         data = json.dumps(req.to_dict()) + "\n"
         try:
-            # Under the write lock so a response frame waiting behind this
-            # (caller-sized, deliberately unbounded) frame measures the
-            # reader's progress exactly; see await_under_no_progress_bound.
-            async with self._stdin_write_lock():
-                self._process.stdin.write(data.encode())
-                await self._process.stdin.drain()
+            # Bounded on the reader's PROGRESS, not held across a raw drain: a
+            # request write that parks while the backend is flow-control-paused
+            # must not hold the write lock (acute on the shared runtime, where a
+            # co-tenant waits behind the lock, but a single session can self-wedge
+            # too). A stall raises AcpProcessDied, the same recovery a closed pipe
+            # already gets.
+            await self._write_request_bounded(data.encode(), req_id, method)
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise AcpProcessDied(f"ACP process pipe broken: {exc}") from exc
         self._last_activity = time.monotonic()
         return req_id
+
+    async def _write_request_bounded(self, data: bytes, request_id: int, method: str) -> None:
+        """Write a REQUEST frame under the write lock and the same no-progress bound.
+
+        The request twin of :meth:`_write_response_bounded`. A request frame is
+        caller-sized (a prompt may carry any number of image blocks), which is
+        why the bound is on the reader's PROGRESS rather than on elapsed time: a
+        reader still consuming keeps the wait alive, and only a writer whose
+        buffer has not shrunk for ``_RESPONSE_WRITE_BOUND_SECS`` is the
+        reader-gone stall. Holding the write lock across an unbounded ``drain()``
+        here would let a flow-control-paused backend park it forever WITH the
+        lock held; on the shared runtime that wedges every co-tenant session
+        behind the lock at 0 CPU. A stall is mapped to
+        ``AcpProcessDied`` so the caller takes the existing session-reset +
+        bounded-requeue recovery.
+
+        A DRAIN_STALL can leave the frame buffered in a backend that resumes
+        reading, but the kill-and-reap that would try to make delivery impossible
+        is NOT done here: it cannot be guaranteed (a close/EOF keeps flushing the
+        buffered bytes, and a wedged child is exactly the one that fails to exit
+        within the grace, so death is not confirmed before the raise), and on the
+        shared runtime it would bypass the ownership authorization and terminate
+        sibling sessions. Instead a DRAIN_STALL raises ``AcpProcessDied`` with
+        ``ambiguous_delivery`` set, which ``build_recovery_requeue`` reads to
+        resume from restored state rather than replay a prompt the backend may
+        have consumed; a LOCK_STALL wrote no byte, so it is not ambiguous and its
+        replay is safe. The phase appears only in the log. Either phase marks
+        the client stalled, so nothing reuses it: the next
+        ``ensure_ready`` kills the child before spawning its replacement.
+        """
+        assert self._process is not None and self._process.stdin is not None
+        result = await write_request_frame_bounded(
+            self._process.stdin,
+            self._stdin_write_lock(),
+            data,
+            bound_secs=transport_framing._RESPONSE_WRITE_BOUND_SECS,
+        )
+        if result is RequestWriteResult.OK:
+            return
+        safe_id = _loggable_request_id(request_id)
+        window = response_write_window_secs(
+            self._process.stdin, transport_framing._RESPONSE_WRITE_BOUND_SECS
+        )
+        logger.warning(
+            "ACP stdin stalled: %s while sending request method=%s req=%s; "
+            "treating the backend as dead (%s)",
+            _stall_window_phrase(self._process.stdin, window),
+            _loggable_request_id(method),
+            safe_id,
+            (
+                "frame never written"
+                if result is RequestWriteResult.LOCK_STALL
+                else "frame already buffered"
+            ),
+        )
+        self._stdin_stalled = True
+        raise AcpProcessDied(
+            f"ACP stdin stalled: no write progress for {window:g}s while "
+            f"sending request req={safe_id}",
+            ambiguous_delivery=result is RequestWriteResult.DRAIN_STALL,
+        )
 
     def _stdin_write_lock(self) -> asyncio.Lock:
         """The one lock every stdin write on this client takes (see
@@ -9503,10 +9896,9 @@ class AcpClient:
             self._process.stdin, transport_framing._RESPONSE_WRITE_BOUND_SECS
         )
         logger.warning(
-            "ACP stdin stalled: no write progress for %gs (floor %d bytes/window) while "
+            "ACP stdin stalled: %s while "
             "delivering response to req=%s; treating the backend as dead",
-            window,
-            _RESPONSE_WRITE_MIN_PROGRESS_BYTES,
+            _stall_window_phrase(self._process.stdin, window),
             safe_id,
         )
         raise AcpProcessDied(
@@ -9587,11 +9979,11 @@ class AcpClient:
         if not line:
             # EOF — process likely died or closing. Check and avoid busy-loop.
             if self._process and self._process.returncode is not None:
-                if self._stderr_task and not self._stderr_task.done():
-                    try:
-                        await asyncio.wait_for(self._stderr_task, timeout=0.5)
-                    except (Exception, asyncio.CancelledError):
-                        pass
+                # Unshielded: the child has exited, so a drain still running past
+                # the budget is held open only by a descendant that inherited the
+                # pipe, and every later settle on this failure would wait on it
+                # again.
+                await settle_drain(self._stderr_task, 0.5, shield=False)
                 stderr_tail = (
                     "; ".join(self._stderr_lines) if self.memory_mode == "persistent" else ""
                 )
@@ -10471,6 +10863,7 @@ class AcpClient:
                     await self._reject_unknown_server_request(msg)
                 elif action == "update":
                     self._track_usage_update(msg)
+                    self._note_background_launch(msg)
                     # Apply the codex compaction state change; this API yields
                     # str so the event has nowhere to go, but the context counts
                     # it drops are what the meter reads next turn.
@@ -10680,6 +11073,7 @@ class AcpClient:
                 await self._reject_unknown_server_request(msg)
             elif action == "update":
                 self._track_usage_update(msg)
+                self._note_background_launch(msg)
                 # codex reports compaction as a marked tool_call pair rather than
                 # as text, so it is read off the FRAME here instead of off a
                 # chunk below. Yielded and then fallen through: the frame is
@@ -11359,6 +11753,23 @@ class AcpClient:
         await asyncio.wait_for(self._turn_done.wait(), timeout=timeout)
         return self._last_stop_reason
 
+    def _note_background_launch(self, msg: JsonRpcMessage) -> None:
+        """Record a background launch the harness reports on this frame, if any."""
+        params = msg.params if isinstance(msg.params, dict) else {}
+        if self._background_launches.note(params.get("update"), time.monotonic()):
+            logger.info(
+                "ACP: harness launched background work for this session: %s",
+                self._background_launches.describe(),
+            )
+
+    def background_launch(self) -> tuple[float, str] | None:
+        """``(seconds since, description)`` of this session's newest background
+        launch, or ``None`` when its harness reported none (see LLMProvider)."""
+        age = self._background_launches.age(time.monotonic())
+        if age is None:
+            return None
+        return age, self._background_launches.describe()
+
     def has_active_turn(self) -> bool:
         """True if a prompt is in flight AND has not yet been cancelled.
 
@@ -11366,7 +11777,12 @@ class AcpClient:
         before the agent acknowledges the cancel. Callers that need to force
         a kill regardless of cancel state should skip this check.
         """
-        return not self._cancelled and not self._turn_done.is_set() and self._is_process_alive()
+        return (
+            not self._cancelled
+            and not self._turn_done.is_set()
+            and self._is_process_alive()
+            and not getattr(self, "_stdin_stalled", False)
+        )
 
     def has_unfinished_turn(self) -> bool:
         """True if the native turn has NOT reached its done boundary and the
@@ -11437,6 +11853,7 @@ class AcpClient:
                 await self._reject_unknown_server_request(msg)
             elif action == "update":
                 self._track_usage_update(msg)
+                self._note_background_launch(msg)
                 # See send_message_stream: settle the codex compaction for the
                 # context counts, drop the event this API cannot return.
                 self._codex_compaction_event(msg)
@@ -13395,9 +13812,10 @@ class AcpClient:
 #   ``kiro_crew.acp.client.<name>`` reaches the owner's own callers. A forwarded name
 #   is absent from this module's namespace on purpose -- a binding here would
 #   shadow the owner for every later read -- and this module's code reads it as
-#   ``<owner>.<name>``. An import only moved code reads, and that a test reads or
-#   patches through this module, is forwarded to the owner that reads it, for the
-#   same reason; an import nothing reaches through this module is not re-exported.
+#   ``<owner>.<name>``. A public package import only moved code reads is forwarded to
+#   the owner that reads it, for the same reason, so a test that reads or patches it
+#   through this module reaches that reader; a standard-library or typing import only
+#   moved code reads is not re-exported.
 # * The modules the moved process-tree helpers probe with (``platform_compat``,
 #   ``sys``, ``Path``, ``subprocess_mod``) stay bound here. Each helper listed in the
 #   facade test's ``_SEAM_IMPORTS`` imports them from this module when it runs, so a
@@ -13413,6 +13831,7 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "OversizeLineUnrecoverable",
         "_drain_oversize_line",
         "_RESPONSE_WRITE_BOUND_SECS",
+        "_RESPONSE_WRITE_MIN_PROGRESS_BYTES",
         "_RESPONSE_WRITE_UNOBSERVABLE_BOUND_SECS",
         "_is_proactor_loop",
         "_level_is_progress_signal",
@@ -13479,10 +13898,17 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "_rejected_model_from_error",
         "corroborate_launcher_refusal",
         "is_credential_propagation_delay",
+        "ACP_BACKENDS_HOST_AUTH_CALLBACK",
+        "LAUNCHER_EXIT_PREFIXES",
+        "SANDBOX_LAYER_CREW",
+        "SANDBOX_LAYER_HARNESS",
+        "launcher_refusal",
+        "sandbox_init_remediation",
     ),
     "kiro_crew.acp.runtime_models": (
         "advertised_model_ids",
         "resolve_pin_spelling",
+        "resolve_pin_spelling_on",
         "catalog_row_would_drop",
         "resolve_usable_model",
         "_MODEL_SUBSTITUTION_ADVISORY_RE",
@@ -13583,6 +14009,7 @@ if TYPE_CHECKING:  # the forwarded names, visible to type checkers and IDEs
         advertised_model_ids,
         catalog_row_would_drop,
         resolve_pin_spelling,
+        resolve_pin_spelling_on,
         resolve_usable_model,
     )
     from kiro_crew.acp.runtime_process_tree import (  # noqa: F401
@@ -13625,6 +14052,8 @@ if TYPE_CHECKING:  # the forwarded names, visible to type checkers and IDEs
         _RE_THROTTLE_NAMED,
         _RE_TRAILING_REQ_ID,
         _RE_USAGE_LIMIT,
+        ACP_BACKENDS_HOST_AUTH_CALLBACK,
+        LAUNCHER_EXIT_PREFIXES,
         PROVIDER_ERROR_AUTH,
         PROVIDER_ERROR_CONNECTION,
         PROVIDER_ERROR_CREDENTIAL_PROPAGATION,
@@ -13635,6 +14064,8 @@ if TYPE_CHECKING:  # the forwarded names, visible to type checkers and IDEs
         PROVIDER_ERROR_THROTTLE,
         PROVIDER_ERROR_UNKNOWN,
         PROVIDER_ERROR_USAGE_LIMIT,
+        SANDBOX_LAYER_CREW,
+        SANDBOX_LAYER_HARNESS,
         AcpPermissionNeeded,
         AcpPromptBusy,
         AcpRegistrationRateLimited,
@@ -13652,11 +14083,14 @@ if TYPE_CHECKING:  # the forwarded names, visible to type checkers and IDEs
         is_auth_failure_output,
         is_credential_propagation_delay,
         is_registration_throttle_output,
+        launcher_refusal,
         sandbox_init_failure_for_runtime,
+        sandbox_init_remediation,
     )
     from kiro_crew.acp.transport_framing import (  # noqa: F401
         _OVERSIZE_DRAIN_MAX_BYTES,
         _RESPONSE_WRITE_BOUND_SECS,
+        _RESPONSE_WRITE_MIN_PROGRESS_BYTES,
         _RESPONSE_WRITE_UNOBSERVABLE_BOUND_SECS,
         OversizeLineUnrecoverable,
         _drain_oversize_line,

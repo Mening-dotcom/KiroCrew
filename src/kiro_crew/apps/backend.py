@@ -134,10 +134,27 @@ def _resolve_nvm_path(binary_name: str) -> str | None:
 
     Sources ~/.nvm/nvm.sh to find the nvm-managed node path, then resolves
     the requested binary relative to that directory.
+
+    POSIX only. nvm (nvm-sh) is a POSIX-shell tool, so on Windows this returns
+    None before touching the filesystem or spawning anything: the bare name
+    ``bash`` there resolves through ``CreateProcess`` to
+    ``C:\\Windows\\System32\\bash.exe`` -- the WSL launcher -- which cannot
+    source a Windows path and stalls the backend start for up to the 10 s
+    timeout (or opens WSL's distribution-install prompt on a host with no
+    distro). nvm-windows puts its ``node``/``npm`` shims on PATH, which the
+    callers already fall through to via ``shutil.which``.
     """
+    if platform_compat.IS_WINDOWS:
+        return None
     nvm_dir = os.environ.get("NVM_DIR", os.path.expanduser("~/.nvm"))
     nvm_sh = os.path.join(nvm_dir, "nvm.sh")
+    # This resolver sources a POSIX shell script (nvm.sh). On Windows the branch
+    # normally never runs — nvm.sh is absent, so it exits at the guard below —
+    # and nothing in the log said whether it was reached or which arm it took.
+    # Each outcome now names itself so a Windows log shows the branch was skipped
+    # rather than leaving its absence to inference.
     if not os.path.isfile(nvm_sh):
+        logger.debug("nvm resolver: no nvm.sh at %r; skipping nvm branch", nvm_sh)
         return None
     try:
         result = subprocess.run(
@@ -150,10 +167,18 @@ def _resolve_nvm_path(binary_name: str) -> str | None:
             nvm_node = result.stdout.strip()
             target = os.path.join(os.path.dirname(nvm_node), binary_name)
             if os.path.isfile(target):
+                logger.debug("nvm resolver: resolved %r to %r", binary_name, target)
                 return target
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    return None
+            logger.debug("nvm resolver: nvm node at %r has no sibling %r", nvm_node, binary_name)
+            return None
+        logger.debug(
+            "nvm resolver: `nvm which current` returned no path (exit %s)",
+            result.returncode,
+        )
+        return None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("nvm resolver: shell invocation failed: %s", type(exc).__name__)
+        return None
 
 
 def _find_node_binary() -> str | None:
@@ -853,7 +878,9 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
                 app_name,
             )
             return None
-        cmd = [node_bin, entry_str]
+        # The resolved path: Node's ESM main-module guard compares the realpath-resolved
+        # import.meta.url with argv[1], so a symlinked path makes it silently never fire.
+        cmd = [node_bin, str(entry.resolve())]
         cwd = str(root)
         # Pass PORT as env var — Node.js apps typically read process.env.PORT
         env["NODE_ENV"] = "production"
@@ -1126,6 +1153,13 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         if not carveout_shadowed_by_foreign_mask(_cache_target):
             _visible = _visible + (_cache_target,)
     sandboxed_cmd, cleanup_path = wrap_argv(cmd, mode="standard", extra_visible_dirs=_visible)
+    # On Linux a non-null cleanup path is the namespace launcher script this process
+    # generated, whose main() forks once: the Popen root waits for the server child.
+    # IS_LINUX excludes the macOS seatbelt profile. A no-op wrap returns None, so an
+    # app's argv can never set this flag. Compute it before cgroup_scope_argv, which
+    # execs without adding a fork. A future Linux tier writing a cleanup artifact
+    # without forking must revisit this predicate.
+    _forking_sandbox_launcher = platform_compat.IS_LINUX and cleanup_path is not None
     if _cache_visible and list(sandboxed_cmd) == list(cmd):
         # The wrap was a no-op, so this host has no OS confinement at all: no sandbox backend,
         # or agent.sandbox='off' with the sandbox_allow_no_isolation opt-in. Said once,
@@ -1260,6 +1294,7 @@ def _start_app_backend_body(app_name: str, manifest: Any) -> AppProcess | None:
         gateway_started=True,
         admitted_builtin=_admitted_builtin,
         spawn_instance=spawn_instance,
+        forking_sandbox_launcher=_forking_sandbox_launcher,
     )
 
     retired = False
@@ -1449,15 +1484,12 @@ if _typing.TYPE_CHECKING:
     from kiro_crew.apps.backend_runtime.pidfile import (  # noqa: F401
         _forget_app_pid,
         _forget_app_pid_if,
-        _load_pidfile,
         _pidfile_lock,
         _pidfile_path,
         _read_pidfile,
-        _unreadable_condition,
         _write_pidfile,
         atomic_write,
         json,
-        recorded_backend_pids,
         retire_windows_app_tracking,
     )
     from kiro_crew.apps.backend_runtime.ports import (  # noqa: F401
@@ -1606,6 +1638,7 @@ if _typing.TYPE_CHECKING:
         health_reconcile_lock,
         list_app_processes,
         re,
+        running_spawned_backend_pids,
         spawned_backend_names,
         threading,
     )

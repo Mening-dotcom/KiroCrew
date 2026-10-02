@@ -328,8 +328,10 @@ def test_the_transports_share_one_copy_of_each_moved_helper() -> None:
     """runtime.py imports the shared helpers from their owners, not a second copy."""
     for name in (
         "write_response_frame_bounded",
+        "write_request_frame_bounded",
         "write_notification_best_effort",
         "response_write_window_secs",
+        "_stall_window_phrase",
         "_drain_oversize_line",
         "OversizeLineUnrecoverable",
         "_RESPONSE_WRITE_BOUND_SECS",
@@ -509,7 +511,13 @@ class _ReachedModule:
 
 
 _POSIX = SimpleNamespace(IS_WINDOWS=False)
-_POSIX_PS = SimpleNamespace(IS_WINDOWS=False, trusted_system_bin=lambda _name: "/bin/ps")
+# ``proc_phys_footprint_bytes_for_pid`` answers None so the macOS RSS helpers
+# reach their ``ps`` fallback, the branch these rows steer onto.
+_POSIX_PS = SimpleNamespace(
+    IS_WINDOWS=False,
+    trusted_system_bin=lambda _name: "/bin/ps",
+    proc_phys_footprint_bytes_for_pid=lambda _pid: None,
+)
 _LINUX = SimpleNamespace(platform="linux")
 _DARWIN = SimpleNamespace(platform="darwin")
 

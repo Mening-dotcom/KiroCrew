@@ -91,7 +91,7 @@ Usage: <credits> credits · <elapsed>
   The agent-name parenthetical is present only when the sub-agent ran under a named
   agent.
 - The detail is the trimmed result when it fits. When the completion copy dropped
-  content, or in orchestrator mode, it is a summary plus a `result_path` pointer, so
+  content, it is a summary plus a `result_path` pointer, so
   the parent reads the full transcript on demand (`read`, `grep`, `spawn_status`)
   instead of re-running the sub-agent.
 - Usage is cumulative across all attempted turns in the run, including billed
@@ -379,6 +379,69 @@ fails when a site is missing from the enumeration, a host deny is not preceded
 by the steer, a user rejection is, or a mixed site's steer is not under its host
 guard.
 
+**The prompt optimizer, the task-refine turn and the unattended auto-improvement
+runner steer the same notice.** `dashboard/handlers/optimizer.py` rewrites one
+prompt in a side-session that runs no tools; its one reject is `surface_policy`,
+the notice saying the optimizer permits nothing. `dashboard/handlers/taskrunner.py`
+(`_run_refine`) drafts a task spec with text only; its one reject is
+`surface_policy` the same way. Both write the denied attempt as a SEL row
+FIRST (`source` `optimizer` / `taskrunner_refine`), then steer, then reject. The
+unattended auto-improvement runner
+(`apps/builtins/auto_improvement/spine/agent_runner.py`) denies through ONE
+funnel, `SessionAgentRunner._reject`, whose REQUIRED `cause=` keyword is the
+per-site verdict; the SEL row is written first, its `error` naming which gate
+refused (`governance_deny`, `governance_hook_unavailable`, `shell_denylist`,
+`not_in_allowed_tools`). No person is attached to this surface, so every deny
+is a host deny. Per site:
+
+- the platform governance gate's `deny` -- `policy`, with the hook's own reason;
+  the same gate's fail-closed arm, when the hook LAYER raised -- `hook_error`
+  (nothing judged the call). The gate names the cause itself
+  (`_GovernanceDeny.cause`) rather than leaving the funnel to read it off the
+  reason's wording.
+- the app-local shell denylist (`shell_command_refusal`) -- `policy`, with the
+  denylist's reason.
+- the caller's `allowed_tools` refusing a tool it does not list (or an empty
+  list refusing every tool) -- `surface_policy`; the notice names what the run
+  permits, never a sanctioned alternative.
+- `_approve`'s audit-or-deny arm, when the SEL row an unattended approval
+  requires cannot be written -- the new `audit_unavailable` cause: the host
+  could not record the call, so it refused rather than run it unaudited;
+  nothing judged the action, and one retry is reasonable. Distinct from
+  `hook_error`, which would send the model looking at a gate that never ran.
+
+`test_handlers_auto_improvement_deny_notice.py` enumerates every `reject_tool(`
+in the three modules and every funnel call with its verdict, pins the funnel's
+order and required keyword, and drives each deny with a provider double
+recording steer/reject order.
+
+**The task runner steers the same notice.** `task_executor` answers the
+permission requests of every autonomous-project and cron-launched step turn
+through ONE funnel, `_reject_and_log`, whose REQUIRED `cause=` keyword is the
+per-site verdict: a `DENY_CAUSE_*` name steers `llm_helpers._steer_host_deny`
+before the reject, and `None` is the explicit "not a host deny" that stays bare,
+so a site added later has to write one or the other. The SEL row is written
+first at every site. Per site:
+
+- the agent spec's PreToolUse gate blocked the call (a delivered deny, or a gate
+  with no verdict — an unreadable spec, a hook that could not run) — `policy`,
+  with the gate's reason, as the chat runner steers the same `BLOCKED:` strings;
+  the stored hooks' `deny` — `policy`, with the hook's reason.
+- the unattended run refusing a call nothing trusts (no approval handler, no
+  hook auto-approve) — `surface_policy`; the notice says what the surface
+  permits (tools in `hooks.auto_approve_tools`) and offers no remediation.
+- the interactive handler's no (`interactive_rejected`) and the reject that
+  precedes a mid-stream compaction send no notice: the first is the person's
+  verdict, the second tears the turn down to re-run it, so there is no
+  continuing turn for a notice to correct.
+
+`task_planner.decompose` (the decomposition turn) denies inline, audit → steer →
+reject: the stored hooks' `deny` — `policy`; the deny-by-default when the phase
+has no hook store to gate a call — `surface_policy` (the planning phase runs no
+tools). `test_taskrunner_deny_notice.py` enumerates both modules' sites with
+their verdicts, pins the funnel's order and required keyword, and drives each
+deny with a provider double recording steer/reject order.
+
 The recovery classification for the last two rows of the marker table above
 is **structural**: the queue entry
 carries `kind == "synthetic_recovery"` (`SYNTHETIC_RECOVERY_KIND`), set at insert
@@ -577,8 +640,9 @@ text back toward the session, but it **cannot inject a turn**. The path is:
    (truncated to 64 chars), the payload must be a plain object, and the composed
    text is capped. It formats `[UI] <action>: <JSON payload>` (or `[UI] <action>`
    with no payload) and dispatches an internal `mc-widget-send` event.
-3. `ChatPage.tsx` **pre-fills the composer** with that text and records it. It
-   never auto-submits.
+3. `ChatPage.tsx` **pre-fills the composer** with that text and records it
+   (the `mc-widget-send` listener in `useAutoSendIntake`,
+   `website/src/pages/chat/page/launchIntake.ts`). It never auto-submits.
 
 The iframe's own `isTrusted` click check is NOT the trust boundary and must not be
 treated as authoritative: LLM-emitted `<script>` in the same document can
@@ -587,11 +651,9 @@ the parent requires an explicit human gesture, so a widget action can never beco
 a user-role turn on its own.
 
 When the user does send the pre-filled text, the turn is tagged
-`meta.origin = 'widget'`. The backend then refuses the one chat-text-reachable
-privilege escalation for such turns: orchestrator `go` / `go all` auto-run is
-denied (audited as `auto_run_denied`) and the text falls through to a normal, fully
-gated turn. Mode changes and tool approvals live on separate endpoints an iframe
-cannot reach.
+`meta.origin = 'widget'` and runs as a normal, fully gated turn. No chat text
+grants a privilege: mode changes and tool approvals live on separate endpoints
+an iframe cannot reach.
 
 So there is no `[Widget action event]` envelope. What reaches the session is an
 ordinary user message beginning `[UI] `, sent by a human, carrying an origin tag.

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from kiro_crew.agent_spec_format import iter_agent_spec_files
 from kiro_crew.kiro_prerequisite import pre_spawn_identity, spawn_pid, stamp_spawn_identity
+from kiro_crew.messaging.queue_drain import entry_channel, wake_other_drains
 from kiro_crew.metrics.sessions import (
     END_REASON_EVICTED,
     discard_session_start,
@@ -33,6 +34,7 @@ from kiro_crew.runtime_ownership import (
     acquire_session_lease,
     release_session_lease,
 )
+from kiro_crew.session_lifecycle import adopt_parked_queue
 from kiro_crew.validation import bounded_session_id
 
 if TYPE_CHECKING:
@@ -158,7 +160,14 @@ class AllocationDeps:
     #: would make the pool's scope rule the only one a test cannot swap.
     model_pin_applies: Callable[[str, str, Sequence[str] | None], bool]
     provider_model_namespace: Callable[[LLMProvider], str]
-    resolve_pin_spelling: Callable[[str, list[str]], str]
+    #: The pin fold, taking the PROVIDER as well so the answer can be the one
+    #: that harness's wire takes: a ``<model>[<effort>]`` pair-id backend
+    #: advertises rows its own ``model`` option refuses, and resolves a bare pin
+    #: to the bare id that option does accept. Reading the backend HERE rather
+    #: than passing a pre-resolved id keeps this site answering from the same
+    #: fold the cold start uses, which is the property this dependency exists
+    #: to hold.
+    resolve_pin_spelling: Callable[[str, list[str], LLMProvider], str]
     to_provider_id: Callable[[str, str], str]
     to_acp_id: Callable[[str], str]
     inc_session_created: Callable[[], None]
@@ -931,6 +940,34 @@ class SessionAllocationService:
             existing = self._subagent_runtimes.get(parent_session_key)
             if existing is not None and existing.is_alive():
                 return existing
+            if existing is not None:
+                # A runtime marked dead on a stdin stall still has a live child
+                # that may read the frames buffered in its pipe; it is killed
+                # BEFORE its replacement starts, so a retried step never runs
+                # beside it (the reap ``get_subagent_runtime`` does too).
+                try:
+                    await existing.kill(reason="reaping a dead task-run runtime before respawn")
+                except Exception:
+                    self._deps.logger.debug(
+                        "run runtime: dead runtime kill failed for %s",
+                        parent_session_key,
+                        exc_info=True,
+                    )
+                reader_probe = getattr(existing, "stdin_reader_may_live", None)
+                if (
+                    getattr(existing, "stdin_stall_death", False) is True
+                    and callable(reader_probe)
+                    and await asyncio.to_thread(reader_probe) is True
+                ):
+                    # A process that can still read the stalled pipe survived
+                    # the kill (a signal that did not land, or a launcher child
+                    # that outlived its parent): a replacement now would run
+                    # beside it. The step's bounded retry ladder runs this
+                    # bootstrap, and so this kill, again on its next attempt.
+                    raise RuntimeError(
+                        "a stalled task-run runtime could not be confirmed dead; "
+                        "not starting a replacement beside it"
+                    )
             provider = owner._provider_factory(parent_session_key, agent=agent, cwd=cwd)
             pre_spawn = await pre_spawn_identity(getattr(owner, "spawn_identity_reader", None))
             await provider.start()
@@ -1205,6 +1242,10 @@ class SessionAllocationService:
                         self.advance_ownership_generation(key)
                     await discard_session_start(key)
                     raise
+                # After the registration has committed: the rollback above is
+                # behind us, so a cancelled start cannot take parked entries
+                # down with the session it removes.
+                adopt_parked_queue(session, key)
         if duplicate is not None:
             # ``current`` holds this key and runs in the directory this
             # provider derived from it; the loser must not reclaim it.
@@ -1494,6 +1535,27 @@ class SessionAllocationService:
                     "new occupant's",
                     key,
                 )
+            else:
+                # A release marks the end of a live turn, not the start of
+                # idleness: refresh liveness so the idle sweep measures from
+                # when the session went quiet rather than when it was
+                # acquired. A run that never returns still goes stale and is
+                # reaped; a run working between tasks is not mistaken for one.
+                session.last_used = time.monotonic()
+            if getattr(session, "adopted_parked", False):
+                # The claim that just ended adopted entries a forced stop parked
+                # (``adopt_parked_queue``). Their channels' drains are woken
+                # NOW, after the lease is free, or the entries sit on the queue
+                # until an unrelated message happens to start a turn. Off this
+                # synchronous call, as ``wake_other_drains`` requires.
+                session.adopted_parked = False
+                channels = [entry_channel(e[2]) for e in session.queue]
+                if any(channels):
+                    task = asyncio.ensure_future(
+                        wake_other_drains(waker="", session_key=key, channels=channels)
+                    )
+                    self._owner._background_tasks.add(task)
+                    task.add_done_callback(self._owner._background_tasks.discard)
 
     async def _safe_cleanup(self, provider: LLMProvider, session_id: str) -> None:
         try:
@@ -1572,9 +1634,55 @@ class SessionAllocationService:
             return True
         return False
 
-    def clear_queue(self, key: str, owned_by: Callable[[dict], bool] | None = None) -> None:
+    def detach_queue(self, key: str) -> tuple[Any, ...]:
+        """Take every queued entry OUT of the live queue, keeping its files.
+
+        For a Stop that must neither run nor lose what was queued when it was
+        pressed: taken before the first await, so an end-of-turn drain during the
+        stop finds nothing to start; then either ``clear_queue(only=...)`` drops
+        it (the stop went through) or ``restore_queue`` puts it back (declined).
+        """
+        session = self._sessions.get(self._owner._fold_key(key))
+        if session is None:
+            return ()
+        taken = tuple(session.queue)
+        session.queue.clear()
+        return taken
+
+    def restore_queue(self, key: str, entries: tuple[Any, ...]) -> None:
+        """Put ``detach_queue``'s entries back at the head, ahead of newer arrivals."""
+        session = self._sessions.get(self._owner._fold_key(key))
+        if session is None or not entries:
+            return
+        session.queue.extendleft(reversed(entries))
+
+    def clear_queue(
+        self,
+        key: str,
+        owned_by: Callable[[dict], bool] | None = None,
+        *,
+        only: tuple[Any, ...] | None = None,
+    ) -> None:
         key = self._owner._fold_key(key)
         session = self._sessions.get(key)
+        if only is not None:
+            # Identity, not equality: two entries can carry the same text. The
+            # entries need not still be IN the queue -- ``detach_queue`` takes
+            # them out first -- so their files are unlinked from the HANDLES,
+            # before the session guard: a hard stop pops the session between
+            # the detach and this clear, and the detached entries were never on
+            # the popped queue the teardown unlinks.
+            for _, _, kwargs in only:
+                self._deps.unlink_queued_temp_paths(kwargs)
+            if session is None:
+                return
+            wanted = {id(item) for item in only}
+            kept = [item for item in session.queue if id(item) not in wanted]
+            if len(kept) != len(session.queue):
+                session.queue.clear()
+                session.queue.extend(kept)
+            # ``cancelled`` left alone, as on the ``owned_by`` branch below.
+            return
         if session is None:
             return
         if owned_by is None:
@@ -2003,6 +2111,12 @@ class SessionAllocationService:
                 first_turn = session.first_turn
                 if not speculative:
                     session.first_turn = self._deps.first_turn_nothing_armed
+                # A session that registered before a forced stop parked entries
+                # for this key adopted nothing at its registration; the claim
+                # that holds its lease now is the moment they can land. The
+                # release that ends this claim wakes their channels' drains.
+                if adopt_parked_queue(session, key):
+                    session.adopted_parked = True
                 return session.provider, first_turn.is_new, first_turn.resumed
             await owner._evict_stale_session(key, session)
             # Re-enter the claim rather than cold-start in place. The session
@@ -2234,7 +2348,7 @@ class SessionAllocationService:
                                 # runs. A pin absent under either spelling still
                                 # takes the withhold below.
                                 _send_model = self._deps.resolve_pin_spelling(
-                                    switch_model, advertised
+                                    switch_model, advertised, provider
                                 )
                             if not _send_model:
                                 self._deps.logger.warning(
@@ -2524,6 +2638,14 @@ class SessionAllocationService:
                             self.advance_ownership_generation(key)
                         await discard_session_start(key)
                         raise
+                    # After the registration has committed: the rollback above
+                    # is behind us, so a cancelled start cannot take the parked
+                    # entries down with the session it removes. What a
+                    # forced stop parked for this key lands at the queue head;
+                    # the drains for those entries' channels are woken by the
+                    # release that ends this claim (``_wake_adopted_drains``).
+                    if adopt_parked_queue(session, key):
+                        session.adopted_parked = True
                     self._deps.logger.info(
                         "New session: %s agent=%s resumed=%s provider_switch=%s (total=%d)",
                         key,

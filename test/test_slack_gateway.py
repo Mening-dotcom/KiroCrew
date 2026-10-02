@@ -35,6 +35,21 @@ from kiro_crew.slack.gateway import (
 )
 
 
+def _install_effect(effect: str = "install", route: str | None = "git"):
+    """State the install's shape the way the update loop reads it.
+
+    The loop branches on ``auto_update_effect``, not on the check's cached
+    ``can_apply``; a test standing in for a git checkout says so here instead of
+    hoping the real derivation agrees with a fake tree.
+    """
+    from kiro_crew.platform.update_capability import AutoUpdateEffect
+
+    return patch(
+        "kiro_crew.slack.gateway.auto_update_effect",
+        return_value=AutoUpdateEffect(effect, route),
+    )
+
+
 def _make_orchestrator(
     *,
     slack_enabled: bool = False,
@@ -1114,7 +1129,8 @@ class TestCheckForUpdates:
                         "kiro_crew.platform.update_governance.update_required",
                         return_value=False,
                     ):
-                        await orch._check_for_updates()
+                        with _install_effect():
+                            await orch._check_for_updates()
         finally:
             _h._update_info.clear()
             _h._update_info.update(orig)
@@ -1142,7 +1158,8 @@ class TestCheckForUpdates:
                         "kiro_crew.platform.update_governance.update_required",
                         return_value=False,
                     ):
-                        await orch._check_for_updates()
+                        with _install_effect():
+                            await orch._check_for_updates()
         finally:
             _h._update_info.clear()
             _h._update_info.update(orig)
@@ -1174,7 +1191,8 @@ class TestCheckForUpdates:
                 with patch(
                     "kiro_crew.platform.update_governance.update_required", return_value=True
                 ):
-                    await orch._check_for_updates()
+                    with _install_effect("mandatory"):
+                        await orch._check_for_updates()
         finally:
             _h._update_info.clear()
             _h._update_info.update(orig)
@@ -2414,8 +2432,7 @@ class TestInitSubagents:
 
 class TestSubagentDoneStoppedClassification:
     """A user-stopped subagent (error-free record) must never be classified as
-    a successful completion by _subagent_done — not in the announce text and
-    not in the orchestration tracker."""
+    a successful completion by _subagent_done in the announce text."""
 
     def _capture_on_done(self, orch):
         with patch("kiro_crew.slack.handler.is_yolo_mode", return_value=False):
@@ -2488,33 +2505,6 @@ class TestSubagentDoneStoppedClassification:
         assert "partial notes so far" in body
 
     @pytest.mark.asyncio
-    async def test_stopped_agent_records_neither_success_nor_failure(self):
-        """Orchestrator mode: a user stop must not advance orchestration —
-        no record_success (killed work is not done work) and no
-        record_failure (a deliberate stop is not a retryable failure)."""
-        orch = _make_orchestrator()
-        orch.sessions = _mock_sessions()
-        orch.ctx_builder = _mock_context_builder()
-        orch.ctx_builder.hooks = MagicMock()
-        orch.dashboard_state = _mock_dashboard_state()
-
-        tracker = MagicMock()
-        tracker.stopped = False
-        slot = MagicMock()
-        slot.mode = "orchestrator"
-        slot._orch_tracker = tracker
-        slot.running = False
-        orch.dashboard_state.get_slot = MagicMock(return_value=slot)
-        on_done = self._capture_on_done(orch)
-        # Injection path launches _run_chat on the idle slot — stub it out.
-        with patch("kiro_crew.slack.gateway._run_chat", new_callable=AsyncMock):
-            await on_done(self._stopped_info())
-            await asyncio.sleep(0)
-
-        tracker.record_success.assert_not_called()
-        tracker.record_failure.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_boundary_cancelled_completion_is_not_routed(self):
         """A completion that lost stage authority never reaches its parent."""
         orch = _make_orchestrator()
@@ -2523,12 +2513,8 @@ class TestSubagentDoneStoppedClassification:
         orch.ctx_builder.hooks = MagicMock()
         orch.dashboard_state = _mock_dashboard_state()
 
-        tracker = MagicMock()
-        tracker.stopped = False
         slot = MagicMock()
         slot.key = "gone"
-        slot.mode = "orchestrator"
-        slot._orch_tracker = tracker
         slot.running = False
         slot.task = None
         slot._subagent_deliveries_inflight = 0
@@ -2563,12 +2549,8 @@ class TestSubagentDoneStoppedClassification:
         orch.dashboard_state = _mock_dashboard_state()
 
         owner = "owner-a"
-        tracker = MagicMock()
-        tracker.stopped = False
         slot = MagicMock()
         slot.key = "gone"
-        slot.mode = "orchestrator"
-        slot._orch_tracker = tracker
         slot.running = False
         slot.task = None
         slot._in_stage_execution = False
@@ -2625,9 +2607,19 @@ class TestSubagentFinalSummaryDirective:
                 orch._init_subagents()
                 return mock_sm.call_args.kwargs["on_done"]
 
-    async def _done_slot(self, running_agents_for_return):
-        """Fire the on_done callback through a chat-mode dashboard slot and return
-        the slot so the caller can inspect _pending_synthesis."""
+    async def _done_slot(
+        self,
+        running_agents_for_return,
+        queued: int = 0,
+        in_memory: bool = False,
+        probe_error: bool = False,
+    ):
+        """Fire the on_done callback through a dashboard slot and return the slot
+        so the caller can inspect _pending_synthesis.
+
+        *queued* is the parent's store count of children the spawn gate still
+        holds; the arm must never read it (the fire gate does). *in_memory* is
+        the manager's in-memory pending work for the parent."""
         from kiro_crew.subagent import SubagentInfo
 
         orch = _make_orchestrator()
@@ -2638,14 +2630,21 @@ class TestSubagentFinalSummaryDirective:
         slot = MagicMock()
         slot.running = False
         slot.key = "s1"
-        slot.mode = "chat"  # non-orchestrator → _is_orchestrator is False
         slot.task = None
         slot._pending_synthesis = False  # explicit start (not a MagicMock auto-attr)
         slot._subagent_deliveries_inflight = 0  # real int so the gateway counter works
+        slot._subagents_inline_collected = set()
         ds.get_slot = MagicMock(return_value=slot)
         orch.dashboard_state = ds
         on_done = self._capture_on_done(orch)
         orch.subagent_mgr.running_agents_for = MagicMock(return_value=running_agents_for_return)
+        orch.subagent_mgr.queued_count_for_async = AsyncMock(return_value=queued)
+        orch.subagent_mgr.has_in_memory_pending_work_for = (
+            MagicMock(side_effect=RuntimeError("probe gone"))
+            if probe_error
+            else MagicMock(return_value=in_memory)
+        )
+        self.mgr = orch.subagent_mgr
 
         info = SubagentInfo(id="a1", task="do X", parent_session_key="dashboard:s1")
         with patch("kiro_crew.slack.gateway._run_chat", new=AsyncMock()):
@@ -2666,6 +2665,36 @@ class TestSubagentFinalSummaryDirective:
         """Another sub-agent still running → synthesis is not armed yet."""
         slot = await self._done_slot([{"id": "a2"}])
         assert slot._pending_synthesis is False
+
+    @pytest.mark.asyncio
+    async def test_the_arm_never_reads_the_task_store(self):
+        """A sibling only the store holds is the FIRE gate's to see: the arm sits
+        on the delivery path and stays in memory, so it does not wait on the
+        store's writer (and cannot be overtaken mid-await by a closed tab or a
+        sibling registering)."""
+        slot = await self._done_slot([], queued=1)
+        assert slot._pending_synthesis is True
+        self.mgr.queued_count_for_async.assert_not_awaited()
+        assert slot._subagent_deliveries_inflight == 0
+
+    @pytest.mark.asyncio
+    async def test_in_memory_pending_work_keeps_synthesis_disarmed(self):
+        """A sibling in the dispatch window, one whose report still waits on its
+        teardown, or a live follow-up watcher: not armed. The finishing child's
+        own live task is excluded, or it would always block itself."""
+        slot = await self._done_slot([], in_memory=True)
+        assert slot._pending_synthesis is False
+        self.mgr.has_in_memory_pending_work_for.assert_called_once_with(
+            "dashboard:s1", exclude_id="a1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failing_in_memory_probe_keeps_synthesis_disarmed(self):
+        """A probe that raises is unknown pending work, not none."""
+        assert (await self._done_slot([]))._pending_synthesis is True  # control
+        slot = await self._done_slot([], probe_error=True)
+        assert slot._pending_synthesis is False
+        assert slot._subagent_deliveries_inflight == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -6397,107 +6426,6 @@ class TestInjectWithRetry:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Tests: Orchestration guard in _subagent_done
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestOrchestrationGuard:
-    """Orchestration tracker in _subagent_done."""
-
-    def _setup(self):
-        orch = _make_orchestrator()
-        orch.sessions = _mock_sessions()
-        orch.ctx_builder = _mock_context_builder()
-        orch.ctx_builder.hooks = MagicMock()
-        orch.ctx_builder.build_message = MagicMock(return_value=("msg", None))
-        orch.dashboard_state = _mock_dashboard_state()
-        with patch("kiro_crew.slack.handler.is_yolo_mode", return_value=False):
-            with patch("kiro_crew.slack.gateway.SubagentManager") as mock_sm:
-                mock_sm_inst = MagicMock()
-                mock_sm_inst.start_reaper = MagicMock()
-                mock_sm_inst.running = []
-                mock_sm_inst.queued_count_for = MagicMock(return_value=0)
-                mock_sm_inst.queued_count_for_async = AsyncMock(return_value=0)
-                mock_sm_inst.has_pending_work_for = MagicMock(return_value=False)
-                mock_sm_inst.has_pending_work_for_async = AsyncMock(return_value=False)
-                mock_sm_inst.running_agents_for = MagicMock(return_value=[])
-                mock_sm_inst.get = MagicMock(return_value=None)
-                mock_sm_inst.notify_injection_failed = MagicMock()
-                mock_sm.return_value = mock_sm_inst
-                orch._init_subagents()
-        return orch, mock_sm
-
-    @pytest.mark.asyncio
-    async def test_orchestrator_mode_failure_guard(self):
-        """Orchestrator mode tracks failures."""
-        orch, mock_sm = self._setup()
-        on_done = mock_sm.call_args[1]["on_done"]
-
-        # Create a slot in orchestrator mode
-        slot = MagicMock()
-        slot.running = False
-        slot.task = None
-        slot.key = "orch-slot"
-        slot.mode = "orchestrator"
-        slot._recovery_chat_triggered = False
-        slot._pending_subagent_failures = []
-        slot._orch_tracker = None
-        orch.dashboard_state.get_slot = MagicMock(return_value=slot)
-
-        info = MagicMock()
-        info.id = "agent-orch"
-        info.parent_session_key = "dashboard:orch-slot"
-        info.error = "task failed"
-        info.result = None
-        info.result_path = ""
-        info.task = "orchestrated task"
-        info.agent = "coder"
-        info.silent = False
-        info.elapsed = 5.0
-        info.started = 0.0
-
-        with patch("kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock):
-            await on_done(info)
-
-        # Tracker should have been created
-        assert slot._orch_tracker is not None
-
-    @pytest.mark.asyncio
-    async def test_orchestrator_result_with_path(self):
-        """Orchestrator mode with result_path shows summary."""
-        orch, mock_sm = self._setup()
-        on_done = mock_sm.call_args[1]["on_done"]
-
-        slot = MagicMock()
-        slot.running = False
-        slot.task = None
-        slot.key = "orch-slot2"
-        slot.mode = "orchestrator"
-        slot._recovery_chat_triggered = False
-        slot._pending_subagent_failures = []
-        slot._orch_tracker = None
-        orch.dashboard_state.get_slot = MagicMock(return_value=slot)
-
-        info = MagicMock()
-        info.id = "agent-orch2"
-        info.parent_session_key = "dashboard:orch-slot2"
-        info.error = None
-        info.result = "word " * 300  # long result
-        info.result_path = "/tmp/result.txt"
-        info.task = "big task"
-        info.agent = ""
-        info.silent = False
-        info.elapsed = 10.0
-        info.started = 0.0
-
-        with patch("kiro_crew.dashboard.chat_runner._run_chat", new_callable=AsyncMock):
-            with patch("os.path.getsize", return_value=5000):
-                await on_done(info)
-
-        orch.dashboard_state.notify.assert_not_called()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # Tests: _init_autonudge _fire callback
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -9366,7 +9294,8 @@ class TestMandatoryUpdateOnWheelInstall:
         wheel_apply_called = AsyncMock()
         monkeypatch.setattr(orch, "_auto_apply_wheel_update", wheel_apply_called)
 
-        await orch._check_for_updates()
+        with _install_effect("mandatory", "wheel"):
+            await orch._check_for_updates()
 
         # Must NOT attempt the git apply on a non-git tree.
         apply_called.assert_not_awaited()
@@ -9524,7 +9453,8 @@ class TestMandatoryUpdateOnWheelInstall:
         apply_called = AsyncMock()
         monkeypatch.setattr(orch, "_auto_apply_update", apply_called)
 
-        await orch._check_for_updates()
+        with _install_effect("mandatory"):
+            await orch._check_for_updates()
         apply_called.assert_awaited_once()
 
 

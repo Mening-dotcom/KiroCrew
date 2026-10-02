@@ -17,9 +17,12 @@ call it as an attribute of that module, so the patch reaches every caller.
 from __future__ import annotations
 
 import asyncio
+import base64
+import csv
 import difflib
 import functools
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -51,6 +54,7 @@ from kiro_crew.atomic_write import (  # noqa: F401
 from kiro_crew.config import live
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.cron import referenced_skill_names  # noqa: F401
+from kiro_crew.dep_sync import normalize as normalize_distribution_name
 from kiro_crew.frontmatter import SKILL_LOADER, parse_frontmatter
 from kiro_crew.hooks import (  # noqa: F401
     FileTooLargeError,
@@ -69,6 +73,7 @@ from kiro_crew.platform_compat import (  # noqa: F401
     rmtree_force,
 )
 from kiro_crew.project_scope import project_scope_satisfied
+from kiro_crew.release_channel import _DISTRIBUTION_NAME
 from kiro_crew.security import (
     is_sensitive_path,
     is_sensitive_resolved_path,
@@ -109,7 +114,7 @@ from kiro_crew.skill_runtime.read_credit import (  # noqa: F401
     _shell_segments_reading_content,
     _tool_read_path_candidates,
 )
-from kiro_crew.skill_runtime.search import _body_term_hits  # noqa: F401
+from kiro_crew.skill_runtime.search import SkillSearchReport, _body_term_hits  # noqa: F401
 from kiro_crew.skill_search_index import (  # noqa: F401
     SKILL_SEARCH_INDEX_FILENAME,
     SkillSearchIndex,
@@ -288,6 +293,124 @@ _PROJECT_SKILL_MAX_DEPTH = 64
 # skipped rather than loaded whole.
 PROJECT_SKILL_BODY_CAP = 24_750
 PINNED_SKILL_BODIES_CAP = 99_000
+# What one exact-key read may deliver, in UTF-8 bytes. A tool response is cut at
+# ``validation.MAX_RESPONSE_LEN`` characters and the cut takes the TAIL, so a body
+# that does not fit under that ceiling with its framing would lose its closing
+# instructions silently. A larger body is therefore refused whole and served in
+# whole-line pages that each fit; the bound is a context budget, not a file limit,
+# so it neither grows for a large skill nor shrinks what is on disk. The pinning
+# path's ``PINNED_SKILL_BODIES_CAP`` above is the same number; if this capacity
+# is ever revisited, the two move together.
+SKILL_READ_CAPACITY = 99_000
+
+# Why an exact-key read delivered no body. Three values because the caller acts
+# differently on each: a key outside the scope is a lookup to correct, an
+# unreadable file is the operator's to repair, and a body over the capacity is
+# read again in pages. One sentence naming all three sends the reader after the
+# wrong one.
+SKILL_READ_OUTSIDE_SCOPE = "outside_scope"
+SKILL_READ_UNREADABLE = "unreadable"
+SKILL_READ_OVER_CAPACITY = "over_capacity"
+
+
+class SkillBodyPage(NamedTuple):
+    """Whole lines of one skill body, never more than the read's capacity in UTF-8 bytes."""
+
+    content: str
+    line_offset: int
+    line_count: int
+    total_lines: int
+    total_bytes: int
+    next_offset: int | None
+
+
+class SkillReadRefusal(NamedTuple):
+    """Why an exact-key read delivered nothing, with the numbers its message needs."""
+
+    reason: str
+    capacity: int
+    size_bytes: int | None = None  # the whole body, when the read measured it
+    confined: bool = False  # ``capacity`` is the confined project body cap
+    line: int | None = None  # over_capacity: the one line that fits no page
+
+
+class _ExactRead(NamedTuple):
+    """One pass of the exact-key resolution chain, with its refusal classified.
+
+    ``refusal`` is one of the three read reasons when ``content`` is ``None`` and
+    empty when a body was delivered.
+    """
+
+    content: str | None
+    refusal: str
+    confined: bool
+
+
+def _page_skill_body(
+    body: str, *, offset: int | None, limit: int | None, capacity: int
+) -> SkillBodyPage | SkillReadRefusal:
+    """Deliver ``body`` whole, or the whole lines from ``offset`` that fit ``capacity``.
+
+    Lines rather than bytes: a byte window can split a multi-byte character or a
+    sentence, and the file and transcript readers this tool sits beside already
+    page in lines, so an agent carries one unit across them. Every returned line
+    is complete; the page stops at the last line that still fits. Only ``"\\n"``
+    separates lines, because the decoder has already folded every newline form
+    to it, so the count matches what a file reader shows for the same file.
+    Every size here is of the body AS DELIVERED -- UTF-8 bytes of that decoded
+    text -- never of the file on disk: the capacity is a budget on what one
+    response carries, and a CRLF checkout is larger on disk than what is sent.
+
+    The body may be as large as the shared file safety cap, so nothing here
+    materializes it line by line: the count is a scan, the page start is a walk
+    of newline positions, and only the lines of the page itself are copied out.
+    """
+    total_bytes = len(body.encode("utf-8"))
+    if offset is None and limit is None:
+        if total_bytes > capacity:
+            return SkillReadRefusal(SKILL_READ_OVER_CAPACITY, capacity, size_bytes=total_bytes)
+        total_lines = _skill_body_line_count(body)
+        return SkillBodyPage(body, 0, total_lines, total_lines, total_bytes, None)
+    total_lines = _skill_body_line_count(body)
+    start = max(0, offset or 0)
+    if start >= total_lines:
+        # Past the last line: an empty page that still names the count, which is
+        # what the renderer prints for any page with no lines.
+        return SkillBodyPage("", start, 0, total_lines, total_bytes, None)
+    position = 0
+    for _ in range(start):
+        position = body.find("\n", position) + 1
+    taken: list[str] = []
+    spent = 0
+    most = None if limit is None else max(1, limit)
+    while position < len(body) and (most is None or len(taken) < most):
+        newline = body.find("\n", position)
+        end = len(body) if newline < 0 else newline + 1
+        line = body[position:end]
+        size = len(line.encode("utf-8"))
+        if spent + size > capacity:
+            if not taken:
+                return SkillReadRefusal(
+                    SKILL_READ_OVER_CAPACITY, capacity, size_bytes=size, line=start
+                )
+            break
+        taken.append(line)
+        spent += size
+        position = end
+    end_line = start + len(taken)
+    return SkillBodyPage(
+        "".join(taken),
+        start,
+        len(taken),
+        total_lines,
+        total_bytes,
+        end_line if end_line < total_lines else None,
+    )
+
+
+def _skill_body_line_count(body: str) -> int:
+    """Lines in ``body`` as a file reader counts them: a final unterminated line counts."""
+    return body.count("\n") + (1 if body and not body.endswith("\n") else 0)
 
 
 class SkillContextCapacityError(ValueError):
@@ -448,6 +571,16 @@ _AUTO_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
 # Bundled fallback — inside the kiro_crew package
 _BUILTIN_SKILLS_DIR = Path(__file__).parent / "builtin_skills"
 
+#: The installed ``kiro_crew`` package tree: a trusted provider root for skill
+#: symlinks, and the only tree whose hardlinked ``SKILL.md`` can be admitted (see
+#: :func:`_installed_package_bytes_match`). A module binding so a test can stand
+#: up a fake site dir.
+_INSTALLED_PACKAGE_DIR = Path(__file__).parent
+
+#: RECORD hash names accepted as an admission witness: the wheel spec requires
+#: sha256 or stronger, and a weaker one could be matched on purpose.
+_RECORD_HASHES = frozenset({"sha256", "sha384", "sha512"})
+
 
 @dataclass(frozen=True)
 class AutoSkillProvenance:
@@ -562,12 +695,168 @@ def _trusted_skill_roots() -> tuple[str, ...]:
     A symlink resolving anywhere else stays rejected: an arbitrary target would
     admit unvetted ``SKILL.md`` prose into the agent's context.
     """
-    roots: list[str] = [os.path.realpath(Path(__file__).parent)]
+    roots: list[str] = [os.path.realpath(_INSTALLED_PACKAGE_DIR)]
     try:
         roots.append(os.path.realpath(config_dir() / "apps"))
     except Exception:  # noqa: BLE001 — an unresolvable data home must not stop scanning
         pass
     return tuple(roots)
+
+
+_package_record_lock = threading.Lock()
+#: package dir -> (cache key, recorded ``SKILL.md`` digests). The key is the site
+#: dir's own stamp plus each candidate RECORD's, so a dist-info added or removed
+#: (the site dir changes) or a RECORD rewritten (its stamp changes) re-reads.
+_package_record_cache: dict[str, tuple[tuple, dict[str, frozenset[tuple[str, str]]]]] = {}
+
+
+def _record_stamp(record: str) -> tuple[int, int, int] | None:
+    try:
+        st = os.stat(record)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _package_record_paths(package_dir: str) -> list[str]:
+    """Every RECORD the installer left for this package, found by name alone.
+
+    One listing of the site dir, which reads no other distribution's metadata:
+    the cost is that directory's entry count, never their RECORD sizes. More
+    than one survives an upgrade that leaves the previous ``dist-info`` behind;
+    each is a candidate, and a stale one can only vouch for bytes the previous
+    release shipped. An editable install
+    keeps its ``dist-info`` in site-packages, not beside the source tree, so it
+    finds none and admits nothing.
+    """
+    wanted = normalize_distribution_name(_DISTRIBUTION_NAME)
+    records: list[str] = []
+    try:
+        with os.scandir(os.path.dirname(package_dir)) as entries:
+            for entry in entries:
+                stem, dot, suffix = entry.name.rpartition(".")
+                if (
+                    dot
+                    and suffix == "dist-info"
+                    and normalize_distribution_name(stem.split("-", 1)[0]) == wanted
+                ):
+                    records.append(os.path.join(entry.path, "RECORD"))
+    except OSError:
+        return []
+    return sorted(records)
+
+
+def _read_package_record(
+    record: str, package_dir: str
+) -> tuple[tuple[int, int, int], dict[str, tuple[str, str]]] | None:
+    """*record*'s identity and its ``SKILL.md`` digests, or ``None``.
+
+    A RECORD that does not list the package's own ``__init__.py`` vouches for
+    nothing, so it answers no digests. ``None`` means it could not be read or
+    changed while it was read: the identity is taken before and after the parse,
+    so digests are never filed under a stamp that belongs to a different RECORD.
+    """
+    before = _record_stamp(record)
+    if before is None:
+        return None
+    site_dir = os.path.dirname(package_dir)
+    package = os.path.basename(package_dir)
+    owned = f"{package}/__init__.py"
+    skill_row = f"/{_SKILL_FILE}"
+    owns = False
+    digests: dict[str, tuple[str, str]] = {}
+    try:
+        with open(record, encoding="utf-8", newline="") as fh:
+            # A substring test first: only two kinds of row matter, and running
+            # every one of a few thousand rows through the CSV parser is what
+            # made this the slow part.
+            wanted = (line for line in fh if line.startswith(owned) or skill_row in line)
+            for row in csv.reader(wanted):
+                if not row:
+                    continue
+                if row[0] == owned:
+                    owns = True
+                    continue
+                parts = PurePosixPath(row[0]).parts
+                if (
+                    len(row) < 2
+                    or parts[-1:] != (_SKILL_FILE,)
+                    or parts[:1] != (package,)
+                    or ".." in parts
+                ):
+                    continue
+                name, sep, value = row[1].partition("=")
+                if sep:
+                    absolute = os.path.normpath(os.path.join(site_dir, *parts))
+                    digests[os.path.normcase(absolute)] = (name.lower(), value)
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+    if _record_stamp(record) != before:
+        return None
+    return before, digests if owns else {}
+
+
+def _recorded_skill_digests() -> dict[str, frozenset[tuple[str, str]]]:
+    """The installed package's recorded ``SKILL.md`` digests, re-read on reinstall.
+
+    Cached per process under the site dir's stamp and every candidate RECORD's,
+    so the steady state costs a few ``stat`` calls and a reinstall, a dist-info
+    appearing mid-upgrade, or a RECORD replaced mid-read is re-read on the next
+    call rather than judged against a previous answer. A RECORD that changed
+    while it was parsed is left out and its stamp is not recorded, so the next
+    call reads it again.
+    """
+    package_dir = os.path.realpath(_INSTALLED_PACKAGE_DIR)
+    site_stamp = _record_stamp(os.path.dirname(package_dir))
+    with _package_record_lock:
+        cached = _package_record_cache.get(package_dir)
+    if cached is not None and cached[0][0] == site_stamp:
+        if all(_record_stamp(record) == stamp for record, stamp in cached[0][1]):
+            return cached[1]
+    stamps: list[tuple[str, tuple[int, int, int] | None]] = []
+    merged: dict[str, set[tuple[str, str]]] = {}
+    for record in _package_record_paths(package_dir):
+        found = _read_package_record(record, package_dir)
+        if found is None:
+            # Unreadable or mid-rewrite: a ``None`` stamp never matches a file
+            # that exists, so the next call reads it again.
+            stamps.append((record, None))
+            continue
+        stamps.append((record, found[0]))
+        for path, digest in found[1].items():
+            merged.setdefault(path, set()).add(digest)
+    digests = {path: frozenset(found) for path, found in merged.items()}
+    key = (site_stamp, tuple(stamps))
+    with _package_record_lock:
+        _package_record_cache[package_dir] = (key, digests)
+    return digests
+
+
+def _installed_package_bytes_match(path: str, data: bytes) -> bool:
+    """Admit a hardlinked ``SKILL.md`` only when it IS the installed package's file.
+
+    Installers such as uv hardlink package files out of their cache, so a
+    built-in app skill can legitimately carry ``st_nlink > 1``. The no-link
+    reader refuses that shape everywhere else; here it is admitted on content:
+    *path* must be a ``SKILL.md`` the distribution's RECORD lists inside the
+    installed package tree, and *data* (the bytes actually read) must hash to the
+    digest recorded for it. Any other hardlinked file, including one in the
+    skills dir, an app under the data home, an extra path or a project, has no
+    RECORD entry and stays refused. Rewriting RECORD needs write access to the
+    same tree as the package code, which already decides what the gateway runs.
+    """
+    try:
+        recorded = _recorded_skill_digests().get(os.path.normcase(os.path.normpath(path)), ())
+        for algorithm, value in recorded:
+            if algorithm not in _RECORD_HASHES:
+                continue
+            digest = hashlib.new(algorithm, data).digest()
+            actual = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            if hmac.compare_digest(actual, value):
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — an admission that cannot be decided refuses
+        return False
 
 
 def _within_any(candidate: str, roots: tuple[str, ...]) -> bool:
@@ -625,11 +914,20 @@ def _decode_skill_text(raw: bytes, *, strict: bool = True) -> str:
     ``\r``, nothing would match ``always`` or ``pinned``, and skill bodies would
     silently stop being injected there while Linux and macOS looked fine.
 
+    ``utf-8-sig`` for the same reason: a UTF-8 file saved "with BOM" (Notepad and
+    other Windows editors) is valid UTF-8 whose first character is U+FEFF, which
+    is not content. Left in, it sits in front of the ``---`` fence, so the
+    frontmatter grammar (column 0, position 0) finds no block and the skill lists
+    with no metadata -- and the mark itself lands in the injected body. The codec
+    strips one leading mark and is otherwise plain UTF-8: a file without one
+    decodes byte-for-byte as before, and a file that is not UTF-8 at all (UTF-16,
+    which opens with ``0xFF``) still raises under *strict*.
+
     *strict* decoding propagates invalid UTF-8, which a WRITER must hear
     (``update_auto_skill`` carries version metadata across a rewrite). Callers
     that only render text pass ``strict=False``.
     """
-    text = raw.decode("utf-8") if strict else raw.decode("utf-8", errors="replace")
+    text = raw.decode("utf-8-sig") if strict else raw.decode("utf-8-sig", errors="replace")
     # Universal newlines, matching TEXT-mode reads: CRLF and lone CR both fold.
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -2221,11 +2519,6 @@ class SkillsLoader:
             └── mcp-debug/SKILL.md
     """
 
-    #: Whether the last ``search_skills`` answer may be missing matches. Declared
-    #: rather than set in ``__init__``: it exists only once a search has run, and
-    #: readers take it through ``getattr(loader, "search_incomplete", False)``.
-    search_incomplete: bool
-
     def __init__(
         self,
         skills_path: Path | None = None,
@@ -2847,6 +3140,28 @@ class SkillsLoader:
         self._fm_cache[key] = (mtime, meta)
         return meta
 
+    def _readable_frontmatter(
+        self,
+        path: Path,
+        *,
+        within: str | None,
+        mtime: float | None = None,
+        canonical_root: str | None = None,
+    ) -> dict[str, str] | None:
+        """Frontmatter for a READER, or ``None`` when the row must be dropped.
+
+        The reader-side counterpart of :meth:`_cached_frontmatter`, whose
+        failures propagate for the writers' sake. Contract and rationale:
+        ``skill_runtime.listing._readable_frontmatter``.
+        """
+        return _listing._readable_frontmatter(
+            self,
+            path,
+            within=within,
+            mtime=mtime,
+            canonical_root=canonical_root,
+        )
+
     def _confined_frontmatter_and_size(self, path: Path, within: str) -> tuple[dict[str, str], int]:
         """Read confined metadata before any path-following metadata probe."""
         refusal_reasons: list[str] = []
@@ -2961,6 +3276,7 @@ class SkillsLoader:
         project_dir: str | Path | None = None,
         *,
         max_bytes: int | None = None,
+        refusal_reasons: list[str] | None = None,
     ) -> str | None:
         """Load a single skill's content by name (supports nested paths).
 
@@ -2968,13 +3284,19 @@ class SkillsLoader:
         trusted ``<project>/.kiro/skills``. It is probed LAST so precedence
         matches enumeration: a repository cannot serve the body for a name the
         operator already installed globally.
+
+        *refusal_reasons*, when given, receives why a candidate that was found
+        could not be served (``size_cap``, or a reader's refusal); a ``None``
+        with nothing appended means no tier holds the name at all.
         """
         if not self._safe_name(name):
             return None
         _t0 = time.monotonic()
         skill_file = self._dir / name / "SKILL.md"
         if skill_file.exists():
-            content = self._read_global_skill_text(skill_file, max_bytes)
+            content = self._read_global_skill_text(
+                skill_file, max_bytes, refusal_reasons=refusal_reasons
+            )
             if content is None:
                 return None
             self._emit_lazy_load_metric(_t0, hit=True)
@@ -2986,8 +3308,12 @@ class SkillsLoader:
                 resolved = validate_file_path(str(skill_file))
                 if resolved is None:
                     logger.warning("Refusing to load skill from sensitive path: %s", skill_file)
+                    if refusal_reasons is not None:
+                        refusal_reasons.append("sensitive_path")
                     continue
-                content = self._read_global_skill_text(Path(resolved), max_bytes)
+                content = self._read_global_skill_text(
+                    Path(resolved), max_bytes, refusal_reasons=refusal_reasons
+                )
                 if content is None:
                     return None
                 self._emit_lazy_load_metric(_t0, hit=True)
@@ -3020,7 +3346,8 @@ class SkillsLoader:
                 # drift apart again -- the previous round hardened this site
                 # alone and left its sibling reading the same cached paths
                 # unchecked.
-                refusal_reasons: list[str] = []
+                if refusal_reasons is None:
+                    refusal_reasons = []
                 confined_max = (
                     PROJECT_SKILL_BODY_CAP
                     if max_bytes is None
@@ -3049,7 +3376,12 @@ class SkillsLoader:
         return None
 
     def _read_global_skill_text(
-        self, path: Path, max_bytes: int | None, *, canonical_root: str | None = None
+        self,
+        path: Path,
+        max_bytes: int | None,
+        *,
+        canonical_root: str | None = None,
+        refusal_reasons: list[str] | None = None,
     ) -> str | None:
         """A global skill body, bounded by *max_bytes* and decode-safe.
 
@@ -3057,13 +3389,25 @@ class SkillsLoader:
         UTF-8, preserving the global listing path's decode behavior. Every body
         read uses the shared validated reader without project confinement:
         sensitive paths, hardlinks and identity changes are refused on the
-        descriptor supplying the bytes.
+        descriptor supplying the bytes. The one hardlink admitted is an installed
+        package ``SKILL.md`` whose bytes match the installer's RECORD digest
+        (:func:`_installed_package_bytes_match`), which is how a hardlinking
+        installer lays out the built-in app skills this method serves.
 
         With a bound, refuse rather than truncate. A caller that asked for at
         most N bytes is deciding whether the body FITS, and half a skill is not
         a smaller skill: it is a body whose instructions stop mid-sentence.
         ``None`` says "this one cannot be delivered", which the caller reports
-        instead of silently dropping.
+        instead of silently dropping. *refusal_reasons* records which it was:
+        ``size_cap`` when the body is over the bound, ``reader_refused`` when the
+        validated reader declined the file itself.
+
+        A page is the one sanctioned partial read, and it is partial only because
+        the caller asked for one: :meth:`read_scoped_skill_page` reads the body
+        whole under the file safety cap and hands back the whole lines that fit
+        one response together with what remains and where the next page starts,
+        so the reader is told there is more. A read that asked for no page is
+        still refused whole. This function itself never returns part of a body.
         """
         try:
             raw = safe_read_file_bytes_nolink(
@@ -3071,6 +3415,7 @@ class SkillsLoader:
                 max_bytes=max_bytes,
                 within_root=canonical_root,
                 within_root_is_canonical=canonical_root is not None,
+                admit_hardlinked=_installed_package_bytes_match,
             )
         except FileTooLargeError:
             if max_bytes is None:
@@ -3079,8 +3424,12 @@ class SkillsLoader:
                 logger.debug(
                     "skill body at %s exceeds the %d byte bound; refusing", path, max_bytes
                 )
+            if refusal_reasons is not None:
+                refusal_reasons.append("size_cap")
             return None
         if raw is None:
+            if refusal_reasons is not None:
+                refusal_reasons.append("reader_refused")
             return None
         text = _decode_skill_text(raw, strict=max_bytes is None)
         return None if _html_skill_refused(self._parse_frontmatter_text(text), path) else text
@@ -4965,7 +5314,11 @@ class SkillsLoader:
         visible = self._iter_visible(project_dir) if cap > 0 else ()
         text_words: set[str] = words_of(text) if cap > 0 else set()
         for name, skill_file, _within in visible:
-            meta = self._cached_frontmatter(skill_file, within=_within)
+            # A reader on the per-message path: one SKILL.md that is not UTF-8
+            # costs its own match, never the turn (rationale on the helper).
+            meta = self._readable_frontmatter(skill_file, within=_within)
+            if meta is None:
+                continue
             if meta.get("always", "").strip().lower() == "true":
                 continue
             triggers = meta.get("triggers", "")
@@ -5083,7 +5436,9 @@ class SkillsLoader:
     ) -> str:
         """Build a bounded directory over the agent's resolved available set.
 
-        Raises ``SkillContextCapacityError`` rather than trimming a required body.
+        Raises ``SkillContextCapacityError`` rather than trimming an operator's
+        required body; a project's ``always: true`` body that cannot be delivered
+        is skipped with a warning and an in-prompt notice instead.
         Contract and rationale: ``skill_runtime.delivery.get_context``.
         """
         return _delivery.get_context(
@@ -5114,10 +5469,14 @@ class SkillsLoader:
         project_skills: list[dict],
         project_dir: str | Path | None,
         budget: int | None,
-    ) -> None:
-        """Append confined bodies without reading beyond the section budget."""
+        pinned: set[str] | None = None,
+    ) -> _delivery.SkippedProjectSkills:
+        """Append confined bodies within the section budget; return what was skipped.
+
+        Each skipped key is also discarded from *pinned*, when given, in place.
+        """
         return _delivery._append_project_skill_bodies(
-            self, parts, project_skills, project_dir, budget
+            self, parts, project_skills, project_dir, budget, pinned
         )
 
     def _record_use(self, key: str) -> None:
@@ -5152,7 +5511,7 @@ class SkillsLoader:
         terms: Iterable[str],
         live_keys: list[str],
         project_dir: str | Path | None,
-    ) -> dict[str, set[str]]:
+    ) -> tuple[dict[str, set[str]], bool]:
         """Refresh once per query, with bounded work and explicit incomplete recall."""
         return _search._body_matches(self, skills, terms, live_keys, project_dir)
 
@@ -5191,28 +5550,112 @@ class SkillsLoader:
         *,
         only: list[str] | None = None,
         project_dir: str | Path | None = None,
-        max_bytes: int = 99_000,
+        max_bytes: int = SKILL_READ_CAPACITY,
     ) -> str | None:
-        """Read an exact catalog key, never an ambiguous leaf or caller path."""
+        """Read an exact catalog key, never an ambiguous leaf or caller path.
+
+        The whole body when it fits *max_bytes*, else ``None``: the contract the
+        required-skill and ``$key`` activation paths rely on, where a body that does
+        not fit is a body to refuse. :meth:`read_scoped_skill_page` is the face that
+        also says WHY, and that serves a larger body in pages.
+        """
+        return self._read_exact_key(
+            key, only=only, project_dir=project_dir, max_bytes=max_bytes
+        ).content
+
+    def read_scoped_skill_page(
+        self,
+        key: str,
+        *,
+        only: list[str] | None = None,
+        project_dir: str | Path | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+        capacity: int = SKILL_READ_CAPACITY,
+    ) -> SkillBodyPage | SkillReadRefusal:
+        """An exact-key read for the search tool: the whole body, or one page of it.
+
+        *offset* and *limit* are LINES (0-based first line, most lines), the unit
+        the file and transcript readers already page in. With neither given the
+        body is delivered whole when it fits *capacity* and refused with its size
+        when it does not; with either given, as many whole lines from *offset* as
+        fit *capacity* (at most *limit*) are delivered with the offset of the next
+        page. A refusal says which of three things stopped the read instead of
+        naming all three, because the caller acts differently on each.
+
+        The capacity bounds one DELIVERY, not the file. A body over it is read
+        again under the bound the whole file has anyway -- the shared file safety
+        cap for a global body, ``PROJECT_SKILL_BODY_CAP`` for a confined one --
+        so that its size can be reported and its pages served. A confined body is
+        never read past the project cap: paging never reads a checkout's file
+        past what one read may, so a body over that cap is refused naming the
+        project bound, whatever capacity the caller asked for, and offers no page.
+        """
+        read = self._read_exact_key(key, only=only, project_dir=project_dir, max_bytes=capacity)
+        bound = capacity
+        if read.refusal == SKILL_READ_OVER_CAPACITY:
+            bound = PROJECT_SKILL_BODY_CAP if read.confined else hooks_module.MAX_FILE_BYTES
+            if bound > capacity:
+                read = self._read_exact_key(
+                    key, only=only, project_dir=project_dir, max_bytes=bound
+                )
+        if read.content is None:
+            if read.confined and read.refusal == SKILL_READ_OVER_CAPACITY:
+                return SkillReadRefusal(read.refusal, PROJECT_SKILL_BODY_CAP, confined=True)
+            return SkillReadRefusal(read.refusal, bound)
+        return _page_skill_body(read.content, offset=offset, limit=limit, capacity=capacity)
+
+    def _read_exact_key(
+        self,
+        key: str,
+        *,
+        only: list[str] | None,
+        project_dir: str | Path | None,
+        max_bytes: int,
+    ) -> _ExactRead:
+        """Resolve an exact key through the scope and classify why it was refused.
+
+        A key the scoped enumeration does not hold, and that the building-time
+        resolver does not admit, is outside the scope; so is a body whose
+        ``repo_scope`` this project does not satisfy, because the catalog never
+        listed it here. Once the scope holds the key, every failure to deliver its
+        bytes is either the size bound (``size_cap``) or the fenced reader's own
+        refusal, and never a missing key.
+        """
         entry = next(
             (entry for entry in self._scoped_entries(project_dir, only) if entry[0] == key), None
         )
+        confined = entry is not None and entry.project_root is not None
+        reasons: list[str] = []
         if entry is None:
-            content = self._exact_read_while_building(key, only, project_dir, max_bytes)
+            content = self._exact_read_while_building(
+                key, only, project_dir, max_bytes, refusal_reasons=reasons
+            )
         elif entry.mapping_root is not None:
             content = self._read_global_skill_text(
-                entry.path, max_bytes, canonical_root=entry.mapping_root
+                entry.path,
+                max_bytes,
+                canonical_root=entry.mapping_root,
+                refusal_reasons=reasons,
             )
         else:
-            content = self.load_skill(key, project_dir, max_bytes=max_bytes)
+            content = self.load_skill(
+                key, project_dir, max_bytes=max_bytes, refusal_reasons=reasons
+            )
         if content is None:
-            return None
+            if "size_cap" in reasons:
+                refusal = SKILL_READ_OVER_CAPACITY
+            elif entry is not None or reasons:
+                refusal = SKILL_READ_UNREADABLE
+            else:
+                refusal = SKILL_READ_OUTSIDE_SCOPE
+            return _ExactRead(None, refusal, confined)
         meta = self._parse_frontmatter_text(content)
         if meta.get("repo_scope") and not self._repo_scope_satisfied(
             meta["repo_scope"], project_dir
         ):
-            return None
-        return content
+            return _ExactRead(None, SKILL_READ_OUTSIDE_SCOPE, confined)
+        return _ExactRead(content, "", confined)
 
     def _exact_read_while_building(
         self,
@@ -5220,9 +5663,12 @@ class SkillsLoader:
         only: list[str] | None,
         project_dir: str | Path | None,
         max_bytes: int,
+        refusal_reasons: list[str] | None = None,
     ) -> str | None:
         """Serve a COMPLETE key during an unfinished first walk, or ``None``."""
-        return _search._exact_read_while_building(self, key, only, project_dir, max_bytes)
+        return _search._exact_read_while_building(
+            self, key, only, project_dir, max_bytes, refusal_reasons=refusal_reasons
+        )
 
     def search_skills(
         self,
@@ -5236,10 +5682,29 @@ class SkillsLoader:
     ) -> list[dict]:
         """Rank total query coverage before rarity, metadata preference and usage.
 
-        Sets ``search_incomplete`` when the answer may be missing matches. Contract and
-        rationale: ``skill_runtime.search.search_skills``.
+        The matches of :meth:`search_skills_report`, for callers that do not report
+        whether the answer may be missing matches.
         """
-        return _search.search_skills(
+        return self.search_skills_report(
+            query, limit, project_dir=project_dir, only=only, offset=offset, browse=browse
+        ).matches
+
+    def search_skills_report(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        project_dir: str | Path | None = None,
+        only: list[str] | None = None,
+        offset: int = 0,
+        browse: bool = False,
+    ) -> SkillSearchReport:
+        """One search's matches plus whether they may be incomplete.
+
+        Contract and rationale: ``skill_runtime.search.SkillSearchReport`` and
+        ``skill_runtime.search.search_skills_report``.
+        """
+        return _search.search_skills_report(
             self, query, limit, project_dir=project_dir, only=only, offset=offset, browse=browse
         )
 

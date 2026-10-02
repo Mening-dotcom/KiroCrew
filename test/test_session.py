@@ -121,6 +121,21 @@ class TestSessionManager:
         await mgr.close_all()
 
     @pytest.mark.asyncio
+    async def test_release_refreshes_liveness(self, cfg):
+        """Release marks the end of a live turn, not the start of idleness.
+
+        A backdated session released after work must read fresh again, so the
+        idle sweep measures from when the session went quiet rather than when
+        it was acquired and a run working between tasks is not reaped mid-run.
+        """
+        mgr = SessionManager(cfg, provider_factory=_mock_provider_factory())
+        await mgr.get_or_create("thread1")
+        mgr._sessions["thread1"].last_used = time.monotonic() - 9999
+        mgr.release("thread1")
+        assert mgr._sessions["thread1"].last_used > time.monotonic() - 5
+        await mgr.close_all()
+
+    @pytest.mark.asyncio
     async def test_reinjection_helpers_tolerate_an_unknown_key(self, cfg):
         """A compaction callback can fire for a session that has since been
         evicted; neither helper may raise."""
@@ -8249,3 +8264,64 @@ class TestParentEndCancelsItsChildren:
             "these parent-end paths reap the companion runtime without ending the "
             f"parent's runs; each name lists what it is missing: {unguarded}"
         )
+
+
+@pytest.mark.asyncio
+async def test_a_dead_run_runtime_is_killed_before_its_replacement_starts(cfg) -> None:
+    """A task-run runtime marked dead on a stdin stall still has a live child
+    that may read the frames left in its pipe, so the next step's bootstrap
+    kills it BEFORE starting the replacement, never beside it."""
+    order: list[str] = []
+    base = _mock_provider_factory()
+
+    def factory(session_key=None, agent=None, channel_id=None, **kwargs):
+        order.append("spawn")
+        return base(session_key, agent, channel_id, **kwargs)
+
+    mgr = SessionManager(cfg, provider_factory=factory)
+    dead = MagicMock()
+    dead.is_alive = lambda: False
+
+    async def _kill(**_kw):
+        order.append("kill")
+
+    dead.kill = _kill
+    mgr._subagent_runtimes["taskrunner:run"] = dead
+    mgr.get_subagent_runtime = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+
+    await mgr._get_or_bootstrap_run_runtime("taskrunner:run")
+
+    assert order[:2] == ["kill", "spawn"], order
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.asyncio
+async def test_a_stalled_run_runtime_is_replaced_only_once_confirmed_dead(cfg, confirmed) -> None:
+    """A runtime that died of a stdin stall keeps a child that may still read the
+    stalled frames, so its replacement starts only once no process that can read
+    that pipe survives; otherwise the step's retry ladder gets an error and runs
+    the kill again."""
+    spawned: list[str] = []
+    base = _mock_provider_factory()
+
+    def factory(session_key=None, agent=None, channel_id=None, **kwargs):
+        spawned.append("spawn")
+        return base(session_key, agent, channel_id, **kwargs)
+
+    mgr = SessionManager(cfg, provider_factory=factory)
+    dead = MagicMock()
+    dead.is_alive = lambda: False
+    dead.stdin_stall_death = True
+    dead.stdin_reader_may_live = lambda: not confirmed
+    dead.kill = AsyncMock()
+    mgr._subagent_runtimes["taskrunner:run"] = dead
+    mgr.get_subagent_runtime = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+
+    if confirmed:
+        await mgr._get_or_bootstrap_run_runtime("taskrunner:run")
+        assert spawned == ["spawn"]
+    else:
+        with pytest.raises(RuntimeError, match="could not be confirmed dead"):
+            await mgr._get_or_bootstrap_run_runtime("taskrunner:run")
+        assert spawned == []
+    dead.kill.assert_awaited_once()

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from kiro_crew import name_grant, permission_floor
 from kiro_crew.acp.client import AcpError, AcpPromptBusy, advertised_model_ids
 from kiro_crew.acp.types import EVENT_STEER_CONSUMED, TurnUsage
-from kiro_crew.agent_sdk.drivers.acp import resolve_pin_spelling
+from kiro_crew.agent_sdk.drivers.acp import resolve_pin_spelling_on
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.constants import (
     DENY_CAUSE_INVALID_NAME,
@@ -45,6 +45,8 @@ from kiro_crew.platform.tool_paths import (
     command_shaped_strings,
     edit_target_candidates,
     is_document_writing_tool,
+    mcp_document_body_keys,
+    split_document_bodies,
 )
 from kiro_crew.providers.base import (
     EVENT_COMPLETE,
@@ -496,6 +498,8 @@ def next_fallback_candidate(
     chain: Sequence[str],
     active_model: str,
     advertised: Sequence[str] | None,
+    *,
+    backend: str = "",
 ) -> str | None:
     """First usable fallback candidate from *chain*, or ``None``.
 
@@ -529,7 +533,7 @@ def next_fallback_candidate(
         if not low or low == act:
             continue
         if adv:
-            served = resolve_pin_spelling(cand, adv)
+            served = resolve_pin_spelling_on(cand, adv, backend=backend)
             if not served:
                 logger.debug("model fallback: skipping %r (not advertised)", cand)
                 continue
@@ -541,7 +545,9 @@ def next_fallback_candidate(
     return None
 
 
-def _fallback_wire_spelling(candidate: str, advertised: Sequence[str] | None) -> str:
+def _fallback_wire_spelling(
+    candidate: str, advertised: Sequence[str] | None, *, backend: str = ""
+) -> str:
     """The spelling of *candidate* to send on the wire and keep in records.
 
     A chain entry stays in its OWN spelling for ``FallbackState`` bookkeeping
@@ -556,7 +562,7 @@ def _fallback_wire_spelling(candidate: str, advertised: Sequence[str] | None) ->
     (empty/unknown fails open, matching :func:`next_fallback_candidate`).
     """
     ids = [a for a in (advertised or []) if isinstance(a, str) and a.strip()]
-    return (resolve_pin_spelling(candidate, ids) if ids else "") or candidate
+    return (resolve_pin_spelling_on(candidate, ids, backend=backend) if ids else "") or candidate
 
 
 @dataclass
@@ -578,10 +584,12 @@ class FallbackState:
     primary: str = ""
     walked: list[str] = dataclass_field(default_factory=list)
 
-    def next_candidate(self, active_model: str, advertised: Sequence[str] | None) -> str | None:
+    def next_candidate(
+        self, active_model: str, advertised: Sequence[str] | None, *, backend: str = ""
+    ) -> str | None:
         """Advance to and return the next usable candidate, or ``None``."""
         remaining = self.chain[self.pos :]
-        cand = next_fallback_candidate(remaining, active_model, advertised)
+        cand = next_fallback_candidate(remaining, active_model, advertised, backend=backend)
         if cand is None:
             self.pos = len(self.chain)
             return None
@@ -666,13 +674,14 @@ async def advance_fallback_candidate(
     set_model_fn = resolve_substitute_set_model(provider)
     if set_model_fn is None:
         return None
+    backend = provider_backend(provider)
     while True:
-        cand = fb_state.next_candidate(fb_state.primary or active, advertised)
+        cand = fb_state.next_candidate(fb_state.primary or active, advertised, backend=backend)
         if cand is None:
             return None
         # The chain's own spelling drove the walk bookkeeping; the wire and
         # every served-model comparison below use the advertised spelling.
-        wire = _fallback_wire_spelling(cand, advertised)
+        wire = _fallback_wire_spelling(cand, advertised, backend=backend)
         if wire.strip().lower() == (active or "").strip().lower():
             # With a marker-seeded primary, the chain can still name the
             # CURRENTLY-failing fallback the session sits on — retrying it is
@@ -852,6 +861,24 @@ def provider_advertised_ids(provider: Any) -> list[str]:
         return advertised_model_ids(getter())
     except Exception:
         return []
+
+
+def provider_backend(provider: Any) -> str:
+    """The provider's ACP backend id, ``""`` when unknown.
+
+    Lets the fallback walk fold a bare pair-id chain entry (e.g. a codex pin)
+    to its advertised wire spelling via :func:`resolve_pin_spelling_on`, the
+    same backend-aware fold the cold-start, substitute and warm-pool wire
+    sites apply; an unknown backend keeps the generic (backend-less) fold.
+    """
+    for attr in ("backend",):
+        try:
+            val = getattr(provider, attr, "")
+        except Exception:  # pragma: no cover - exotic property getters
+            val = ""
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
 
 
 def provider_active_model(provider: Any) -> str:
@@ -1318,6 +1345,7 @@ def _first_tool_input_denial(
     denied_regexes: list[str] | None,
     *,
     exempt_command: str | None = None,
+    command_rules: bool = True,
 ) -> tuple[str, str, str] | None:
     """Return the first tool_input denial among *strings*, or ``None``.
 
@@ -1334,6 +1362,11 @@ def _first_tool_input_denial(
     own wall clock -- a denied oversized string is recoverable, a worker parked
     for minutes on a pathological payload is not -- and an oversized one is
     denied rather than scanned or skipped.
+
+    ``command_rules=False`` applies the size ceiling and the path tier only:
+    the caller passes it for a named MCP document body
+    (``platform.tool_paths.MCP_DOCUMENT_BODY_FIELDS``), which is stored text
+    and not a command line.
 
     The tuple is ``(kind, reason, matched_string)`` where *kind* is
     ``"path"`` / ``"bash"`` / ``"regex"`` / ``"oversize"``. Mechanism
@@ -1364,6 +1397,8 @@ def _first_tool_input_denial(
             if is_unverifiable_path_refusal(path_refusal):
                 return ("path", path_refusal, s)
             return ("path", f"Blocked: sensitive path in tool_input: {s}", s)
+        if not command_rules:
+            continue
         _input_bash = is_sensitive_bash_command(s)
         if _input_bash:
             return ("bash", _input_bash, s)
@@ -2939,11 +2974,41 @@ async def _resolve_permission(
         )
         else None
     )
+    # A Kiro Crew core MCP tool listed in ``platform.tool_paths.
+    # MCP_DOCUMENT_BODY_FIELDS`` (``knowledge_add_document``'s ``content``)
+    # stores that field as document text, so the field skips the command-text
+    # rules -- the deny list and the argv floor -- that read a page mentioning a
+    # product subcommand as an attempt to run it. The body keeps the size
+    # ceiling and the path tier; every other argument keeps the full scan. Same
+    # provenance bar as the built-in scoping above, and the identity is the
+    # cached server AND tool, so a same-named tool on another server, or a frame
+    # whose identity did not come from the caches, keeps the full scan.
+    _mcp_body_keys = (
+        mcp_document_body_keys(
+            getattr(event, "tool_name", ""), getattr(event, "mcp_server_name", "")
+        )
+        if (
+            _edit_params is None
+            and _scoped_params is None
+            and getattr(event, "shell_classified", False)
+            and not event.is_shell
+            and getattr(event, "raw_params_trusted", False)
+            and getattr(event, "mcp_identity_trusted", False)
+            and isinstance(getattr(event, "raw_tool_params", None), dict)
+        )
+        else frozenset()
+    )
     _scoped_truncated = False
+    _body_strings: list[str] = []
     if _edit_params is not None:
         _input_strings: list[str] = []
     elif _scoped_params is not None:
         _scoped_strings = command_shaped_strings(_scoped_params)
+        _scoped_truncated = _scoped_strings.truncated
+        _input_strings = list(_scoped_strings)
+    elif _mcp_body_keys and isinstance(event.raw_tool_params, dict):
+        _rest_params, _body_strings = split_document_bodies(event.raw_tool_params, _mcp_body_keys)
+        _scoped_strings = command_shaped_strings(_rest_params, body_keys=frozenset())
         _scoped_truncated = _scoped_strings.truncated
         _input_strings = list(_scoped_strings)
     else:
@@ -2985,6 +3050,10 @@ async def _resolve_permission(
             )
             if input_hit is not None:
                 return (*input_hit, "always_deny_input")
+        if _body_strings:
+            body_hit = _first_tool_input_denial(_body_strings, _denied_regexes, command_rules=False)
+            if body_hit is not None:
+                return (*body_hit, "always_deny_input")
         return None
 
     _hit = await asyncio.to_thread(_scan_off_loop)

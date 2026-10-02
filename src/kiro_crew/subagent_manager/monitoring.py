@@ -11,6 +11,7 @@ from ..session_map import session_files_resumable
 from ..subagent_persistence import (
     _agent_dir,
     _check_result_available,
+    result_marked_complete,
     subagent_id_from_conversation_key,
 )
 from ._component import ManagerComponent
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
         agent_dir_for_display,
         append_cost_sample,
         asyncio,
+        cap_buckets,
         compact_cost_log,
         consult_offloaded,
         has_dashboard_surface,
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
         logger,
         maintenance_executor,
         prune_stale_tombstones,
+        read_learned_costs_checked,
         sel,
         single_completion_meta,
         subprocess_executor,
@@ -122,11 +125,19 @@ def tombstone_recovery_action(agent_id: str, state: dict) -> str:
     ``write_result_chunk`` appends per streamed chunk. The run records
     ``result_complete`` when its stream reaches the complete event, so
     without that flag these bytes are an opening sentence, not an answer.
+
+    That flag lives in ``state.json``, written in a step after the one that
+    finalizes ``result.txt``. A restart landing between the two can find a
+    finished answer on disk with the flag unwritten, which alone would read a
+    whole answer as a fragment. ``result_marked_complete`` reads the durable
+    marker the completion path drops in the SAME step it finalizes ``result.txt``
+    — so either signal is proof the answer is whole, closing the crash window
+    between the result bytes and the flag write.
     """
     has_result = _check_result_available(_agent_dir(agent_id) / "result.txt")
     if not has_result:
         return "notification_pending"
-    if not state.get("result_complete"):
+    if not (state.get("result_complete") or result_marked_complete(agent_id)):
         return "partial_result"
     return "result_available"
 
@@ -483,30 +494,32 @@ class OrphanStallMonitor(ManagerComponent):
                                     else None
                                 )
                             try:
+                                # Never ``killed`` for a process the kill
+                                # left standing: the folder is reconciled
+                                # below either way, so this row is the only
+                                # place the process's fate is recorded. A
+                                # refusal and a failed signal are separate
+                                # outcomes because only one of them means
+                                # something tried and could not.
+                                #
+                                # TWO ways to be refused, and both must read as
+                                # one: the gate declining, and the teardown
+                                # barrier declining because a tenant arrived
+                                # after it allowed. The second leaves
+                                # ``kill_failed`` None -- no signal was even
+                                # attempted -- which is indistinguishable from a
+                                # clean kill by that field alone.
+                                if not authorized or not barriered:
+                                    outcome = "refused"
+                                elif kill_failed is None:
+                                    outcome = "killed"
+                                else:
+                                    outcome = "failed"
                                 sel().log_tool_invocation(
                                     session_key=f"subagent:{agent_id}",
                                     source="subagent",
                                     tool_name="orphan_reconcile_kill",
-                                    # Never ``killed`` for a process the kill
-                                    # left standing: the folder is reconciled
-                                    # below either way, so this row is the only
-                                    # place the process's fate is recorded. A
-                                    # refusal and a failed signal are separate
-                                    # outcomes because only one of them means
-                                    # something tried and could not.
-                                    #
-                                    # TWO ways to be refused, and both must read as
-                                    # one: the gate declining, and the teardown
-                                    # barrier declining because a tenant arrived
-                                    # after it allowed. The second leaves
-                                    # ``kill_failed`` None -- no signal was even
-                                    # attempted -- which is indistinguishable from a
-                                    # clean kill by that field alone.
-                                    outcome=(
-                                        "refused"
-                                        if not authorized or not barriered
-                                        else ("killed" if kill_failed is None else "failed")
-                                    ),
+                                    outcome=outcome,
                                     error=kill_failed or "",
                                     metadata={"subagent_id": agent_id, "pid": pid},
                                 )
@@ -776,6 +789,10 @@ class OrphanStallMonitor(ManagerComponent):
         """
         now = time.monotonic()
         agents = list(self._manager._agents.values())
+        # Sessions that shared children run on, by their parent's session key: a
+        # dedicated run that is one of these carries its children's sessions --
+        # and their per-session MCP servers -- in its own process tree.
+        hosting = {a.parent_session_key for a in agents if not a.done and a._session_sharing}
         for info in agents:
             if info.done or not info._pid:
                 continue
@@ -793,7 +810,34 @@ class OrphanStallMonitor(ManagerComponent):
                 self._manager._live_shared_count(info._pid, agents) if info._session_sharing else 1
             )
             generation = info._rss_generation
-            sample = _proc_subtree_sample(info._pid)
+            # Settled-runtime reading (dynamic-subagent-sizing.md §4.1): the first
+            # quiet sample of a DEDICATED process once its own session has
+            # answered (``_first_stream_started``), with no tool in flight before
+            # the read, none after it, and no activity during it (``_stall_gen``
+            # unchanged; snapshot BEFORE the off-loop read, so a tool that started
+            # or came and went during it voids the reading). That subtree is the
+            # runtime itself -- kiro-cli and the MCP servers up at that moment --
+            # not the builds or tests a tool launches, which is what
+            # ``peak_rss_gb`` follows. Never a shared run (its pid's tree holds the
+            # other tenants and the parent's own tools) nor a dedicated run whose
+            # own children share its runtime (its tree holds theirs). Read in PSS
+            # from the same walk, the unit the unlearned price is measured in:
+            # summed RSS counts pages a tree of processes shares once per process.
+            # Keyed on the LOCAL generation the recheck below proves current, so a
+            # respawn re-captures for its fresh process and a reading of the dead
+            # one is never stamped as the new one's. ``_inflight_tool`` holds one
+            # tool, so a second overlapping tool still running can pass; that
+            # over-counts, which errs toward reserving more.
+            tool_before = info._inflight_tool
+            stall_before = info._stall_gen
+            want_settled = (
+                not info._session_sharing
+                and info._settled_rss_generation != generation
+                and info._first_stream_started is not None
+                and tool_before is None
+                and (info.conversation_key or f"subagent:{info.id}") not in hosting
+            )
+            sample = _proc_subtree_sample(info._pid, **({"pss": True} if want_settled else {}))
             if info._rss_generation != generation:
                 # The run was respawned while this off-loop read was in flight:
                 # the reading describes the dead process and must not settle
@@ -805,6 +849,9 @@ class OrphanStallMonitor(ManagerComponent):
                 info._rss_samples += 1
                 if gb > info.peak_rss_gb:
                     info.peak_rss_gb = gb
+                if want_settled and info._inflight_tool is None and info._stall_gen == stall_before:
+                    info.settled_rss_gb = sample.pss_kb / (1024 * 1024) if sample.pss_kb > 0 else gb
+                    info._settled_rss_generation = generation
             info.last_procs = _attributed_count(sample.procs, shared_n, info.last_procs)
             info.last_stubs = _attributed_count(sample.matched, shared_n, info.last_stubs)
             jiffies = sample.jiffies
@@ -828,9 +875,37 @@ class OrphanStallMonitor(ManagerComponent):
                 info.peak_rss_gb,
                 info.peak_cpu_cores,
                 shared=bool(info._session_sharing),
+                settled_gb=info.settled_rss_gb,
             )
+            if info.settled_rss_gb > 0:
+                self._manager._learned_settled_dirty = True
         except Exception:
             logger.debug("Failed to record subagent cost for %s", info.id, exc_info=True)
+
+    def _refresh_learned_settled_impl(self) -> None:
+        """Re-read the learned settled RSS per bucket into the manager's map.
+
+        BLOCKING (it streams the cost log), so it runs on
+        :func:`maintenance_executor` -- at reaper start and after every cost
+        sweep -- and the admission gate only ever reads the map it leaves. The
+        map is replaced whole, never mutated, so a reader on the loop sees one
+        consistent version. An incomplete read (a refused or unreadable record)
+        keeps every figure it did not see, folded under the bucket bound. Runs
+        only after a run recorded a settled reading (or once at start): nothing
+        else changes what the per-bucket window holds.
+        """
+        if not self._manager._learned_settled_dirty:
+            return
+        self._manager._learned_settled_dirty = False
+        try:
+            costs, complete = read_learned_costs_checked("settled_gb", dedicated_only=True)
+        except Exception:
+            logger.debug("learned settled RSS unreadable; keeping the previous map", exc_info=True)
+            return
+        held = self._manager._learned_settled_gb
+        self._manager._learned_settled_gb = (
+            dict(costs) if complete else cap_buckets({**held, **costs})
+        )
 
     async def _reaper_loop_impl(self) -> None:
         """Periodically force-kill subagents that exceed the timeout.
@@ -843,6 +918,14 @@ class OrphanStallMonitor(ManagerComponent):
             compact_cost_log()  # startup FIFO trim (§4.2)
         except Exception:
             logger.debug("Reaper: startup cost-log compaction failed", exc_info=True)
+        # Seed the dedicated start projection before the first sweep, off-loop,
+        # so the first interval after boot does not price at the start cost only.
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                maintenance_executor(), self._manager._refresh_learned_settled
+            )
+        except Exception:
+            logger.debug("Reaper: learned settled RSS seed failed", exc_info=True)
         while True:
             await asyncio.sleep(_REAPER_INTERVAL)
             now = time.time()
@@ -869,6 +952,12 @@ class OrphanStallMonitor(ManagerComponent):
                 )
             except Exception:
                 logger.debug("Reaper: live-cost sample failed", exc_info=True)
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    maintenance_executor(), self._manager._refresh_learned_settled
+                )
+            except Exception:
+                logger.debug("Reaper: learned settled RSS refresh failed", exc_info=True)
             # Wave liveness backstop: reconcile waves wedged by submissions
             # lost before the process boundary (see _sweep_stuck_waves).
             try:

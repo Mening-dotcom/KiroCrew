@@ -12,7 +12,7 @@ import TranscriptScrollShell, { PANE_WIDTH_PROPERTY } from '../pages/chat/Transc
 const TABLE = '| Signal | Value |\n| --- | --- |\n| `sample.daily.messages` | 42 |'
 // The CSS matches the renderer's stable root wrapper, not all descendant
 // tables: nested list/quote tables and formatted code cards must stay local.
-const TABLE_SELECTOR = '[data-role="assistant"] > .message-bubble > [data-image-scope] > div > .markdown-table'
+const TABLE_SELECTOR = '[data-role="assistant"] > .message-bubble:not([data-bordered]) > [data-image-scope] > div > .markdown-table'
 const here = dirname(fileURLToPath(import.meta.url))
 const css = readFileSync(resolve(here, '../index.css'), 'utf8')
 
@@ -28,6 +28,9 @@ describe('transcript table breakout contract', () => {
 
   it('contains offscreen copy announcements in the table scroll wrapper', () => {
     const { container } = render(<ChatMessageList messages={[{ role: 'assistant', content: TABLE }]} running={false} />)
+    // The scroller is the table root's direct child and owns `overflow-x-auto`;
+    // the overflow fade is a `mask-image` on the scroller itself, so no wrapper
+    // node sits between the root and the scroller.
     const scroll = container.querySelector(`${TABLE_SELECTOR} > .overflow-x-auto`)
     // Absolute sr-only status spans must have a containing block inside the
     // local scroller, or unclipping the bubble lets them widen the transcript.
@@ -83,6 +86,15 @@ describe('transcript table breakout contract', () => {
       { role: 'user', content: TABLE },
     ]} running={false} />)
     expect(container.querySelectorAll('table')).toHaveLength(3)
+    expect(container.querySelector(TABLE_SELECTOR)).toBeNull()
+  })
+
+  it('keeps a bordered (crewmate) bubble\'s table inside its card', () => {
+    // A crewmate's chat draws the reply as a bordered card via bubbleClassName;
+    // a table breaking out of it paints past the card's edges.
+    const { container } = render(<div className="chat-message-body"><AssistantMessage content={TABLE} isStreaming={false} bubbleClassName="bg-card border" /></div>)
+    expect(container.querySelector('.message-bubble')).toHaveAttribute('data-bordered')
+    expect(container.querySelector('.markdown-table')).not.toBeNull()
     expect(container.querySelector(TABLE_SELECTOR)).toBeNull()
   })
 

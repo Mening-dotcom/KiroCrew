@@ -10,7 +10,10 @@ The generated default configuration is `~/.kiro/agents/kirocrew.json`. Its shipp
 - Built-in tools: shell, file, code-search, web, introspection, session, reporting, and tool-search tools.
 - `allowedTools` grants for selected safe tools and Kiro Crew MCP operations.
 - MCP servers: `kirocrew-cron` and `kirocrew-core`; `kirocrew-computer` is emitted only when computer use is enabled and supported on the current platform.
-- A `postToolUse` audit hook for shell calls.
+- A `postToolUse` audit hook for shell calls. It appends each command to
+  `audit.log` under the data home (`~/.kiro/crew` or `KIROCREW_HOME`); the gateway
+  (and a standalone `kirocrew chat`, at its start) rotates that file at 8 MiB,
+  keeping one previous generation as `audit.log.1`.
 
 ## Switching Agents
 
@@ -41,7 +44,7 @@ Cron jobs can specify an agent at creation time.
 
 Kiro Crew owns and rewrites a fixed set of specs; [agent-spec-fields.md](agent-spec-fields.md) lists every one of them with what refreshes it. The primary and lite specs are required; the others support goal conducting, pipeline fleet supervision, security conducting, knowledge extraction, research, and heartbeat features.
 
-`kirocrew-conductor` tracks its goal in the work ledger: it mounts `kirocrew-work`, binds each item to a session before seeding it, and settles every completion claim with the acceptance evaluator instead of by reading a transcript. `kirocrew-ledger-conductor` is a deprecated alias of it — the same spec under the flow's old name, kept for one release so a session or cron that names the old string keeps resolving, and removed next release. `kirocrew-worker` is the agent a conductor names for a leaf item — the default agent's own resolved toolset plus the two reporting tools. In short, `kirocrew-worker` is `kirocrew` + `@kirocrew-work` − cron scheduling − the opt-in sets nobody assigned to it: a worker gets your default agent's own toolset so it can do any item's work, but it does not auto-approve scheduling a recurring job that would outlive the item. Which fields are mirrored, when the mirror is re-checked, and what happens when it cannot be re-derived are in [agent-spec-fields.md](agent-spec-fields.md).
+`kirocrew-conductor` tracks its goal in the work ledger: it mounts `kirocrew-work`, binds each item to a session before seeding it, and settles every completion claim with the acceptance evaluator instead of by reading a transcript. **Crew Mode**, the switch to the right of "Choose memory mode" above the chat input, is the easy way in: turning it on runs that chat on `kirocrew-conductor`, keeping its memory and history, and turning it off switches back to the default agent. Settings → Chat → **Turn on Crew Mode for new sessions by default** starts new chats that way. `kirocrew-ledger-conductor` is a deprecated alias of it — the same spec under the flow's old name, kept for one release so a session or cron that names the old string keeps resolving, and removed next release. `kirocrew-worker` is the agent a conductor names for a leaf item — the default agent's own resolved toolset plus the two reporting tools. In short, `kirocrew-worker` is `kirocrew` + `@kirocrew-work` − cron scheduling − the opt-in sets nobody assigned to it: a worker gets your default agent's own toolset so it can do any item's work, but it does not auto-approve scheduling a recurring job that would outlive the item. Which fields are mirrored, when the mirror is re-checked, and what happens when it cannot be re-derived are in [agent-spec-fields.md](agent-spec-fields.md).
 
 ## Custom Agents
 

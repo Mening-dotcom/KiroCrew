@@ -473,6 +473,30 @@ def fd_target(proc_root: str, pid: int, fd: int) -> str:
         return ""
 
 
+def pipe_writer_pid(proc_root: str, pids: list[int], target: str, reader: int) -> int | None:
+    """A pid in *pids* other than *reader* holding pipe *target* open for writing.
+
+    Reads ``/proc/<pid>/fd`` links and the ``flags`` line of ``fdinfo``
+    (``O_WRONLY`` / ``O_RDWR``). None when no such holder is found.
+    """
+    for p in pids:
+        if p == reader:
+            continue
+        try:
+            fds = os.listdir(f"{proc_root}/{p}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            if not fd.isdigit() or fd_target(proc_root, p, int(fd)) != target:
+                continue
+            m = re.search(
+                r"^flags:\s*([0-7]+)$", _read_text(f"{proc_root}/{p}/fdinfo/{fd}") or "", re.M
+            )
+            if m and int(m.group(1), 8) & 3:
+                return p
+    return None
+
+
 def socket_inodes(proc_root: str, pid: int) -> set[str]:
     """Socket inode numbers held open by *pid* (from ``/proc/<pid>/fd``)."""
     inodes: set[str] = set()
@@ -851,14 +875,27 @@ _CONFIRM_TABLE: dict[str, tuple[frozenset[str], tuple[str, ...], str]] = {
     "yarn": (frozenset({"init", "create"}), ("-y", "--yes"), "yarn init -y …"),
 }
 # Credential / terminal prompts: program -> (flags that make it non-interactive, hint).
+#
+# ``BatchMode`` is recognised but not proposed: once case is folded it contains a
+# permission verb, so a proposed ``ssh -o BatchMode=yes … /usr/…`` is refused by
+# the permission deny rows. ssh_config(5) says BatchMode disables password prompts
+# and host key confirmation, and the hint proposes options aimed at the same
+# prompts. They are proposed, not trusted: BatchMode alone still counts as proof
+# of no prompt, because a FIDO/sk key PIN or an encrypted key's passphrase may
+# still be asked for under the proposed options.
+_SSH_BATCH_FLAGS = ("-o BatchMode=yes", "-oBatchMode=yes")
+_SSH_NONINTERACTIVE_OPTIONS = (
+    "-o StrictHostKeyChecking=yes -o NumberOfPasswordPrompts=0 "
+    "-o PasswordAuthentication=no -o KbdInteractiveAuthentication=no"
+)
 _PROMPT_TABLE: dict[str, tuple[tuple[str, ...], str]] = {
     "sudo": (
         ("-n", "--non-interactive", "-S", "--stdin"),
         "sudo -n … (fails instead of prompting)",
     ),
-    "ssh": (("-o BatchMode=yes", "-oBatchMode=yes"), "ssh -o BatchMode=yes …"),
-    "scp": (("-o BatchMode=yes", "-oBatchMode=yes", "-B"), "scp -B …"),
-    "sftp": (("-o BatchMode=yes", "-oBatchMode=yes", "-b"), "sftp -b <batchfile> …"),
+    "ssh": (_SSH_BATCH_FLAGS, f"ssh {_SSH_NONINTERACTIVE_OPTIONS} …"),
+    "scp": ((*_SSH_BATCH_FLAGS, "-B"), "scp -B …"),
+    "sftp": ((*_SSH_BATCH_FLAGS, "-b"), "sftp -b <batchfile> …"),
     "gpg": (("--batch",), "gpg --batch …"),
     "passwd": ((), "passwd cannot run non-interactively under the tool"),
     "su": ((), "su cannot run non-interactively under the tool"),
@@ -1072,7 +1109,8 @@ def _classify_segment(segment: str, *, last: bool) -> InteractiveClassification:
             return NOT_INTERACTIVE
         # ``ssh host <remote command>`` is still prompt-shaped without
         # BatchMode: the risk is the host-key / password prompt, not the
-        # remote work, and only BatchMode removes it.
+        # remote work. The proposed options are NOT treated as proof, so the
+        # classifier stays on the safe side for the prompts they may miss.
         return InteractiveClassification(
             INTERACTIVE_PROMPT,
             program,
@@ -1788,6 +1826,12 @@ class LivenessOracle:
             if target.startswith(("/dev/tty", "/dev/pts")) or (
                 fd == 0 and target.startswith("pipe:")
             ):
+                # A live writer in the subtree (``producer | consumer``) means this
+                # reader waits on a producer; keep scanning (the producer may be on a
+                # tty). No procfs: keep the old verdict.
+                if target.startswith("pipe:") and os.path.isdir(self._proc):
+                    if pipe_writer_pid(self._proc, subtree, target, p) is not None:
+                        continue
                 blocked = (p, target)
                 break
         if blocked is None:

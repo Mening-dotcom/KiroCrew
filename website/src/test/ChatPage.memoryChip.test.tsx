@@ -1,6 +1,6 @@
 /**
  * The welcome screen's memory chip sits directly above the composer, and only
- * while the welcome state shows (empty non-orchestrator session). WelcomeView is
+ * while the welcome state shows (empty session). WelcomeView is
  * mocked to nothing here, so any chip found comes from ChatPage's own slot.
  */
 import { describe, it, expect, vi } from 'vitest'
@@ -147,11 +147,13 @@ describe('memory chip above the composer', () => {
 
   it('is absent once the session has messages', async () => {
     await renderWith({ messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }] })
-    expect(screen.queryByTestId('composer-memory-chip')).toBeNull()
+    // The row itself stays for the Crew Mode chip (ChatPage.crewMode.test.tsx);
+    // the memory chip is what leaves.
+    expect(screen.queryByTestId('memory-mode-chip')).toBeNull()
   })
 
-  it('is absent in orchestrator mode, which keeps the chip in its own view', async () => {
+  it('still renders for a slot carrying the legacy orchestrator mode', async () => {
     await renderWith({ messages: [], mode: 'orchestrator' })
-    expect(screen.queryByTestId('composer-memory-chip')).toBeNull()
+    expect(await screen.findByTestId('composer-memory-chip')).toBeInTheDocument()
   })
 })

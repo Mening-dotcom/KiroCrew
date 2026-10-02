@@ -7,13 +7,19 @@
 
 ## File Layout
 
-```
-test/
-├── test_acp_types.py     # ACP type dataclasses
-├── test_acp_client.py    # ACP client (mocked subprocess)
-├── test_config.py        # Config loader
-└── test_cli.py           # CLI commands
-```
+Backend tests live under the roots `setup.cfg` pins in `testpaths`
+(`test` plus `src/kiro_crew/apps/builtins`): pytest recurses into
+`test`, so nested `test/<pkg>/test_*.py` files are collected too (for
+example `test/metrics/`, `test/e2e/`, `test/integration/`), alongside
+helper subdirectories that hold shared fixtures rather than tests (for
+example `test/workflows/`). What distinguishes a top-level
+`test/test_<module>.py` is not whether nested files are collected but
+the `scripts/leaf_test_scope.py` CI fast path: only `test/test_*.py`
+files count as *leaves* there (`_LEAF_NAME`, `scripts/leaf_test_scope.py`
+lines 120-123), which limits that fast path without stopping collection
+of nested files. Placement is enforced by the `testpaths-coverage` gate
+(`scripts/check_testpaths_coverage.py`). A file
+outside those roots is never collected, so it stays green by omission.
 
 ## Patterns
 
@@ -273,6 +279,14 @@ silent until some assertion happens to expect a non-empty one.
 pins the import for every module that spawns the fake, because co-location alone does
 not stop a second consumer from hand-rolling the read.
 
+**Delete a file a background thread may have open the way the product deletes it.**
+Windows refuses to unlink a file while any handle holds it (`[WinError 32]`), and a
+test that removes crew-log segments with a bare `path.unlink()` races the eager folder,
+which reads the unit on its own thread after every entry. Retention removes them inside
+`crew_log.eager.paused()`, which holds the folder between batches; a test does the same
+after `eager.drain()`, and asserts the hold was granted rather than proceeding without it
+(`test_issue_radar_crew_store.py::test_a_unit_recreated_under_its_id_folds_cold_however_far_its_seq_climbed`).
+
 ### Host tool dialects
 
 A test double for a platform-specific CLI must not depend on another host's
@@ -294,6 +308,9 @@ where these path semantics differ most. Two helpers in `test/conftest.py`:
 |------|--------|
 | A path that reaches OUT of a sandbox root through a link | `make_escaping_link(inside, outside)` |
 | A directory link at a chosen location (`ui/` -> the dev source tree) | `make_dir_link(link, target)` |
+
+`make_dir_link` lives in `kiro_crew.testing.links`; the conftest re-exports it, and
+app-embedded tests under `src/kiro_crew/apps/builtins` import it from there.
 
 Prefer either over a bare `Path.symlink_to` plus a `skipif(sys.platform == "win32")`:
 an unconditional skip drops the whole assertion on Windows. Reach for a skip only
@@ -317,6 +334,26 @@ monkeypatch.setattr("kiro_crew.dashboard.handlers._SHUTDOWN_TIMEOUT_SECS", 0.05)
 # RIGHT — patch where the constant is defined and read:
 monkeypatch.setattr("kiro_crew.dashboard.handlers.sessions._SHUTDOWN_TIMEOUT_SECS", 0.05)
 ```
+
+The opposite mistake is a patch WIDER than the caller under test. A patch on a
+module global is seen by every thread in the process, so a stub with a side effect
+also fires for a background worker that calls the same function. MEASURED: a resume
+test simulated a concurrent winner as a side effect on `members.read_dm_binding`, and
+the member event log's legacy fold calls that function on its `eventlog-io` worker,
+queued by the winner's own row. When the worker reached it before the request
+returned (a loaded runner), the "winner" ran twice and the test read
+`history duplicated: 2 copies`, with two different message ids. The same test was
+green for the wrong reason: its side effect fired at the handler's FIRST binding
+read, so deleting the late re-check it was named for left it passing.
+
+So patch the function the handler awaits in the window you mean, and pin the ORDER
+of the awaits and checks the test relies on (`TestResumeGuards` records a timeline
+and asserts it exactly): a count or a call position stays green when a refactor adds
+a call or drops the one you meant. A side effect that stands in for a concurrent
+request runs on the loop: from the worker thread `asyncio.to_thread` gave the patched
+function, `asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=...)`. Only
+from a worker: on the loop thread that `.result()` blocks the loop it is waiting on,
+so assert the thread first.
 
 Unit tests that exercise a caller's handling of a subprocess result stub its imported
 launch helper. For example, `cloud.aws.run_aws` tests stub `cloud.aws.popen_limited`;
@@ -1227,7 +1264,7 @@ measures, never above.
 - **A capability `skipif` must observe the tool's VERSION, not merely its presence.**
   `shutil.which("node") is not None` is not "node works here": `import.meta.dirname` is
   undefined before Node 20.11, so two tests ran and failed on a host whose `PATH` led
-  with Node 18 while the repo declares `engines.node >= 22`. Gate on the floor the code
+  with Node 18 while the repo declares `engines.node >= 22.12.0`. Gate on the floor the code
   under test actually needs, and probe it the way the tests will experience it.
 
 - **If you stub the only thing that releases a resource, the fixture owes the release.**
@@ -1844,7 +1881,7 @@ carrying forward:
   uses `import.meta.dirname`, **undefined before Node 20.11**, so `path.resolve(undefined, "..")`
   raises `ERR_INVALID_ARG_TYPE` and two tests failed in all five runs on a host whose
   PATH led with Node 18 — while the repo declares `.node-version` = 24 and
-  `engines.node >= 22`. This is the rule already stated for config ("a `skipif` helper
+  `engines.node >= 22.12.0`. This is the rule already stated for config ("a `skipif` helper
   must observe what the tests will observe") extended to a version floor. Same shape as
   the per-user-install resolvers below: presence is not capability.
 
@@ -1987,6 +2024,26 @@ about the code. Each is a hermeticity gap, and each has one fix:
   succeeds but encode fails" for a 2,000-deep JSON body met an interpreter that did both;
   assert the invariant across all three outcomes, and walk a deep structure iteratively
   in the assertion itself.
+- **A fixed loopback port is the host's, not the test's.** `SshTunnelManager.connect`
+  probes the port it allocated, for real, and gives up with "local port N was taken
+  while connecting" when it lost a race for it. `TestProxyRequest` handed the manager
+  `base_port=53500` and left the probe real, so on a busy macOS runner the remint test
+  read `False`: 53500 sits in the ephemeral range, and any outgoing connect on the box
+  can be using it. A test about what the manager does once connected pins the probe
+  with `_patch_port_probe`; a test about real port ownership binds port 0 and uses
+  the port the kernel picked. `test_every_manager_connect_test_pins_the_port_probe`
+  fails any test class that connects a manager, and any module-level helper that
+  builds one for a file that connects it, unless the probe is pinned outside a single
+  `test_` method or `_REAL_PORT_PROBE_CLASSES` names it with the reason the real probe
+  is the subject.
+- **`http.server` looks the host up between `bind()` and `listen()`.**
+  `HTTPServer.server_bind` calls `socket.getfqdn(host)`, a system-resolver call that
+  can stall on a macOS runner while the socket is bound but refuses every connect. A
+  parent that waits on a deadline for a spawned server to answer then reads a live
+  child that never comes up (`runtime stayed {'state': 'starting'}`). A server a test
+  spawns and waits for overrides `server_bind` to call `socketserver.TCPServer.server_bind`
+  and set `server_name` from the address it already has, as the stand-in in
+  `test_decisions_local_runtime_real_spawn.py` and `plumb_cpu.py` do.
 
 ### What a fifth five-run pass found (macOS, uv venv, ~106k tests per run)
 
@@ -3465,6 +3522,100 @@ session-scoped conftest pin read at each worker's first test. `under_measured` w
 probe's own event budget on tests that spawn real children. Nothing touched the live data
 home or the checkout.
 
+### What a fifteenth five-run pass found (macOS host, five workers, 152,063 tests per run)
+
+macOS (Apple silicon, 48 GiB), five rounds of the backend suite under the sweep skill's
+per-test probe on a test-only worktree off one commit, `-n 5` niced with a 4 GiB memory
+watchdog floor, the results directory inside the worktree but outside every test root;
+plus the vitest and electron suites once per round. Backend: 151,100 to 151,104 passed,
+3 to 7 failed, 0 errors, 946 skipped, 29 to 40 minutes per round (the 40 was round one,
+under the unpatched probe); vitest 41,106 passed and electron 2,298 passed every round;
+minimum available memory 14.6 GiB; the watchdog never fired. Two tests were red in all
+five rounds and are the host, not the suite (`test_kiro_cli_pin.py`'s two shadowed-`PATH`
+cases: the desktop app exports its bundled `kiro-cli` directory to every child, the test
+process was started from a dashboard session and inherited it, and `known_kiro_cli_dirs`
+ranks that directory FIRST -- the product behaving correctly; the fake host now drops the
+variable too). Everything else red was a race that went green in at least one round.
+
+The generalisable lesson this time: **a process-lifetime pool created lazily during a
+test is not that test's leak, and a probe that says otherwise is measuring scheduling.**
+Seventy-three of the eighty-five `leaked_child` records were the shared
+`executors.path_resolve_executor()` pool's two children, charged to whichever test first
+resolved a path after the previous teardown; every `env_leak` was the session temp-root
+fence landing on a worker's first and last test; every `thread_leak` but one was a named
+`mc-*` pool warming once. Read the record for WHO spawned the thing before reading the
+test for a bug -- and when the owner turns out to be a pool, fix the pool.
+
+- **A shutdown that races its own reaper refills the slot it just emptied.**
+  `SubprocessPoolExecutor.shutdown` set the stop flag and killed every child, while the
+  reaper thread -- the ONLY thing that spawns -- was mid-tick past its second stop check
+  and spawned into the slot a moment later. Measured as a `sleep(3600)` test child alive
+  at teardown in four rounds of four (`test_subprocess_pool.py::TestCallerBudget`), as 18
+  of 80 shut-down-at-once pools keeping a live child in a stress probe, and as the
+  `mc-pathres-reaper` children behind most of cluster E. `shutdown` now joins the reaper
+  (bounded, `_SHUTDOWN_REAPER_JOIN_SECS`) BEFORE the kill loop, skipping the join only
+  when the caller is the reaper itself; the same probe reads 0 of 80 after. A
+  `test/conftest.py` session fixture (the `test/` suite, not the built-in app tests) now
+  also calls `shutdown_maintenance_executor()` at session end, so the
+  shared pools are reaped where the leak reporting can see it rather than at `atexit`.
+- **A nonexclusive `O_CREAT` open can lose the create race on Darwin.** Two writers on a
+  fresh log directory -- the SEL background writer's first flush and a `prune` -- both
+  opened the chain-lock sidecar with `O_CREAT`; one came back `ENOENT` for a bare
+  `security_events.lock` and the prune was skipped, so `test_sel.py`'s concurrent chain
+  read 23 of 24 (rounds 1-3) and `test_sel_prune_streaming.py` lost appends (rounds 1, 4,
+  5). Same shape as the decision log's create. `_open_lock_sidecar` now creates
+  EXCLUSIVELY first and reopens without `O_CREAT` when a sibling won; a leaf that vanishes
+  between the two calls is a genuine `ENOENT`, left to the caller.
+- **A kill gate that answers for a neighbour's lease.** `runtime_ownership` keeps one
+  process-wide lease table and the kill gate refuses any pid found in it; test doubles
+  reuse a handful of pids (`4242` appears in about two hundred files), so a lease left by
+  an earlier test on the same worker made `test_cron_reaper.py` and
+  `test_subagent_force_stop_audit.py` read `outcome == "refused"` where they assert the
+  failed-kill wording -- three reds in one round, green in four. An autouse conftest reset
+  now clears both tables on both sides of every test.
+- **A wall-clock barrier as a race detector.** `spec_builder/tests/test_routes.py`'s
+  tombstone race parked both writers on a `threading.Barrier(3, timeout=10)`, but once the
+  first holds `_INDEX_LOCK` the second can never reach the barrier, so the CORRECT code
+  paid the full 10 s `BrokenBarrierError` every run and told pass from fail by elapsed
+  time. It now parks the first reader on an `Event`, signals the second writer's arrival
+  at the lock through the facade, and asserts exactly one read happened while parked --
+  0.3 s, and both planted races still fail.
+- **`Popen.kill()` is a shutdown, not a reap.** 7,765 `os.kill` events in runs 2-5 were
+  walked by caller: 5,629 were signal 0 through `platform_compat`'s liveness helpers,
+  2,136 were `Popen`/`asyncio.Process` kills or start-id-pinned helpers at a child the
+  test or production spawned inside the test, and 0 were a signal at a pid the test did
+  not create. The census (not a fix) is the deliverable; the probe still cannot tie a kill
+  to a spawn because spawn events carry no pid.
+- **A `monkeypatch.chdir` leaves the descriptor `cwd=None`.** 155 real `git` spawns from
+  two files (`auto_improvement/tests/test_suite_scope.py`, `test_prepare_pr_green_age.py`)
+  ran with the worker's cwd changed under them, indistinguishable to a per-spawn audit from
+  a spawn in the checkout. Both production helpers keep `cwd=None` by contract and already
+  expose the seam, so the tests now pin it: `runner=partial(subprocess.run, cwd=...)`, or
+  the script module's `subprocess` binding replaced with a namespace whose `run` carries
+  `cwd`. One spawn remains suite-wide, the rootdir conftest's one-time sandbox probe; it
+  now runs in the profile's own temp dir.
+- **An object whose constructor opened SQLite, dropped without a close.** `SubagentManager`
+  (`tasks.db`), `KnowledgeStore` touched from a worker thread (per-thread connections, so
+  `close()` releases only the caller's), `SkillsLoader` built inline: +3 to +9 descriptors
+  per test, GC-timed, in eleven files. Every one already had a production close path;
+  `close_subagent_managers` joins `close_skills_loaders` as an opt-in `test/conftest.py`
+  fixture and replaces ten identical module-level copies, `_close_all_for_tests()` is used
+  where another thread held a connection, and `close_skills_loaders` now joins the closed
+  loader's `skill-catalog-refresh` worker so a thread probe sees it gone.
+
+What was flagged and read before being left alone. `under_measured` and 54,197
+`checkout_write` records in round one were the probe (bare filenames pytest's
+`rmtree`-by-descriptor hands the audit hook, glued to the repo root; fixed before round
+two). `host_write` was the hypothesis example database the conftest redirects to
+`~/.cache`. `kill` is the census above. `thread_leak` outside the one `SkillsLoader` case
+was `mc-embed`, `mc-recall`, `mc-maint`, `mc-mcpprobe`, `mc-subproc` and `sel-writer`
+warming to their caps. `slow` was the suite's own budgets, plus the five
+`test_subagent_force_stop_audit.py` cases at 30 s each -- a missing `_RESET_TIMEOUT` pin,
+which the concurrent fourteenth pass (native Windows, three rounds) found and fixes in
+[#15061](https://github.com/kirodotdev/KiroCrew/pull/15061), together with the
+`test_connections_mint.py` tenancy stub behind the same refused-kill wording the conftest
+reset above floors.
+
 ## Running the suite: the defaults, and how to narrow safely
 
 The checkpoint run before a commit is the change-related set on both surfaces,
@@ -3822,7 +3973,7 @@ fixture's two pins, because pytest hands the test function and every fixture it
 requests the SAME `monkeypatch` instance. Everything after that line reads the
 runner's real free memory — the file is pinned, reads as pinned, and is not pinned
 where it matters. Measured on a macos-15 nightly backend shard reading 2.58 GB
-available, under the 4.5 GB floor: `test_taskq_admission_integration.py`'s
+available, under the 4.5 GB floor then in force: `test_taskq_admission_integration.py`'s
 post-pressure drain deferred the row a second time and failed as
 `assert 'queued' == 'starting'` — nothing in the traceback named memory, and the
 whole nightly publish chain skipped behind it. Scope the patches a test wants
@@ -3851,6 +4002,13 @@ while not observed():
 Where a test wants a timeout to *expire*, set it to `0` rather than a small value: the
 same branch is reached with no clock dependency at all.
 
+**`wait_for` on a subagent run cancels it, and the run can swallow the cancel.** A run
+cancelled before its first tool call takes the one-shot auto-continue branch: it returns
+normally with neither `done` nor `error` set, so `asyncio.wait_for(manager._tasks[id])`
+returns as if the run had finished and the next assertion reads state that was never
+written (`call_args` is `None`). Wait with `asyncio.wait({task}, timeout=...)`, which never
+cancels, then assert `info.done and not info._cancel_retry_used` with `_stop_reason(info)`.
+
 Two snapshots from different kernel accounting sources are this class too. Compare them
 with a bounded, measured slack, and keep allocation-growth observations in the failure
 message because a long-lived allocator may serve a probe from resident memory. Set the
@@ -3861,6 +4019,39 @@ The commonest shape here is not a rate but **an unawaited task**: a handler that
 answers before its work finishes leaves the assertion racing the loop. There is a
 synchronisation point, so use it — `drain_background_tasks(state)` — and see the Rules
 entry for what it looks like when you do not (a different test failing each run).
+
+An unawaited executor job holding a `file_lock` is the sharpest version, because the
+acquire on the event-loop thread is one attempt and never waits (the
+`platform_compat.file_lock` docstring). `await svc.remove(a)` leaves its trust
+revocation running on an executor thread, so a sync `svc.remove_sync(b)` on the next
+line, still on the loop, fails closed (`test_autonudge_refactor_contract`, 7 CI runs
+in one day). Prefer the async mutator, `await svc.remove(b)`. A test whose subject IS
+the sync mutator calls it off the loop (`await asyncio.to_thread(...)`) only when
+nothing else on the service is in flight: no armed timer, no observer, no pending
+persist, since those all belong to the loop. The mirror image is a holder on a fixed
+timer: it races the waiter's own start (`test_posix_lock_ceiling` saw a 4e-05s
+"wait"). Release it when the waiter's own refused attempt on that lock file is seen,
+and release it inside the coroutine, because `asyncio.run` joins its executor before
+an outer `finally` runs and a waiter cannot finish while the lock is held.
+
+A **crew log** has two holders the test does not own: the writer thread that lands
+every append, and the eager folder that reads the unit on its own thread right after
+each entry. Any crew-log call made straight from an `async def` -- a write
+(`commit_work_progress`), an open or read (`open_session_log`, `iter_from`,
+`session_ledger.read_state`) -- is refused whenever one of them holds the unit lock.
+A refused write raises `CrewLedgerNotRecorded`, a refused read raises `OSError`, and a
+best-effort reader quietly answers the empty record (`assert '' == 'fold me'`). It
+reached unrelated PRs on Windows and Linux shards through sync helpers that cannot see
+their caller is async (`_item`, `_work`, `_seed_item` in the issue-radar tests) and
+through direct reads in `test_discord.py`, `test_session_ledger.py` and
+`test_work_ledger_projection.py`; 0 in 400 local runs, so only a held-lock probe
+reproduces it. Make the call the way product handlers do, off the loop:
+`off_loop(fn, ...)` from `test/off_loop_helpers.py` inside a helper both kinds of test
+call, or `await asyncio.to_thread(...)`. `test_crew_log_off_loop_pin.py` fails any
+`async def` that makes such a call directly or through a same-module sync helper, and
+`TestSeedingSurvivesABriefLogLock` proves the hop waits out a held lock while the
+on-loop call is refused. Do not fix it by patching `_on_event_loop`: that hides the
+on-loop hazard from the product code under test too.
 
 Two more shapes, both MEASURED in a 5x full-suite run on Windows:
 
@@ -4053,6 +4244,15 @@ pytest-timeout kills the worker first, which is
 [class 6](#6-a-hang-is-a-lost-run-not-a-failed-test). Derive the ceiling from that mark
 (20 s under a 30 s mark) and say so where it is defined.
 
+**A cleanup awaited through `asyncio.to_thread` can be withdrawn, not merely late.**
+Cancelling the awaiting task cancels the executor job too if no worker has started it, so
+a `finally: await asyncio.to_thread(remove, path)` skips the removal whenever the
+cancellation wins the race for a worker. `aiohttp`'s `TestServer` cancels a handler when its
+client disconnects, so a test that waits on the removal fails as "cleanup never ran" however
+long it waits. Shield the cleanup, and close any handle on the file in that same job before
+the delete, since Windows refuses to delete an open file. Reproduce by holding the job in a
+default executor that queues it unstarted (`test_session_export._HeldExecutor`).
+
 ### 3. Leaked async objects
 
 An `AsyncMock` standing in for a **synchronous** method (`StreamWriter.write`,
@@ -4086,6 +4286,16 @@ mark is the tool for a test that genuinely cannot share a worker.
 Mutate process globals through `monkeypatch`, which reverts on teardown even when the
 test fails. Raw assignment does not.
 
+**A process-wide verdict cache decides whether the code under test runs at all.**
+`cron_script._shell_is_posix_strict` caches its answer per shell for the life of the
+process. Any earlier test on the same worker that ran the real probe leaves `/bin/sh`
+decided, so the cancel test's probe never ran, the blip it patched in never fired, and
+the cancel had nowhere to land (`assert [] == [True]`, two macOS runs out of two). A
+test that patches a step behind such a cache rebinds the cache to a fresh dict with
+`monkeypatch.setattr` for its own duration, as `_probe_blip` in
+`test_sandbox_interpreter_enoent_retry.py` does. To prove the fix, pre-fill the cache
+in a plugin: the test must fail on the old code and pass on the new.
+
 **Sharding does not just scatter this class, it hides it — so a full-suite run is the wrong
 place to be finding it.** `ci.yml` assigns whole files to Linux/Windows shards
 before import (every platform assigns whole files), and a leaker only damages tests
@@ -4106,6 +4316,36 @@ exporter running; the CWD restore and `_restore_log_record_factory` restore sile
 production really does `chdir` and really does install a record factory, and a test driving
 that code cannot avoid inheriting it. Restore either way — the damage is to other tests, and
 stopping it propagating is the part that is never optional.
+
+**Work QUEUED by a test is shared state too, and resetting the object it runs against is
+not enough.** MEASURED: a member row's event is fire-and-forget on the single `eventlog-io`
+worker (`eventlog_hooks.submit`), and the member log's path is resolved from
+`KIROCREW_HOME` when the append RUNS, not when it was queued. In three failing Windows
+shard-8 runs, the test just before the red on the same worker was a member resume that
+ends just after appending a row. Its append ran during the next test, opened that
+member's log under the next test's home, and the lock it held there refused that test's
+own first `record_activity`, which answered `False`. Resetting the event-log singleton at
+the boundary does not help: the closure resolves the service and the path as it runs. On
+Linux the overlap is usually too narrow to see, so the leak shows only where fsync is
+slow.
+
+`test/conftest.py`'s `_reset_member_eventlog_singleton` drains that queue at teardown,
+before the home pin is undone, and FAILS the test that filled a queue which will not
+drain — so the cost lands on the test that queued the work rather than on whichever test
+would have inherited it. It binds `drain_for_shutdown` at SETUP, because the tests of the
+shutdown path replace that function with a wedged or recording stand-in and the patch is
+still in force at teardown.
+
+Two things that floor does not reach, both residual rather than fixed: it is in
+`test/conftest.py`, so the in-package app suites under `src/kiro_crew/apps/builtins/*/tests`
+pay nothing for it, and it covers `eventlog-io` only — the dashboard's `notif-io` pool
+(`_notification_io_executor`) resolves the notifications file the same way when its job
+runs. The fix that removes the race rather than draining it is the one in
+[the classes it found](#the-classes-it-found-and-the-one-correct-fix-for-each): resolve
+every path when the work is queued. For the member log that means threading a home
+through `crew_log/store.py`, which derives it at each of the log, lease, segment and
+checkpoint paths; production never moves its home, so only the suite pays. A new
+fire-and-forget writer resolves at queue time AND joins a drain.
 
 ### 5. Absolute time budgets on instrumented runs
 
@@ -4243,6 +4483,16 @@ The same applies to `Event.wait()`, `Queue.get()`, `Condition.wait()`, and a
 matters when the property is broken); make it generous and keep it well under
 `--timeout`, so the failure is a named assertion and not a dead worker.
 
+A wait for something a CHILD process will write also watches the child, and quotes
+what it said. MEASURED in `test_crew_log_real_crash.py`: a marker poll with no
+`child.poll()` in it spends the whole 60 s ceiling on a child that crashed at import,
+then fails as "never reached failpoint" with the traceback that named the cause sitting
+unread in a pipe. So fail as soon as the exit is seen -- re-reading the marker first, so
+a child that announces and then exits still counts -- and quote the child's output. Send
+that output to a FILE under `tmp_path`, not to a pipe nobody reads before the wait
+returns: once a pipe buffer fills, the child blocks in its write and the wait times out
+on a child that is merely stuck.
+
 ### The gateway harness runs on all three platforms
 
 `kiro_crew.testing.harness.spawn_feature_gateway` boots a real gateway subprocess
@@ -4342,6 +4592,45 @@ failure. The four extra skips ARE the capability-gated tests standing aside, whi
 proves the runner lacked the capability and the one failure was the test that forgot
 to stand aside with them. No log spelunking required.
 
+### A test that says "every host" but was never run on Windows
+
+`test/test_app_script_cron_sibling_import.py` claimed its recorder cases run "on every
+host". The command-cron case does not: on Windows `run_command_sandboxed` refuses every
+command cron before it spawns (there is no POSIX shell, by design), so the recorder
+stayed empty and the case failed with `AssertionError: []` on every Windows shard of
+every pull request. It was not a flake: it failed the same way every time, locally too.
+
+Two rules close it:
+
+* When the product refuses a feature on some host, a test of that feature gates on the
+  product's OWN refusal probe -- here `cron_script._resolve_command_shell() is None` --
+  not on `sys.platform`. The skip then tracks the product: a host that starts running
+  command crons is held to the pin again. Run the probe under the SAME patches the test
+  body uses: unpatched, this one spawns through the real `wrap_argv`, which raises on a
+  POSIX host with no sandbox backend, so the probe reads that host as shell-less and
+  the skip stands the pin down on exactly the host it was written for.
+* A test whose docstring or name says "every host" / "all platforms" is run on Windows
+  before it merges: locally (`-n0` on one file is seconds) or by reading the
+  `Backend Tests (Windows)` shards of its own round. A recorder or spy that asserts it
+  saw a call is the shape to watch for: on a host that refuses early it sees nothing.
+
+### A frozen list of a surface other branches keep growing
+
+`test/test_context_composition_contract.py` pins the full signature of
+`ContextBuilder.build_message` as a string. A refactor branch recorded the list; a
+feature branch cut from an older base added one keyword. Each was green alone; on main
+together they were red on every platform and every later pull request inherited it.
+Rerunning cannot fix it, which is how to tell it from a flake: the same assertion fails
+on every head built on that main.
+
+A snapshot of a hot surface pins what callers depend on, not every byte. The signature
+tests compare through `_frozen_view`, which drops a NEW keyword-only parameter that has
+a default (no caller can feel it) and keeps everything else -- a removed, renamed,
+reordered or retyped parameter, a new positional or required one, a changed return
+annotation -- red. `test_only_a_compatible_addition_is_tolerated` proves each of those
+still reds. Use the same shape for any new pin over a surface that ordinary feature
+work grows; a byte-exact pin is right only for a surface nobody else edits.
+
 ## Keeping the suite fast
 
 The measured runs above exceeded 100k tests. At that scale, setup overhead rather
@@ -4356,8 +4645,9 @@ pytest test/test_foo.py -n0 -q --no-cov --durations=10
 
 Note that `--store-durations` numbers taken under `-n auto` include worker contention
 and overstate individual tests. Compare candidates **back to back** on the same machine
-(`git stash` / run / `git stash pop` / run); a number from an idle machine measured an
-hour earlier is not a baseline.
+(run the change, then the base in `git worktree add --detach <dir> <base>`; never
+`git stash`: every worktree shares one stash list); a number from an idle machine
+measured an hour earlier is not a baseline.
 
 ### The three highest-leverage patterns
 

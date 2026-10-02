@@ -451,14 +451,14 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # agent can write to names the executable; a resource ceiling / sandbox
         # adds nothing to a `--version` call.
         "diagnostics.py::_kiro_cli_version",
-        # The spec-permissions version gate: the same fixed argv
-        # ``[<kiro-cli>, "--version"]`` as the diagnostics probe above, 5s timeout,
-        # no shell, no cwd, pinned through ``pin_kiro_cli`` (no pin, no spawn), and
-        # cached per binary identity so it runs once per install rather than once
-        # per spec rebuild. Its answer decides whether ``agent.py`` writes the KAS
-        # ``permissions`` block a pre-2.23 kiro-cli refuses; nothing an agent says
-        # in a turn reaches the argv, and a sandbox adds nothing to ``--version``.
-        "kiro_cli.py::installed_kiro_cli_version",
+        # The spec-permissions and MCP-deferral version gates: fixed argv
+        # ``[<kiro-cli>, "--version"]``, 5s timeout, no shell, no cwd, cached per
+        # binary path and mtime. Every probed path is pin_kiro_cli's own install:
+        # the pinned binary or its chat sibling. Nothing a PATH entry names
+        # reaches this argv; no turn text enters argv.
+        # The result gates spec permissions and Crew MCP deferral, and a sandbox
+        # adds nothing to this bounded ``--version`` probe.
+        "kiro_cli.py::kiro_cli_version_at",
         # Tailnet origin derivation + forwarded-peer whois (RFC:
         # rfc-tailnet-dashboard-access): one fixed argv — ``["<tailscale>",
         # "status", "--json"]`` or ``["<tailscale>", "whois", "--json",
@@ -1155,6 +1155,10 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # classification as ``cli_doctor.py::_doctor`` above.
         "cli_doctor.py::_discord_intent_grants",
         "cli_doctor.py::_doctor_mcp_tools",
+        # ``node -v`` with a fixed argv and a 5 s timeout, read-only, to judge the
+        # installed Node against ``MIN_NODE_VERSION``. Split out of ``_doctor``
+        # unchanged; same classification as ``cli.py::_node_ok``.
+        "cli_doctor.py::_report_node",
         # The AST heuristic matches ``asyncio.run`` (attr ``run`` on base
         # ``asyncio``) driving one async capability-manager read from the
         # loop-less doctor path so the Credentials section can report whether this
@@ -1232,13 +1236,6 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # preparedness check: argv is hardcoded (systemd-oomd/earlyoom unit
         # names), no agent influence, 5s-capped, read-only query.
         "cli_doctor.py::_detect_userspace_oom_killer",
-        # Read-only diagnostic: `loginctl show-user <user> -p Linger --value`,
-        # a fixed argv whose only variable is the invoking account name taken
-        # from $USER/$LOGNAME (never agent-supplied). Same class as
-        # service/linux.py::_current_group — an identity/state query the doctor
-        # makes to tell the user whether pods survive logout. No shell, no
-        # agent-influenced argument, nothing written.
-        "cli_doctor.py::_linger_enabled",
         "cli_server.py::_logs_cmd",
         "cli_server.py::_spawn_detached_gateway",
         "cli_server.py::_update",
@@ -1431,6 +1428,10 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "instances/ssh_tunnel_manager.py::start",
         "instances/token_mint.py::mint_remote_token",
         "instances/token_mint.py::run_remote_kirocrew",
+        # NOT a subprocess spawn: the AST heuristic matches ``asyncio.run`` in the
+        # desktop tunnel keeper's CLI entry point. The only child it creates is the
+        # forward ``_SshTunnel.start`` spawns, listed just above.
+        "instances/tunnel_keeper.py::run",
         # The iMessage bridge child (`<cli_path> rpc [--db-path <p>]`). Fixed
         # list-argv, no shell: both paths come from the operator's own
         # `config.json` `imessage` section, which the settings API writes only
@@ -1620,6 +1621,13 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         "service/apparmor.py::parser_version",
         "service/apparmor.py::validate",
         "service/linux.py::_current_group",
+        # Read-only diagnostic: `loginctl show-user <user> -p Linger --value`, a
+        # fixed argv whose only variable is the service account name taken from
+        # $USER/$LOGNAME (never agent-supplied). Same class as
+        # service/linux.py::_current_group — an identity/state query the install
+        # makes to warn the operator when runtimes would die at logout. No shell,
+        # no agent-influenced argument, nothing written.
+        "service/linux.py::_linger_enabled",
         "service/linux.py::_sudo_run",
         "service/linux.py::_systemctl",
         "service/linux.py::_write_unit_via_sudo",

@@ -76,6 +76,22 @@ export interface StatusData {
   update_managed_by?: string
   update_can_arm?: boolean
   /**
+   * What an available update leads to on this install: `install` (with the
+   * auto-update switch on), `notify` (the switch cannot install here),
+   * `mandatory` (a policy floor installs it regardless), or `unknown` before
+   * the gateway first derives it. The update loop acts on the same answer.
+   */
+  update_auto_effect?: 'install' | 'notify' | 'mandatory' | 'unknown'
+  /**
+   * Whether the desktop app bundles and launches this gateway, from the baked
+   * packaging stamp. Independent of `update_managed_by`, which reads `command`
+   * on that same bundle when a policy `updates` provider is configured. There,
+   * `update_auto_effect` reports the PROVIDER's answer, since the provider is
+   * what this gateway's loop runs; without one it reports `notify`, the app's
+   * own updater owning the update.
+   */
+  update_bundled_by_app?: boolean
+  /**
    * Commit distance from a git checkout's upstream, both directions. Diverged
    * (both > 0) reports `update_available: false` exactly like a current
    * checkout — the destructive apply paths must never be offered local
@@ -830,6 +846,11 @@ export interface McpScopePresence {
   [scope: string]: boolean
 }
 
+export interface McpTempRefusal {
+  key: string; path: string
+  cause: 'sealed' | 'unclassifiable' | 'check-failed'
+}
+
 export interface McpServer {
   name: string; command: string; args?: string[]
   url?: string
@@ -852,6 +873,9 @@ export interface McpServer {
    *  alongside `authChallenge`; absent is "unknown", which is why the sign-in
    *  wording is gated on an explicit `false`. */
   authGrantPresent?: boolean
+  /** Spec-declared temp keys the probe refused (path already redacted); the
+   *  probe ran with the managed temp instead. Absent when nothing was refused. */
+  tempRefusals?: McpTempRefusal[]
   /** Optional status-enrichment fields supplied by newer runtimes. */
   accountLabel?: string
   connectedSince?: string
@@ -1140,6 +1164,17 @@ export interface ChatSlot {
    * DM thread to the worker sessions it drives — the Crew Members drawer
    * filters the live slots on it. */
   created_by?: string
+  /** The session tree's parent edge for this slot, attached to every row by
+   * `_attach_slot_parents`: `{slot, key}`, or null when this slot has no parent.
+   * `slot` is the parent's own citation and `key` names the parent's row IN THIS
+   * payload (bare slot key), or null when the parent is not running or sits on a
+   * cycle.
+   *
+   * Distinct from `created_by`, and both are needed to know whether a slot is a
+   * root: `created_by` is the birth-time edge, written once, while this one
+   * carries the edge an adopt or release moves later. An adopted session has an
+   * empty `created_by` and a parent here. */
+  parent?: { slot: string; key: string | null } | null
   /** Artifact companion binding: slug of the artifact this slot is a companion
    * chat for. Set at slot create and persisted in the history meta line, so the
    * binding survives a gateway restart and a History-page resume. */
@@ -1147,7 +1182,7 @@ export interface ChatSlot {
   /** Metadata for kind="webapp" artifacts (deploy state, architecture, costs). */
   webapp_metadata?: WebAppMetadata
   // Board fields
-  has_options?: boolean; options?: string[]; pending_approval_info?: PendingApproval | null; last_activity_ts?: string; waiting_for_input?: boolean; prompt_preview?: string; subagents_running?: boolean; orchestrating?: boolean
+  has_options?: boolean; options_ts?: string; options?: string[]; pending_approval_info?: PendingApproval | null; last_activity_ts?: string; waiting_for_input?: boolean; prompt_preview?: string; subagents_running?: boolean; orchestrating?: boolean
   /** An unanswered question card the turn is parked on, so the row would
    * otherwise read "Thinking…" with nothing able to advance it. Narrower than
    * `waiting_for_input` (true of every finished turn, and therefore no signal)
@@ -1160,6 +1195,14 @@ export interface ChatSlot {
   interrupted?: boolean
   // Soft-stop state machine
   stop_state?: 'idle' | 'soft_pending' | 'killing'
+  /** An automatic context compaction holds the session right now. Not a turn,
+   * so `running` stays false while it runs, which is exactly what made it look
+   * like a stall worth pressing Stop on (#14841). The composer shows it and
+   * the Stop button becomes a warning while it is set. */
+  compacting?: boolean
+  /** A cooperative Stop was declined moments ago (compaction); the next press
+   * escalates to the force stop. Read from the same window the backend uses. */
+  stop_declined?: boolean
   /** In-flight `wait` tool sleep, absent when nothing is sleeping. `deadline_ts`
    * is absolute seconds on the BACKEND clock (Date.now() / 1000 territory), so
    * the transcript can count down against it and survive a page reload;

@@ -35,6 +35,15 @@ it is removed, so a later reader can verify the guard still earns its place:
 * the reset ladder's gate -> ``test_the_reset_ladder_withholds_the_kill_and_the_shared_child_sweep``
 * the cron reaper's gate -> ``test_the_cron_reaper_reports_a_leased_runtime_instead_of_killing_it``
 
+A finished-result signal sits beside the reconciler, because the direction that
+PROTECTS a result is the opposite of the direction that ends a process. The
+completeness flag and the bytes it describes are written in two steps to two
+files, and a restart in that gap must not demote a whole answer to a fragment:
+
+* the durable-marker rescue -> ``test_the_durable_marker_rescues_a_finished_result_whose_flag_never_wrote``
+* its safe-direction complement -> ``test_a_result_without_either_signal_still_under_claims_as_a_fragment``
+* end to end over the reconcile -> ``test_the_reconcile_calls_a_marker_only_finished_run_orphaned_not_cut_off``
+
 Every one of those pairings is executed, not asserted in prose: the harness named
 in the pull request re-applies each mutation and requires the named test to fail.
 
@@ -60,6 +69,14 @@ import pytest
 from kiro_crew import runtime_ownership as ro
 from kiro_crew import runtime_reconcile as rr
 from kiro_crew.apps import backend as bmod
+
+# The rootdir conftest wipes runtime_ownership's tables on both sides of every
+# test. This file does its own intra-file isolation with explicit
+# ``ro._reset_for_tests()`` calls, and its positive control at the end reads the
+# table to prove the earlier tests left it clean -- a wipe at ANY test's teardown
+# would empty it first and make that read vacuous. Module-wide, not per test,
+# because the predecessor's teardown is the wipe that matters.
+pytestmark = pytest.mark.keep_runtime_ownership_tables
 
 # ── the reconciler core ───────────────────────────────────────────────────────
 
@@ -562,38 +579,106 @@ def test_an_absent_backend_pidfile_is_an_empty_set_not_a_refusal(
         rr._mcp_backend_pids()
 
 
-# ── the app-backend record ────────────────────────────────────────────────────
+# ── the app backend table ─────────────────────────────────────────────────────
 
 
-def _app_pidfile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rows: dict[str, Any] | str
-) -> Path:
-    """Write ``app_backends.pids.json`` in the product's own row shape and point the reader at it.
+class _Child:
+    """The two members of a ``Popen`` handle the table read touches."""
 
-    Patched through the facade, the backend's one patch surface: the write reaches the
-    owner that reads it, so the reader under test is the shipped one.
-    """
-    path = tmp_path / "app_backends.pids.json"
-    path.write_text(rows if isinstance(rows, str) else json.dumps(rows), encoding="utf-8")
-    monkeypatch.setattr(bmod, "_pidfile_path", lambda: path)
-    return path
+    def __init__(self, pid: int, returncode: int | None = None) -> None:
+        self.pid = pid
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
 
 
-def test_a_pid_only_the_app_backend_record_claims_is_owned_and_never_reaches_the_gate(
+def test_a_backend_this_gateway_spawned_is_owned_and_never_reaches_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """MUTATION TARGET: the app-backend record is part of membership.
+    """MUTATION TARGET: the app backend table is part of membership.
 
     An app backend runs inside the agent slice, carries the spawn marker and is
     long-lived by design, yet it is not a session, not a pooled MCP backend and in
-    neither tracked pid file. Its own record is the one thing that claims it; without
-    it every backend is unowned on every pass and collects a gate allow, and a kill
-    attribution naming it, whenever the argv check does not happen to decline it.
+    neither tracked pid file. The gateway's own table of what it spawned is the one
+    thing that claims it; without it every backend is unowned on every pass and
+    collects a gate allow, and a kill attribution naming it, whenever the argv check
+    does not happen to decline it.
 
     The membership read is the REAL wiring's; every other seam is faked past its
-    condition, so the only thing standing between the backend and the gate is the
-    record. The unrecorded neighbour is the positive control: it reaches the gate,
-    which proves the arm is armed rather than inert.
+    condition. Three neighbours keep the test honest. The unclaimed pid reaches the
+    gate, which proves the arm is armed rather than inert. That same pid has a row in
+    ``app_backends.pids.json``, which an agent can write, and the row claims nothing.
+    And a backend whose child has exited is out of the answer, so it is not reported
+    as a dead runtime.
+    """
+    from kiro_crew import session_pid
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(session_pid, "config_dir", lambda: home)
+    monkeypatch.setattr(rr, "_mcp_backend_pids", lambda: set())
+    planted = tmp_path / "app_backends.pids.json"
+    planted.write_text(
+        json.dumps({"planted": {"pid": 5402, "start_time": "ST-5402", "port": 9100}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bmod, "_pidfile_path", lambda: planted)
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "dev-fleet": bmod.AppProcess(app_name="dev-fleet", pid=5401, proc=_Child(5401)),
+            "crashed": bmod.AppProcess(app_name="crashed", pid=5403, proc=_Child(5403, 1)),
+        },
+    )
+
+    wired = rr.build_reconciler(active_pids=lambda: set(), notify_dead=lambda pid: None)
+    asked: list[int] = []
+    killed: list[int] = []
+    dead: list[int] = []
+    rec = rr.RuntimeReconciler(
+        slice_pids=lambda: {5401, 5402},
+        recorded_pids=wired._recorded_pids,
+        is_alive=lambda pid: pid != 5403,
+        identity_of=lambda pid: f"id-{pid}",
+        is_ours=lambda pid: True,
+        is_managed=lambda pid: True,
+        leases_on=lambda pid: 0,
+        claims_on=lambda pid: 0,
+        authorize=lambda pid, reason: asked.append(pid) is None,
+        kill_tree=lambda pid, expected=None: killed.append(pid) or 1,
+        forget=lambda pid: "not-mine",
+        notify_dead=dead.append,
+        age_secs=lambda pid: 10_000.0,
+        audit=lambda pid, outcome, why: None,
+    )
+    first = rec.run_once()
+    rec.run_once()
+
+    assert first.supported, first.reason
+    assert first.unowned_alive == 1, "only the unclaimed neighbour is unowned"
+    assert first.owned_alive == 1, "the backend the table holds is counted as owned"
+    assert first.owned_dead == 0 and dead == [], "an exited backend is not a dead runtime"
+    assert asked == [5402], f"the spawned backend never reaches the gate; got {asked}"
+    assert killed == [5402], f"and is never signalled; got {killed}"
+
+
+def test_a_forking_launchers_server_child_is_owned_through_the_real_membership_wiring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MUTATION TARGET: the children union reaches the reconciler's real membership.
+
+    A Linux app backend is spawned through ``sandbox_launcher``, which forks: the
+    tracked ``Popen`` root is the launcher parent and the real server is its forked
+    child. BOTH run in the agent slice. Without the children union the server is
+    unowned on every pass and collects a gate allow and a kill; with it, the record's
+    ``forking_sandbox_launcher`` widens ownership to the root's direct children, so the
+    whole backend is owned.
+
+    The membership read is the REAL ``build_reconciler`` wiring; the children reader is
+    faked so the test does not depend on a live ``/proc`` tree. The assertion that this
+    FAILS without the union is the positive control below.
     """
     from kiro_crew import platform_compat, session_pid
 
@@ -601,21 +686,28 @@ def test_a_pid_only_the_app_backend_record_claims_is_owned_and_never_reaches_the
     home.mkdir()
     monkeypatch.setattr(session_pid, "config_dir", lambda: home)
     monkeypatch.setattr(rr, "_mcp_backend_pids", lambda: set())
-    _app_pidfile(
-        tmp_path,
-        monkeypatch,
-        {"dev-fleet": {"pid": 5401, "start_time": "ST-5401", "port": 9100}},
-    )
-    monkeypatch.setattr(bmod, "_proc_start_time", lambda pid: f"ST-{pid}")
+    # Launcher parent 6001 (the tracked Popen root), forked server child 6002.
     monkeypatch.setattr(
-        "kiro_crew.platform_compat.pid_liveness", lambda pid: platform_compat.PID_ALIVE
+        platform_compat, "_proc_children", lambda pid: [6002] if pid == 6001 else []
+    )
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "dev-fleet": bmod.AppProcess(
+                app_name="dev-fleet",
+                pid=6001,
+                proc=_Child(6001),
+                forking_sandbox_launcher=True,
+            ),
+        },
     )
 
     wired = rr.build_reconciler(active_pids=lambda: set(), notify_dead=lambda pid: None)
     asked: list[int] = []
     killed: list[int] = []
     rec = rr.RuntimeReconciler(
-        slice_pids=lambda: {5401, 5402},
+        slice_pids=lambda: {6001, 6002},
         recorded_pids=wired._recorded_pids,
         is_alive=lambda pid: True,
         identity_of=lambda pid: f"id-{pid}",
@@ -634,156 +726,245 @@ def test_a_pid_only_the_app_backend_record_claims_is_owned_and_never_reaches_the
     rec.run_once()
 
     assert first.supported, first.reason
-    assert first.unowned_alive == 1, "only the unrecorded neighbour is unowned"
-    assert first.owned_alive == 1, "the backend its record names is counted as owned"
-    assert asked == [5402], f"the recorded backend never reaches the gate; got {asked}"
-    assert killed == [5402], f"and is never signalled; got {killed}"
+    assert first.unowned_alive == 0, "both the launcher root and its server child are owned"
+    assert first.owned_alive == 2, "the root and its direct child are both counted as owned"
+    assert asked == [], f"nothing reaches the gate; got {asked}"
+    assert killed == [], f"and nothing is signalled; got {killed}"
 
 
-def test_the_app_backend_record_leaves_out_only_a_row_whose_process_is_proven_gone(
+def test_without_the_children_union_the_server_child_would_be_unowned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """MUTATION TARGET: which rows the record still vouches for.
+    """POSITIVE CONTROL for the test above: with the bool OFF, the server child leaks.
 
-    Leaving a pid out makes it a kill candidate and keeping one only spares it, so a
-    row is dropped only on proof: the pid is DEAD, or both start identities read and
-    differ, which means the number now names somebody else. A row whose identity
-    cannot be confirmed, or an unsignalable pid, is an unknown and stays claimed. A
-    row that names no usable pid claims nothing.
+    Same slice and wiring, but the record is NOT marked ``forking_sandbox_launcher``.
+    The membership read then names only the root 6001, so the forked server 6002 is
+    unowned, reaches the gate and is signalled -- which is exactly the leak the union
+    closes. If this test ever reports ``unowned_alive == 0`` the union has stopped
+    being load-bearing and the test above proves nothing.
+    """
+    from kiro_crew import platform_compat, session_pid
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(session_pid, "config_dir", lambda: home)
+    monkeypatch.setattr(rr, "_mcp_backend_pids", lambda: set())
+    monkeypatch.setattr(
+        platform_compat, "_proc_children", lambda pid: [6002] if pid == 6001 else []
+    )
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "dev-fleet": bmod.AppProcess(
+                app_name="dev-fleet",
+                pid=6001,
+                proc=_Child(6001),
+                forking_sandbox_launcher=False,
+            ),
+        },
+    )
+
+    wired = rr.build_reconciler(active_pids=lambda: set(), notify_dead=lambda pid: None)
+    asked: list[int] = []
+    killed: list[int] = []
+    rec = rr.RuntimeReconciler(
+        slice_pids=lambda: {6001, 6002},
+        recorded_pids=wired._recorded_pids,
+        is_alive=lambda pid: True,
+        identity_of=lambda pid: f"id-{pid}",
+        is_ours=lambda pid: True,
+        is_managed=lambda pid: True,
+        leases_on=lambda pid: 0,
+        claims_on=lambda pid: 0,
+        authorize=lambda pid, reason: asked.append(pid) is None,
+        kill_tree=lambda pid, expected=None: killed.append(pid) or 1,
+        forget=lambda pid: "not-mine",
+        notify_dead=lambda pid: None,
+        age_secs=lambda pid: 10_000.0,
+        audit=lambda pid, outcome, why: None,
+    )
+    first = rec.run_once()
+    rec.run_once()
+
+    assert first.unowned_alive == 1, "the server child is unowned without the union"
+    assert asked == [6002], f"only the unclaimed server child reaches the gate; got {asked}"
+    assert killed == [6002], f"and it is the one signalled; got {killed}"
+
+
+def test_the_app_backend_table_claims_only_a_running_child_this_gateway_spawned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUTATION TARGET: which records of the table claim a pid.
+
+    A pid is claimed only while this process holds the backend as a running child: a
+    child that has not been reaped keeps its pid, so the number provably names the
+    backend. An exited child is gone. An adopted backend was launched by somebody
+    else, so the gateway vouches for none of its pids, and the STARTING placeholder
+    has no process at all.
+
+    A record whose ``forking_sandbox_launcher`` is set would also contribute its
+    root's direct children -- but only while the root is RUNNING. An EXITED forking
+    root contributes neither itself nor any child: it is dropped before the children
+    reader is ever consulted, so a reused pid's current children can never be claimed
+    on behalf of a dead launcher.
     """
     from kiro_crew import platform_compat
 
-    _app_pidfile(
-        tmp_path,
-        monkeypatch,
+    children_calls: list[int] = []
+
+    def _fake_children(pid: int) -> list[int]:
+        children_calls.append(pid)
+        return [9001]  # would be claimed if an exited root were walked
+
+    monkeypatch.setattr(platform_compat, "_proc_children", _fake_children)
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
         {
-            "live": {"pid": 5501, "start_time": "ST-A", "port": 9101},
-            "recycled": {"pid": 5502, "start_time": "ST-OLD", "port": 9102},
-            "dead": {"pid": 5503, "start_time": "ST-C", "port": 9103},
-            "identity-unreadable": {"pid": 5504, "start_time": "ST-D", "port": 9104},
-            "no-baseline": {"pid": 5505, "start_time": None, "port": 9105},
-            "unsignalable": {"pid": 5506, "start_time": "ST-F", "port": 9106},
-            "string-pid": {"pid": "5507", "start_time": "ST-G"},
-            "init": {"pid": 1, "start_time": "ST-H"},
-            "not-a-row": ["5508"],
+            "running": bmod.AppProcess(app_name="running", pid=5501, proc=_Child(5501)),
+            "exited": bmod.AppProcess(app_name="exited", pid=5502, proc=_Child(5502, 0)),
+            "exited-forking": bmod.AppProcess(
+                app_name="exited-forking",
+                pid=5504,
+                proc=_Child(5504, 0),
+                forking_sandbox_launcher=True,
+            ),
+            "adopted": bmod.AppProcess(
+                app_name="adopted",
+                adopted_pids=[5503],
+                adopted_start_times={5503: "ST-5503"},
+            ),
+            "starting": bmod.AppProcess(app_name="starting", starting=True),
         },
     )
-    live_starts = {5501: "ST-A", 5502: "ST-NEW", 5504: None, 5505: "ST-E", 5506: "ST-F"}
-    monkeypatch.setattr(bmod, "_proc_start_time", lambda pid: live_starts.get(pid))
-    liveness = {5503: platform_compat.PID_DEAD, 5506: platform_compat.PID_UNSIGNALABLE}
+    assert bmod.running_spawned_backend_pids() == {5501}
+    assert children_calls == [], "an exited forking root is never walked for children"
+
+
+def test_a_forking_launcher_claims_its_root_and_the_roots_direct_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUTATION TARGET: a forking-launcher record widens to the root's DIRECT children.
+
+    On Linux ``wrap_argv`` inserts ``sandbox_launcher``, which forks: the ``Popen``
+    root is the launcher parent and the real server is its forked child, in the same
+    slice and claimed by nothing. A record whose ``forking_sandbox_launcher`` is set
+    therefore contributes the root AND that root's direct children (the server), so
+    the server is owned rather than reading as a leak on every pass.
+    """
+    from kiro_crew import platform_compat
+
     monkeypatch.setattr(
-        "kiro_crew.platform_compat.pid_liveness",
-        lambda pid: liveness.get(pid, platform_compat.PID_ALIVE),
+        platform_compat, "_proc_children", lambda pid: [8801] if pid == 5601 else []
     )
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "forking": bmod.AppProcess(
+                app_name="forking",
+                pid=5601,
+                proc=_Child(5601),
+                forking_sandbox_launcher=True,
+            ),
+        },
+    )
+    assert bmod.running_spawned_backend_pids() == {5601, 8801}
 
-    assert bmod.recorded_backend_pids() == {5501, 5504, 5505, 5506}
 
-
-def test_an_absent_app_backend_record_claims_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No file is a real answer: no backend was ever spawned on this data home."""
-    monkeypatch.setattr(bmod, "_pidfile_path", lambda: tmp_path / "app_backends.pids.json")
-    assert bmod.recorded_backend_pids() == set()
-
-
-@pytest.mark.parametrize("contents", ["{not json", "[]", None], ids=["corrupt", "list", "dir"])
-def test_an_unreadable_app_backend_record_refuses_the_pass(
-    tmp_path: Path,
+def test_a_grandchild_of_a_forking_launcher_root_is_not_claimed(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    contents: str | None,
 ) -> None:
-    """MUTATION TARGET: a damaged record refuses the pass instead of claiming nothing.
+    """MUTATION TARGET: the widening is DIRECT children only, never grandchildren.
 
-    Read as empty, a file that exists and cannot be parsed presents every live app
-    backend as unowned -- the one input that makes a pass dangerous, and the reason
-    the MCP pidfile and the tracked-pid snapshot refuse the same way. The spawn, stop
-    and reap paths keep their lenient read of the same file.
-
-    The refusal is said at WARNING by the reader: the pass reports it only at debug,
-    and nothing but a spawn or stop rewrites the file, so a silent refusal would leave
-    the reconciler inert with no visible cause.
+    The launcher's forked child IS the server; anything the server itself forks below
+    it is the app's own doing and a frozen Not-a-goal. The reader asks for the root's
+    direct children once and never walks the tree, so a grandchild (a child of the
+    server, not of the root) is never in the answer.
     """
-    from kiro_crew import session_pid
+    from kiro_crew import platform_compat
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setattr(session_pid, "config_dir", lambda: home)
-    monkeypatch.setattr(rr, "_mcp_backend_pids", lambda: set())
-    monkeypatch.setattr(rr, "instance_slice_pids", lambda: {5601})
-    monkeypatch.setattr(bmod, "_unreadable_condition", {})
-    if contents is None:
-        path = tmp_path / "app_backends.pids.json"
-        path.mkdir()
-        monkeypatch.setattr(bmod, "_pidfile_path", lambda: path)
-    else:
-        _app_pidfile(tmp_path, monkeypatch, contents)
+    # 5602 -> [8802]; 8802 -> [9999]. A tree walk would reach 9999; a direct-children
+    # read of the ROOT alone returns only 8802.
+    tree = {5602: [8802], 8802: [9999]}
 
-    reading = rr.build_reconciler(
-        active_pids=lambda: set(), notify_dead=lambda pid: None
-    ).run_once()
+    def _children(pid: int) -> list[int]:
+        return tree.get(pid, [])
 
-    assert reading.supported is False
-    assert "registry" in reading.reason, reading.reason
-    assert any(
-        record.levelno == logging.WARNING
-        and "App-backend pidfile unreadable" in record.getMessage()
-        and "runtime reconcile refused" in record.getMessage()
-        for record in caplog.records
-    ), [record.getMessage() for record in caplog.records]
-    assert bmod._read_pidfile() == {}, "the spawn and reap paths still read it as empty"
+    monkeypatch.setattr(platform_compat, "_proc_children", _children)
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "forking": bmod.AppProcess(
+                app_name="forking",
+                pid=5602,
+                proc=_Child(5602),
+                forking_sandbox_launcher=True,
+            ),
+        },
+    )
+    assert bmod.running_spawned_backend_pids() == {5602, 8802}, "the grandchild 9999 is not claimed"
 
 
-def test_the_same_damage_is_said_once_and_every_pass_still_refuses(
-    tmp_path: Path,
+def test_a_non_forking_record_claims_only_its_root(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """MUTATION TARGET: the warning fires on a CHANGE of condition, the refusal every pass.
+    """MUTATION TARGET: ``forking_sandbox_launcher`` False claims no children.
 
-    Nothing but a spawn or stop rewrites the record, so damage persists across cleanup
-    ticks; a warning per tick would be one line every interval for the gateway's life
-    while the reconciler stays inert. The same damage read again is a steady state and
-    is not said again. A clean read forgets it, so later, different damage is a new
-    event and warns anew -- and the pass refuses every time, remembered or not.
+    A no-op wrap on an unconfined host, and the macOS seatbelt wrap that execs without
+    forking, both leave the root as the server itself. The default-False record must
+    contribute its root only, and the children reader must never be consulted for it.
     """
-    from kiro_crew import session_pid
+    from kiro_crew import platform_compat
 
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setattr(session_pid, "config_dir", lambda: home)
-    monkeypatch.setattr(rr, "_mcp_backend_pids", lambda: set())
-    monkeypatch.setattr(rr, "instance_slice_pids", lambda: set())
-    monkeypatch.setattr(bmod, "_unreadable_condition", {})
-    path = _app_pidfile(tmp_path, monkeypatch, "{not json")
-    reconciler = rr.build_reconciler(active_pids=lambda: set(), notify_dead=lambda pid: None)
+    walked: list[int] = []
 
-    def warnings() -> list[str]:
-        return [
-            record.getMessage()
-            for record in caplog.records
-            if record.levelno == logging.WARNING
-            and "App-backend pidfile unreadable" in record.getMessage()
-        ]
+    def _children(pid: int) -> list[int]:
+        walked.append(pid)
+        return [8803]
 
-    with caplog.at_level(logging.WARNING):
-        first = reconciler.run_once()
-        second = reconciler.run_once()
-    assert first.supported is False and second.supported is False
-    assert len(warnings()) == 1, warnings()
+    monkeypatch.setattr(platform_compat, "_proc_children", _children)
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "plain": bmod.AppProcess(app_name="plain", pid=5603, proc=_Child(5603)),
+        },
+    )
+    assert bmod.running_spawned_backend_pids() == {5603}
+    assert walked == [], "a non-forking record never reaches the children reader"
 
-    path.write_text("{}", encoding="utf-8")
-    assert reconciler.run_once().supported is True, "a clean read forgets the condition"
 
-    path.write_text("[]", encoding="utf-8")
-    with caplog.at_level(logging.WARNING):
-        third = reconciler.run_once()
-        fourth = reconciler.run_once()
-    assert third.supported is False and fourth.supported is False
-    said = warnings()
-    assert len(said) == 2, said
-    assert said[0] != said[1], "the second warning names the new damage"
+def test_an_oserror_reading_children_leaves_the_forking_root_claimed_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUTATION TARGET: an OSError from the children reader degrades to root-only.
+
+    Reading ``/proc`` for one root's children can fail; when it does the root stays
+    claimed on its own rather than the whole record being dropped (which would make a
+    live launcher parent read as a leak).
+    """
+    from kiro_crew import platform_compat
+
+    def _boom(pid: int) -> list[int]:
+        raise OSError("proc read failed")
+
+    monkeypatch.setattr(platform_compat, "_proc_children", _boom)
+    monkeypatch.setattr(
+        bmod,
+        "_processes",
+        {
+            "forking": bmod.AppProcess(
+                app_name="forking",
+                pid=5604,
+                proc=_Child(5604),
+                forking_sandbox_launcher=True,
+            ),
+        },
+    )
+    assert bmod.running_spawned_backend_pids() == {5604}
 
 
 def test_a_recycled_pid_does_not_inherit_the_previous_passs_confirmation() -> None:
@@ -2073,6 +2254,7 @@ def _cleanup(
         cleanup_stale_sandbox_profiles=lambda: 0,
         prune_session_pid_mappings=lambda: 0,
         prune_member_pid_bindings=lambda: 0,
+        rotate_shell_audit_log=lambda: False,
         prune_pycache=lambda: (0, 0),
         collect_active_pids=collect_active,
         periodic_pid_sweep=lambda gw, pids: (set(), list(candidates)),
@@ -2403,6 +2585,131 @@ async def test_the_orphan_reconcile_withholds_a_leased_pid(agent_root: Path) -> 
     assert (
         agent_root / "leased-orphan" / "tombstone.json"
     ).exists(), "the run is over either way; only the signal is withheld"
+
+
+# ── the finished-result completeness signal ──────────────────────────────────
+
+
+def test_the_durable_marker_rescues_a_finished_result_whose_flag_never_wrote(
+    agent_root: Path,
+) -> None:
+    """MUTATION TARGET: the marker clause in ``tombstone_recovery_action``.
+
+    ``result.txt`` and the ``result_complete`` flag are written in two steps of
+    the completion path, to two different files: the bytes are capped first, and
+    the flag lands later in ``state.json``. A gateway restart falling in that gap
+    leaves a WHOLE answer on disk with the flag never written. Reading
+    completeness off ``state.json`` alone then classifies that finished answer
+    ``partial_result`` and the parent is told it was cut off mid-turn -- told to
+    read a complete finding as an opening sentence.
+
+    The completion path drops a durable marker in the SAME step it caps
+    ``result.txt``, so the marker is present exactly when the bytes are whole,
+    independent of the later flag write. The classifier treats the marker as
+    equal proof: a finished run is ``result_available`` even when only the marker
+    survived.
+    """
+    from kiro_crew.subagent_manager.monitoring import tombstone_recovery_action
+    from kiro_crew.subagent_persistence import (
+        create_agent_folder,
+        mark_result_complete,
+        write_result_chunk,
+    )
+
+    create_agent_folder("flagless-finished", task="a finished answer")
+    write_result_chunk("flagless-finished", "the whole answer, every byte of it")
+    # The completion path's SAME-step marker landed; the restart fell before the
+    # separate state.json flag write, so result_complete was never recorded.
+    mark_result_complete("flagless-finished")
+    state = {"id": "flagless-finished"}  # no result_complete key -- the lost write
+
+    assert tombstone_recovery_action("flagless-finished", state) == "result_available", (
+        "a whole answer with its durable marker present is the agent's answer, "
+        "not a fragment, even when the state.json flag write was lost to the restart"
+    )
+
+
+def test_a_result_without_either_signal_still_under_claims_as_a_fragment(
+    agent_root: Path,
+) -> None:
+    """The safe direction is preserved: no flag AND no marker is a fragment.
+
+    This is the complement of the rescue above and the reason the marker is a
+    second proof rather than a replacement. A run interrupted mid-stream wrote
+    result bytes but never reached the complete event, so neither the state flag
+    nor the durable marker exists. That genuinely-partial result must still be
+    announced as cut off, never promoted to a whole answer -- under-claiming is
+    correct here, and only a FINISHED run carries either signal.
+    """
+    from kiro_crew.subagent_manager.monitoring import tombstone_recovery_action
+    from kiro_crew.subagent_persistence import create_agent_folder, write_result_chunk
+
+    create_agent_folder("truly-partial", task="an interrupted stream")
+    write_result_chunk("truly-partial", "an opening sentence the restart")
+    state = {"id": "truly-partial"}  # never completed: no flag, and no marker was dropped
+
+    assert tombstone_recovery_action("truly-partial", state) == "partial_result", (
+        "neither the state flag nor the durable marker is present, so the bytes "
+        "are a genuine fragment and must stay under-claimed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_reconcile_calls_a_marker_only_finished_run_orphaned_not_cut_off(
+    agent_root: Path,
+) -> None:
+    """End to end: the restart-window finished run is announced as a whole result.
+
+    Drives the real orphan reconcile over a run whose bytes and durable marker
+    are on disk but whose ``state.json`` lost the completeness flag to the
+    restart. The notification must read ``orphaned by gateway restart`` ("Use the
+    read tool to retrieve it"), NOT ``cut off mid-turn`` ("read it as an
+    unfinished fragment"), and the terminal ``recovery_action`` written to the
+    tombstone must be ``result_available``.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from kiro_crew.subagent import SubagentManager
+    from kiro_crew.subagent_persistence import (
+        create_agent_folder,
+        mark_result_complete,
+        read_tombstone,
+        update_state,
+        write_result_chunk,
+    )
+
+    ro._reset_for_tests()
+    manager = SubagentManager(sessions=MagicMock(), ctx_builder=MagicMock())
+    create_agent_folder("window-orphan", task="a finished answer caught by a restart")
+    write_result_chunk("window-orphan", "the whole answer, written minutes before the crash")
+    mark_result_complete("window-orphan")
+    # The flag write that follows cap_result_file never landed: state.json has no
+    # result_complete. A dead pid so the reconcile tombstones without a kill, and
+    # an empty parent_session so the real notifier falls through to the digest DM
+    # where its message is observable.
+    update_state("window-orphan", pid=424242, parent_session="")
+
+    captured: list[str] = []
+
+    async def _capture_dm(digest: str) -> None:
+        captured.append(digest)
+
+    with (
+        patch.object(manager, "_is_pid_alive", return_value=False),
+        patch.object(manager, "_send_orphan_slack_dm", side_effect=_capture_dm),
+    ):
+        await manager._reconcile_orphans()
+
+    assert captured, "the finished orphan must produce a notification"
+    note = captured[0]
+    assert (
+        "orphaned by gateway restart" in note
+    ), f"a finished answer rescued by its durable marker is a whole result; got {note!r}"
+    assert "cut off mid-turn" not in note, "the finished answer must not be called a fragment"
+    tomb = read_tombstone("window-orphan")
+    assert (
+        tomb and tomb.get("recovery_action") == "result_available"
+    ), f"the terminal recovery_action must record a whole result; got {tomb!r}"
 
 
 # ── the subagent reset ladder ────────────────────────────────────────────────
@@ -4148,6 +4455,11 @@ def test_every_tenancy_claim_in_this_file_is_bound_and_released() -> None:
 async def test_the_tenancy_table_is_empty_for_this_files_pids_at_the_end() -> None:
     """POSITIVE CONTROL for the scan: the pids this file claims are free afterwards.
 
+    Reads the table as the earlier tests in this file left it (the module-level
+    ``keep_runtime_ownership_tables`` mark keeps the rootdir conftest from wiping it
+    at every test boundary); wiped, the assertion below would hold against an empty
+    table and prove nothing.
+
     The scan reads text; this reads the table, so a scan that matched nothing -- a
     renamed accessor, a typo in the needle -- cannot pass while every claim leaks.
 
@@ -4163,3 +4475,209 @@ async def test_the_tenancy_table_is_empty_for_this_files_pids_at_the_end() -> No
             f"pid {pid} still carries a claim from an earlier test in this file, which "
             "refuses every later barrier on it"
         )
+
+
+def _cleanup_with_clock(
+    clock: list[float],
+    *,
+    logger: logging.Logger,
+) -> Any:
+    """A reconcile hook harness whose ``build_reconciler`` and clock the caller drives.
+
+    Returns the ``SessionCleanup`` with a mutable ``clock`` (its ``monotonic``
+    reads ``clock[0]``) and a named ``logger`` a ``caplog`` fixture can capture,
+    so the warn-once ledger for a refused pass can be exercised across ticks.
+    """
+    import dataclasses
+
+    cleanup, _recorded = _cleanup(candidates=[], active={4242})
+    cleanup._deps = dataclasses.replace(cleanup._deps, monotonic=lambda: clock[0], logger=logger)
+    return cleanup
+
+
+def _drive_reconcile(cleanup: Any, monkeypatch: pytest.MonkeyPatch, reading: Any) -> None:
+    """Run one reconcile hook tick whose pass returns *reading*."""
+    from kiro_crew import session_cleanup as sc
+
+    class _Fake:
+        def __init__(self, active_pids: Any) -> None:
+            self._active_pids = active_pids
+
+        def set_max_kills(self, budget: int) -> None:
+            return None
+
+        def run_once(self) -> Any:
+            return reading
+
+    monkeypatch.setattr(sc, "build_reconciler", lambda active_pids, notify_dead: _Fake(active_pids))
+    # The hook retains its reconciler across ticks (its two-pass memory). Each
+    # driven tick wants its OWN reading, so drop the retained one first.
+    cleanup.state.runtime_reconciler = None
+    asyncio.run(cleanup._reconcile_runtimes_hook())
+
+
+def test_a_refused_pass_is_reported_at_warning_not_only_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MUTATION TARGET: a refused reconcile pass surfaces above debug.
+
+    ``supported=False`` reclaims nothing and publishes no counts. Reported only at
+    debug, the reconciler goes silently inert while its source stays unreadable --
+    the defect this fixes. The fact must reach WARNING.
+    """
+    logger = logging.getLogger("test.reconcile.refusal.warn")
+    clock = [100.0]
+    cleanup = _cleanup_with_clock(clock, logger=logger)
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        _drive_reconcile(
+            cleanup,
+            monkeypatch,
+            rr.ReconcileReading(supported=False, reason="cannot read the registry: boom"),
+        )
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "a refused pass must warn, not stay at debug"
+    assert "cannot read the registry: boom" in warnings[0].getMessage()
+    assert cleanup.state.reconcile_refusal_reason == "cannot read the registry: boom"
+
+
+def test_a_persistent_refusal_warns_once_not_every_tick(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MUTATION TARGET: the re-warn floor is honored while the reason is unchanged.
+
+    The reconciler ticks on the cleanup cadence, so a condition that persists for
+    minutes must not write one WARNING per tick -- that is the noise the floor
+    exists to prevent.
+    """
+    logger = logging.getLogger("test.reconcile.refusal.once")
+    clock = [0.0]
+    cleanup = _cleanup_with_clock(clock, logger=logger)
+    same = rr.ReconcileReading(supported=False, reason="the tracked-pid snapshot is incomplete")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        _drive_reconcile(cleanup, monkeypatch, same)
+        clock[0] = 60.0  # well within RECONCILE_REFUSAL_WARN_INTERVAL_SECS
+        _drive_reconcile(cleanup, monkeypatch, same)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, f"a steady refusal warns once, not per tick; {warnings}"
+
+
+def test_a_new_refusal_reason_re_warns_at_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MUTATION TARGET: a CHANGE of reason bypasses the re-warn floor.
+
+    A different unreadable source is a different event and must not be swallowed by
+    a floor armed for the previous one.
+    """
+    logger = logging.getLogger("test.reconcile.refusal.newreason")
+    clock = [0.0]
+    cleanup = _cleanup_with_clock(clock, logger=logger)
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        _drive_reconcile(
+            cleanup, monkeypatch, rr.ReconcileReading(supported=False, reason="reason A")
+        )
+        clock[0] = 1.0  # far inside the floor
+        _drive_reconcile(
+            cleanup, monkeypatch, rr.ReconcileReading(supported=False, reason="reason B")
+        )
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(messages) == 2, f"a new reason warns immediately; {messages}"
+    assert any("reason A" in m for m in messages) and any("reason B" in m for m in messages)
+
+
+def test_a_recovered_pass_logs_recovery_and_re_arms(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MUTATION TARGET: a supported pass after a refusal clears the ledger and re-arms.
+
+    Without the clear the first outage after boot consumes the only WARNING, and a
+    later outage inside the floor is silent -- the original defect in a subtler
+    form.
+    """
+    logger = logging.getLogger("test.reconcile.refusal.recover")
+    clock = [0.0]
+    cleanup = _cleanup_with_clock(clock, logger=logger)
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        _drive_reconcile(
+            cleanup, monkeypatch, rr.ReconcileReading(supported=False, reason="reason A")
+        )
+        clock[0] = 1.0
+        # A supported pass: recovery logged, ledger cleared.
+        _drive_reconcile(cleanup, monkeypatch, rr.ReconcileReading(supported=True))
+        assert cleanup.state.reconcile_refusal_reason is None, "the ledger is cleared on recovery"
+        clock[0] = 2.0
+        # A fresh outage inside the old floor window re-warns immediately.
+        _drive_reconcile(
+            cleanup, monkeypatch, rr.ReconcileReading(supported=False, reason="reason A")
+        )
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("resumed reclaiming" in m for m in messages), f"recovery is announced; {messages}"
+    # First refusal + recovery + second refusal = 3 WARNING lines despite the floor.
+    assert len(messages) == 3, f"the re-arm lets the next outage warn at once; {messages}"
+
+
+def test_a_supported_pass_with_no_prior_refusal_logs_no_recovery(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A steady healthy reconciler is silent: recovery fires only after a refusal."""
+    logger = logging.getLogger("test.reconcile.refusal.quiet")
+    clock = [0.0]
+    cleanup = _cleanup_with_clock(clock, logger=logger)
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        _drive_reconcile(cleanup, monkeypatch, rr.ReconcileReading(supported=True))
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert messages == [], f"a healthy pass says nothing; {messages}"
+
+
+def test_an_incomplete_union_skip_surfaces_through_the_same_warn_once_ledger(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """MUTATION TARGET: the hook's OTHER silent-inert skip is not left at debug.
+
+    The incomplete-active-pid-union skip produces no reading and publishes no
+    counts, exactly as a ``run_once`` refusal does, so it must go through the same
+    warn-once ledger rather than a bare debug line -- otherwise the boundary covers
+    only ``run_once`` refusals, not every path that leaves the reconciler inert. It
+    is its own reason, so a distinct transition, and it recovers on the next
+    complete pass.
+    """
+    import dataclasses
+
+    from kiro_crew import session_cleanup as sc
+
+    logger = logging.getLogger("test.reconcile.refusal.union")
+    clock = [0.0]
+    # union_complete=False makes the hook take the incomplete-union skip before it
+    # ever builds or calls a reconciler.
+    cleanup, _recorded = _cleanup(candidates=[], active={4242}, union_complete=False)
+    cleanup._deps = dataclasses.replace(cleanup._deps, monotonic=lambda: clock[0], logger=logger)
+
+    class _Fake:
+        def __init__(self, active_pids: Any) -> None:
+            self._active_pids = active_pids
+
+        def set_max_kills(self, budget: int) -> None:
+            return None
+
+        def run_once(self) -> rr.ReconcileReading:
+            raise AssertionError("the pass must not run while the union is incomplete")
+
+    monkeypatch.setattr(sc, "build_reconciler", lambda active_pids, notify_dead: _Fake(active_pids))
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        asyncio.run(cleanup._reconcile_runtimes_hook())
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "the incomplete-union skip must warn, not stay at debug"
+    assert "incomplete" in warnings[0].getMessage()
+    assert cleanup.state.reconcile_refusal_reason == "the active-pid union is incomplete"

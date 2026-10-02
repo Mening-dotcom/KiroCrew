@@ -44,9 +44,9 @@ representative seams of each kind.
 | `config/sections.py` | The DTOs other specs and tests anchor here: agent, crew record, workspace, session, dashboard (with `TailscaleConfig` and its parser), the messaging channels, `wakatime`, speech-to-text and its degradation rules, telemetry, decisions, resource limits, and the bounds constants. It is also the facade for the three section owners below. |
 | `config/memory_sections.py` | `memory`, `knowledge`, `skills`, `session_summary` and the named `memory_stores` records. |
 | `config/integration_sections.py` | `mcp`, `mcp_gateway` (with the MCP stub roster readers the gateway seed shares), `instances`, `tunnel`, `publish`, `computer_use` and the external app `registries`. |
-| `config/service_sections.py` | `taskrunner`, `orchestrator`, `messaging`, `cron_history`, `monitoring`, `heartbeat` and `watchdog`. |
+| `config/service_sections.py` | `taskrunner`, `messaging`, `cron_history`, `monitoring`, `heartbeat` and `watchdog`. |
 | `config/section_builders.py` | The `_build_*` helper of 28 sections, grouped by the module that owns each section's DTO. Four `_build_*` helpers stay in the loader (agent, session, telemetry, dashboard). Sections with no helper are built inline in `KiroCrewConfig._load_resolved` (`heartbeat`, the external app `registries`, `memory_stores`, the `agents` crew roster, `workspaces`) or by their DTO (`DecisionsConfig.from_raw`, `ResourceLimitsConfig.from_raw`, `ChannelConfig.from_dict` for `slack_channels`). |
-| `config/migration.py` | The write-back migration ids, the document transform `apply_document_migrations`, the one-shot `connections_ui` marker name, superseded-default reporting, and the in-memory half of an adoption. |
+| `config/migration.py` | The write-back migration ids, the document transform `apply_document_migrations`, the one-shot `connections_ui` marker name, the legacy `skills.lazy_load` cohort test, superseded-default reporting, and the in-memory half of an adoption. |
 | `config/resolution.py` | Raw overlay merging, top-level section classification, and degraded-input tracking. |
 | `config/validation.py`, `config/schema.py` | Schema validation with the validated-data cache, and the JSON schema and restart registry built from the DTOs. |
 | `config/paths.py`, `config/live.py`, `config/superseded_defaults.py` | Pure path primitives, the one live-config watcher and applier registry, and the superseded-default registry with its acknowledgment ledger. |
@@ -93,6 +93,15 @@ because its readers look up a name the loader's callers and tests patch there:
 New section constants, including local speech's automatic-language default, are
 read from `config.sections` directly; they do not expand that historical facade.
 
+New work goes to the owner of its responsibility, not to a facade: a field to
+the module that owns its section's DTO, a new section's DTO to
+`memory_sections.py`, `integration_sections.py` or `service_sections.py` by
+domain, a shared coercer to `config/fields.py`, a section's `_build_*` helper to
+`config/section_builders.py`, a migration rule to `config/migration.py`, and
+overlay, validation, schema, live-applier and path work to its owner in the
+table above. `config/loader.py` takes only work inside one of its residual rows,
+and `sections.py` gains a new DTO only when another spec anchors it there.
+
 A feature whose section spends tokens on the user's behalf defaults to off and
 documents its knobs in its own spec — `session_summary` is the current example
 (see [session-summary.md](session-summary.md)), following the shape
@@ -114,10 +123,9 @@ contract are documented in
 
 ## Orchestration prompt contract
 
-`config/prompt.md` and `config/prompt-orchestrator.md` guide direct work and
-delegation using the same concrete-value policy. Parent-plus-child parallelism
-depends on the spawn receipt's delivery capability; the existing Autopilot
-approval and stage boundaries remain. Runtime checks and compatibility are
+`config/prompt.md` guides direct work and delegation using a concrete-value
+policy. Parent-plus-child parallelism depends on the spawn receipt's delivery
+capability. Runtime checks and compatibility are
 owned by [subagent.md](subagent.md), not inferred from prompt wording.
 
 ## Embedding rebuild request publication
@@ -537,8 +545,10 @@ Registered so far: `mcp_gateway.forward_declared_env` (False -> True, #4566),
 `instances.warm_set_cap` (5 -> 0, #7248),
 `agent.chat_turn_timeout_secs` (7200 -> 14400, #8949) and
 `agent.subagent_timeout_secs` (1800 -> 10800, #8891), and
-`agent.subagent_max_turns` (100 -> 1000, #12203). **Two** carry `auto_adopt` --
-the agent timeout budgets -- and the other entries are report-only; see below.
+`agent.subagent_max_turns` (100 -> 1000, #12203), and
+`agent.spawn_min_memory_gb` (4.0 -> 2.0, #15890). **Three** carry `auto_adopt` --
+the agent timeout budgets and the spawn memory floor -- and the other entries are
+report-only; see below.
 
 The subagent turn budget follows 1000 automatically when its key is absent,
 including in an existing installation after an update. Every valid stored value
@@ -554,7 +564,10 @@ Reporting is the right answer only while the two readings of a stored value are
 indistinguishable AND holding the old value is survivable. On the two agent timeout
 budgets neither holds: an install carrying `agent.subagent_timeout_secs: 1800` reaps
 every subagent at 30 minutes on a build whose default is 10800, and its operator
-sees timeouts instead of results having never chosen 1800. The existing mechanism's
+sees timeouts instead of results having never chosen 1800. Nor on the spawn
+memory floor: a materialized `agent.spawn_min_memory_gb: 4.0` keeps 4 GB free after
+every start, which a 16 GB laptop rarely has, so its subagents wait in the queue
+and essentially never start. The existing mechanism's
 only answer was a CLI command they have no reason to know exists.
 
 So `SupersededDefault.auto_adopt` opts ONE entry into a one-shot rewrite. What keeps
@@ -568,6 +581,7 @@ supported configuration:
 |---|---|---|
 | `agent.subagent_timeout_secs` | adopts | -- |
 | `agent.chat_turn_timeout_secs` | adopts | -- |
+| `agent.spawn_min_memory_gb` | adopts | -- (the 4.0 inputs in the admission tests set a floor, they do not pin a stored 4.0 as supported; the opt-out is `0`, not the old default) |
 | `session.autocompact_pct` | reports | `test_a_persisted_ceiling_value_is_left_alone` |
 | `dashboard.loop_stall_exit_after_secs` | reports | `test_explicit_desktop_default_is_preserved_for_managed_service` |
 | `stt.streaming` | reports | `test_put_persists_streaming` |
@@ -676,7 +690,7 @@ window (an entry whose config write failed describes a value that is still store
 and still listed as drift). Both fields come from the sidecar, a file the agent
 sandbox can write, so they are untrusted output: every character is rendered
 terminal-safe (control characters escaped, never executed), and the pasteable
-restore command is built only from `SUPERSEDED_DEFAULTS` literals after matching the
+restore command is built only from `SUPERSEDED_DEFAULTS` (and `LEGACY_LAZY_LOAD_ADOPTION`) literals after matching the
 entry by key and exact value -- no quoting scheme is portable across every shell an
 operator might paste into, so an entry the registry does not vouch for is shown,
 escaped, with no command. An adopted key holds no stored value any more, so it is
@@ -724,6 +738,72 @@ than pointing the operator at a command for something already fixed:
 - `kirocrew doctor` prints a `Stored Defaults` section reading `config.json`
   directly. Drift is informational and does NOT become an issue; an unreadable or
   malformed config does.
+
+### The legacy `skills.lazy_load` rewrite
+
+0.6.x and earlier materialized `skills.lazy_load: false` into every `config.json`
+they saved, and `false` was then the default full skills listing. Since 0.7.0
+`false` selects the short skill entry and the default is `true`, so an upgraded
+install silently runs the narrowest mode. This is NOT an `auto_adopt` row: on a
+0.7+ install `false` is the supported switch to the short entry, so value equality
+cannot tell noise from a choice. What can is WHEN the value was written, the same
+boundary the `connections_ui` launch migration uses.
+
+`migration.legacy_lazy_load_rewrite_due` decides on the BASE document, on a load
+that read it (never on a cache hit). It returns the writer's stamp only when all of
+these hold; every other case leaves the value exactly as stored:
+
+- the base stores exactly the boolean `false` (an explicit `true`, `0` or a string
+  is never touched);
+- `meta.lastTouchedVersion` parses as `major.minor.patch` with at most a short
+  suffix and names 0.6.x or older. An absent, non-object or unparsable `meta` is an
+  unknown writer, not a provable one, and declines;
+- `connections_ui_migrated.json` does not exist. It first shipped in
+  0.7.0-insider.1 and every clean later load writes it, so its absence proves no
+  0.7 build has loaded this home;
+- the adoption ledger is readable and does not name the key. This keeps the rewrite
+  one-shot even if the marker is later deleted; an unreadable ledger declines.
+
+**What stays unmigrated.** Nothing reports a declined `false` until the registry
+carries a report-only row for the key; the loader already skips that key in the
+same load's superseded-default line when it is the one being removed. The marker
+predates the meaning change: 0.7.0-insider.1 to insider.5 wrote it while `false`
+still meant the full listing, so an install that ran one of those keeps its
+materialized `false`. That is the conservative side of the boundary: the proof
+cannot tell those installs from a 0.7 operator who chose the short entry.
+
+The stamp is the proof, so nothing may re-stamp the document before the rewrite
+uses it. The load decides before it writes, and `refresh_config_meta_stamp` (the
+gateway's post-bind refresh) holds its refresh while the rewrite is still due, so a
+degraded first load leaves the proof for the next clean one. A writer that runs
+before any load and re-stamps -- `kirocrew config set --file`, which replaces the
+whole document with the operator's own -- ends the cohort, which is correct for a
+document the operator just supplied. So does any other real write by this build
+during a degraded session (a settings save, `config set`): those writes are this
+build's bytes, and holding the stamp across them would let the rewrite undo a value
+set on this build, which the in-lock re-check exists to prevent.
+
+The rewrite then rides `MIGRATE_SKILLS_LAZY_LOAD` through the same write-back as an
+adoption: re-detected inside the config write lock (still an exact `false`, still
+stamped 0.6.x or older; `kirocrew config set` and every settings save re-stamp, so
+a value set since the load's read is never undone), recorded in the adoption
+ledger as `{"skills.lazy_load": false}` BEFORE the key is removed, in the SAME
+record as any superseded-default adoption of that pass (two records would let a
+failed second one strand the first as adopted with nothing removed), the key
+un-materialized rather than written as `true`, the in-memory value moved only once
+the write is confirmed and only where `config.local.json` does not supply the key,
+the validated-data cache dropped when the write did not land, and the
+`connections_ui` marker deferred with it. One WARNING per rewrite names the key, the
+writer's version, why, which value now applies (the default, or the overlay's when
+`config.local.json` sets the key), and the `kirocrew config set skills.lazy_load
+false` that chooses the short entry. `superseded_defaults.LEGACY_LAZY_LOAD_ADOPTION` lets
+`adoption_summary` vouch for the ledger entry, so `doctor` and `kirocrew config
+defaults` replay it with a restore command (a bool spelled as JSON). It is never
+drift, so the marker-first residual leaves the value stored with only that line
+saying so. A load that declines on an unreadable ledger or stamp still writes the
+marker, so that install keeps its value for good; a degraded or deferred load
+writes neither and the next clean load decides again.
+`test_config_lazy_load_legacy_migration.py` pins the truth table.
 
 ## Acknowledging a superseded default
 
@@ -1337,6 +1417,29 @@ agent rather than the default, which a first real turn would otherwise have to
 discard); the **fail-loud** lives on the real turn alone, since the eager path is
 best-effort and tears itself down on any miss.
 
+**Failed background starts back off, then stop.** The signals that schedule an
+eager spawn (focus, reconnect, slot create, reset) recur, so a slot whose agent
+cannot start would spawn and tear down a fresh process tree on each one. After a
+failed background start, `schedule_eager_spawn` skips every signal for a backoff
+window: 10s after the first failure, 20s after the second. Nothing is queued for
+later, and the first signal after the window starts normally. (The window doubles
+up to a 300s ceiling, which only a larger cap would reach.) After 3 failures in a row (`_EAGER_SPAWN_FAILURE_CAP`),
+background starts for that slot stay **off until a start succeeds or the gateway
+restarts**. `schedule_eager_spawn` refuses the slot, and the stop is logged once
+at ERROR and posted once as an error row in the chat. The row's last-error text
+is redacted and bounded to 500 characters. The user's next message still starts
+the agent, and its success clears the count. The count lives only on the
+in-memory `_ChatSlot`, so a gateway restart starts it at zero.
+
+Only a failure of the agent start itself counts: an exception from the session
+allocation in `_spawn_admitted_prefetch`, other than a shutdown
+(`SessionClosingError`), a key being ended (`SessionEndingError`), a
+speculative-resume refusal, or a capability refusal raised before any process ran
+(`CapabilityError`, or a `CapabilityStartupError` code in
+`_PRE_SPAWN_CAPABILITY_CODES`). A failed pending-reset consume, binding or
+selection write, or admission step spawned no agent and is logged without
+counting. Pinned by `test/test_eager_spawn_start_backoff.py`.
+
 `register_app` (`apps/bridges.py`) backs the from-source recovery with a **visible
 error**: when a manifest declares agents but `_register_agents` materializes none
 (source missing or unreadable) it appends a `"registered 0 of N declared
@@ -1798,7 +1901,7 @@ caller, and replays only when it was built with `config=` (a raised
 store keeps its constructor defaults at construction. The other `watch_object`
 owners that copy caller-loaded config before registering (`cron_history.py`,
 `subagent.py`, `history_consolidation.py`, `adaptive/controller.py`,
-`slack/gateway.py`) keep the registration gap; they are out of scope for #10889.
+`slack/gateway_runtime/admission.py`) keep the registration gap; they are out of scope for #10889.
 
 ### The point-of-use read
 
@@ -1879,8 +1982,9 @@ dispatcher; `WorkflowService` binds `agent.workflow_run_timeout_secs` to its
 `agent.max_channel_agents` to its cap setters, both with `live.bind`). Only the
 ones whose holder is `DashboardState`, or that must rebuild agent artifacts,
 live in `server.py::_register_config_watch` — `agent.provider`,
-`agent.model`, `agent.role_models.background`, and `agent.log_level`
-(→ `handlers/updates.py::apply_log_level_from_config`). The log-level applier
+`agent.model`, `agent.role_models.background`, `agent.log_level`
+(→ `handlers/updates.py::apply_log_level_from_config`), and
+`dashboard.dynamic_dashboard_cards` (→ `DashboardState.set_dynamic_cards_enabled`). The log-level applier
 shares `apply_log_level` with the Logs page's `POST /api/logs/level`, and that
 one function moves the `kiro_crew` logger only — which is the ONLY level gate
 on the way to `gateway.log`: the file handler and the queue handler
@@ -1960,8 +2064,10 @@ Consequences, and they are the point:
   silently-inert bug this design exists to kill, now with the settings UI
   affirming that the value took effect.
 - **A reload that can widen approvals is audited.** `HookManager` follows
-  `hooks.*` live, and `config.json` is writable by an auto-approved agent shell,
-  so its applier SEL-logs an `auto_approve_tools` / `auto_approve_sources` /
+  `hooks.*` live, and `config.json` — sealed read-only against an in-sandbox agent
+  shell — is still written by every settings surface outside the seal (the config
+  PATCH, the operator CLI, an unsandboxed spawn), so its applier SEL-logs an
+  `auto_approve_tools` / `auto_approve_sources` /
   `auto_approve_subagent_*` change (`hook_manager.reconfigure`,
   `auto_approve_changed`, counts and flag names only) the way the channel
   transports audit an allow-list reload. Governance still caps the resulting
@@ -2127,6 +2233,7 @@ class MemoryConfig:
     persistence_enabled: bool = True # global switch: off = no automatic memory writes (lessons, consolidation, task-runner) AND no stored memory/lessons injected
     inject_memory: bool = True       # inject the stored memory block (preferences, activity index, recent-session snippets) into new-session context
     inject_lessons: bool = True      # inject the [Learned corrections] + [USER PROFILE] blocks into new-session context
+    inject_lessons_per_turn: bool = False  # on follow-up messages, add up to 3 matching lessons the session was not shown; requires inject_lessons
     inject_activity: bool = True     # inject the budgeted [Memory activity] block (projects, daily history (14 full days, then decayed summaries and counts to day 180), task facts, relevant episodes); requires inject_memory
 
 @dataclass
@@ -2196,6 +2303,7 @@ class DashboardConfig:
     url: str = ""                  # public URL for the dashboard (used in Slack links)
     # ... restore_sessions / bot_name / avatar / widget_density / auto_open_browser / etc.
     default_memory_mode: str = "persistent"  # persistent | incognito | temporary; default for user-created dashboard chats only
+    default_crew_mode: bool = False  # new plain dashboard chats on the default agent start on kirocrew-conductor (Crew Mode)
     verbosity: str = "default"     # "default" | "concise" | "ultra" | "answer_only"; anything but "default" injects a [RESPONSE PREFERENCES] block into SESSION CONTEXT for every agent (see "Response verbosity reaches every agent" below). Read/written via GET/PUT /api/dashboard/config (rejects values outside the enum). An unrecognized value injects nothing.
     theme_mode: str = ""           # "dark" | "light" | "system"; empty = unset (frontend falls back to localStorage or "system")
     theme_color: str = ""          # color-theme slug (e.g. "kiro", "emerald", "monokai"); empty = unset
@@ -2221,7 +2329,7 @@ class TelegramConfig:
     allowed_forum_chat_ids: list[int] = []  # numeric supergroup chat_ids permitted to run forum-topic sessions; empty = deny all groups (fail closed)
 
 # Additional top-level DTOs (not fully expanded here — see the owner modules in the Overview):
-# OrchestratorConfig, CronHistoryConfig, TunnelConfig, InstancesConfig, HeartbeatConfig,
+# CronHistoryConfig, TunnelConfig, InstancesConfig, HeartbeatConfig,
 # WorkspaceConfig, MemoryStoreConfig, ExternalRegistryConfig,
 # KiroCrewAgentConfig, SlackConfig.
 
@@ -2368,8 +2476,8 @@ to a closed vocabulary is not user-authored text, and masking it would break the
 reaction while destroying nothing an attacker could have put there.
 
 Anything else — a non-dict, an unknown `kind`, a ghost override carrying no
-trait, motion or sound that survives validation — collapses to `{}` on load (config.json is hand-editable and
-agent-writable, so junk must never crash the load), while the endpoints answer a
+trait, motion or sound that survives validation — collapses to `{}` on load (config.json is hand-editable,
+so junk must never crash the load), while the endpoints answer a
 non-empty raw value the coercer collapses with 400 `invalid_avatar` — except a
 well-formed ghost override whose traits all coerce to absent, which is the
 validator's own all-empty → reset rule rather than caller junk and so stores as
@@ -2438,10 +2546,12 @@ Consent to send message text and skill descriptions to Jev lives **outside
 
 `endpoint` is the `provider.endpoint` the owner consented to; the gate sends only
 while the configured endpoint still equals it, because that field is in this
-agent-writable file too. Same reasoning as `computer_use.json` above: `config.json` is a `VISIBLE` leaf the
-agent's shell can write, and every `decisions.*` field is hot-applied by the live
-watcher, so an `enabled` toggle here would let a prompt-injected agent start the
-egress of its own conversation without a restart. Reads fail soft to `{}` → **not
+same settings file. Same reasoning as `computer_use.json` above: `config.json` is
+sealed read-only against an in-sandbox agent shell (`sandbox._CREW_READONLY_LEAVES`;
+see security.md) but remains an ordinary settings file every config writer reaches
+without an owner gate, and every `decisions.*` field is hot-applied by the live
+watcher, so an `enabled` toggle here would be one settings edit away from starting
+the egress of the owner's conversation without a restart. Reads fail soft to `{}` → **not
 consented**, and only a literal `true` consents. The only writer is the owner-only,
 browser-called `PUT /api/decisions/consent` (`dashboard/handlers/decisions.py`);
 `PATCH /api/config/kirocrew` refuses `decisions.enabled`, and an `enabled` key written
@@ -2890,7 +3000,7 @@ KEEP handling", "KEEP-ALIVE header bug") survives.
 `dashboard.verbosity` describes how the PERSON wants replies to read, so it is
 delivered as session-context chrome — the same class as `[CURRENT DATE]` and
 `[UI LANGUAGE]` — not as a token an agent prompt has to opt into.
-`context.py::_build_response_preferences_section(cfg)` renders the level's
+`context_assembly/sections.py::_build_response_preferences_section(cfg)` renders the level's
 rules (`_reply_style_rules`) inside a `[RESPONSE PREFERENCES — MANDATORY]` …
 `[END RESPONSE PREFERENCES]` frame whose one sentence of preamble states that the
 rules bind every reply, on every surface, for every agent, and outrank any
@@ -2924,9 +3034,8 @@ dashboard chat runner does, so a channel session's compaction re-injects the
 skills index and this block.
 
 The earlier delivery — a `{{VERBOSITY_BLOCK}}` token expanded wherever an agent
-prompt carried it — is retired. No shipped prompt (`config/prompt.md`,
-`config/prompt-orchestrator.md`, the conductor/worker prompt constants in
-`agent.py`) carries the token, and `test/test_verbosity_config.py` pins that;
+prompt carried it — is retired. No shipped prompt (`config/prompt.md`, the
+conductor/worker prompt constants in `agent.py`) carries the token, and `test/test_verbosity_config.py` pins that;
 `_resolve_prompt_templates` still strips a stale token from a spec copied before
 the move so the literal never reaches the model. `context_blocks._MARKERS` knows
 the frame as `response_preferences`, so the context-breakdown panel attributes
@@ -3190,7 +3299,9 @@ corrupt existing document as described above.
 
 `skills.max_triggered=0` disables per-message trigger injection, not discovery.
 The default entry (`lazy_load=true`) is a bounded usage-ranked index carrying each
-skill's path, and one line naming the families it leaves out. `lazy_load=false`
+skill's path, and one line naming the families it leaves out. An install last
+written by 0.6.x or earlier has its materialized `false` removed once on upgrade
+(see "The legacy `skills.lazy_load` rewrite"). `lazy_load=false`
 selects the shorter entry: up to eight usage-ranked names with short purposes plus
 `skill_search` guidance for short keywords. An agent with its own `skill://`
 mapping gets neither -- those skills arrive as complete instructions. Both preserve pinned instructions, confined project-body

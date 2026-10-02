@@ -795,8 +795,11 @@ The store keeps no dispatch state in memory. The adapter's in-memory queue
   holds inside a lane across the window boundary, and every pending lane is
   represented in the window.
 - Depth for a parent = window entries for that session + `count_pending(...,
-  session_key=…)` outside the window; wave accounting consults
-  `fetch_pending_by_batch` the same way.
+  session_key=…, include_admitted=True)` outside the window: claimable rows
+  plus `admitted` ones (a claim in flight, or retained across an outage) that
+  no live run is registered for — the one "accepted, no run yet" definition the
+  queued listing (`list_pending(include_admitted=True, app=…)`) shares. Wave
+  accounting consults `fetch_pending_by_batch` the same way.
 - When nothing is eligible but rows wait on a `next_run_at`, the pump arms
   one `call_later` at the earliest of those (capped at `admit_wait_secs`).
 
@@ -1133,7 +1136,9 @@ duck-typed over `urllib`/`aiohttp`/`httpx` error shapes) and `acp_provider`
 `_is_transient_raw_error`, defined in `acp.transport_errors` and read through
 `acp.client`, so a third copy cannot drift) — and returns the
 first match, or `None` when the error is not a dependency error at all. An
-exception carrying a pre-attached `dependency_signal` wins outright.
+exception carrying a pre-attached `dependency_signal` wins outright, and an
+`AcpProcessDied` flagged `ambiguous_delivery` is never a dependency error, whatever
+its text: the wait would end in a re-run of work that may already have run.
 `register_adapter(name, fn, first=False)` adds one; an adapter that raises is
 skipped. The two GitHub monitors (`monitoring/github_pull_request.py`,
 `monitoring/github_workflow_run.py`) map `adapters.github.parse_gh_stderr()`'s
@@ -1246,7 +1251,7 @@ gateway makes before the store finished opening adopts nothing and the
 store-ready pass adopts exactly once -- two concurrent sweeps over one set of
 rows would let each settle a row the other is resuming.
 
-Gateway wiring is TWO passes over ONE admission (`slack/gateway.py`).
+Gateway wiring is TWO passes over ONE admission (`slack/gateway_runtime/admission.py`).
 `_wire_runner_admission` runs while the dashboard socket is being bound, so both
 consumers hold the admission -- and therefore the typed
 `task_store_unavailable` refusal -- from the moment they can serve; it also

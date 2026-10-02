@@ -868,7 +868,19 @@ admission FIRST -- queued waiters fail with `SpawnGateClosed`, watchers are
 cancelled (releasing their permits neutral), charges are dropped -- then
 proceeds with the existing teardown.
 
-**Wire.** `REGISTERED_CAPABILITIES` carries `spawn_queue`. A stub that saw it
+**Wire.** The `registered` reply carries the daemon's `code_fingerprint`.
+A stub targeting one of Kiro Crew's own MCP servers also puts its
+`stub_code_fingerprint` on the Register frame and requires the two values to
+match exactly before it keeps the broker connection. A missing value identifies
+a pre-fingerprint daemon; a different value identifies another installed code
+generation. Either condition closes that connection and takes the stub's normal
+per-session `fallback_exec`, so a package upgrade cannot leave current MCP
+servers consuming stale caller-identity or directive frames. This is a protocol
+compatibility check, not an authorization proof. Third-party targets send no
+`stub_code_fingerprint` and retain their existing binary-version pooling and
+old-daemon compatibility.
+
+`REGISTERED_CAPABILITIES` carries `spawn_queue`. A stub that saw it
 sends `{"type": "ensure_backend", "wait_budget_secs": N}` and the daemon queues
 the spawn for `min(N, spawn_queue_wait_secs)` LESS
 `_QUEUE_REFUSAL_MARGIN_SECS` (capped at half, so the subtraction is strict for
@@ -937,13 +949,28 @@ not that the server crashed, and no exec is run. The `stats` frame carries an
 
 ### Windows target command spelling
 
-Before writing `--target-command`, the rewriter restores the on-disk basename
-of a bare Windows command resolved through `shutil.which`. `which` can append
-uppercase `.EXE` from `PATHEXT` even when the file is named `demo-mcp.exe`.
-Windows can open that path, but a launcher that dispatches by its own basename
-with a case-sensitive lookup can reject it. The rewriter scans the resolved
-path's parent directory and substitutes the unique case-insensitive basename
-match instead of canonicalizing the full path.
+A bare Windows command resolved through `shutil.which` has its on-disk basename
+restored before it is spawned or persisted. `which` can append uppercase `.EXE`
+from `PATHEXT` even when the file is named `demo-mcp.exe`. Windows can open
+that path, but a launcher that dispatches by its own basename with a
+case-sensitive lookup can reject it. The repair
+(`kiro_crew.env.resolved_command_casing`) scans the resolved path's parent
+directory and substitutes the unique case-insensitive basename match instead of
+canonicalizing the full path.
+
+The three MCP server command resolvers share it, next to the `mcp_search_path`
+they already share: the agent-config resolver (`agent._resolve_command`), the
+dashboard probe (`mcp_discovery`) and the rewriter. Resolvers of Kiro Crew's own
+binaries stay outside it: the `kirocrew` lookup in
+`agent._resolve_kirocrew_bin`, and the kiro-cli launch path in
+`acp/client.py`, which keeps its own
+`_normalize_exe_casing`. The agent-config resolver is the one that
+matters most: its result is written as the spec's absolute `command`, and an
+absolute command is accepted verbatim on every later pass, so an uppercase
+spelling persisted once would look operator-authored to the rewriter forever.
+Repairing at the resolver rather than at the write site also keeps the
+provenance record's `emitted` value repaired, so `command_is_ours` still
+recognises the entry and re-derivation stays enabled.
 
 That narrow lookup preserves the lexical parent route (including a directory
 junction) and a file symlink's own name. Explicit absolute commands did not pass
@@ -1335,7 +1362,7 @@ Managed servers, registered by `agent._MANAGED_MCP_SERVERS` and installed into
 | `kirocrew-cron` | `kirocrew mcp-cron` (`mcp_cron.py`) | `cron_add`, `cron_list`, `cron_update`, `cron_remove`, `cron_remove_all`, `cron_pause`, `cron_resume`, `cron_trigger`, `cron_secret_request` |
 | `kirocrew-core` | `kirocrew mcp-core` (`mcp_core.py` + `mcp_tools/`) | spawn/subagent, learn, task, messaging, artifact, workflow, knowledge and session-directive tools (see below) |
 | `kirocrew-computer` | `kirocrew mcp-computer` (`mcp_computer.py`) | `computer_list_apps`, `computer_launch_app`, `computer_get_state`, `computer_click`, `computer_drag`, `computer_type_text`, `computer_press_key`, `computer_set_value`, `computer_scroll`, `computer_perform_action`, `computer_end_turn` |
-| `kirocrew-dashboard` | `kirocrew mcp-dashboard` (`mcp_dashboard.py`) | `chat_folder_tree`, `chat_folder_create`, `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`, `chat_session_pin`, `session_create`, `session_fork`, `session_stop`, `session_set_model`, `session_close`, `session_revive`, `session_send`, `session_broadcast`, `session_status`, `session_adopt`, `session_release`, `session_read_message`, `session_summary` |
+| `kirocrew-dashboard` | `kirocrew mcp-dashboard` (`mcp_dashboard.py`) | `chat_folder_tree`, `chat_folder_create`, `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`, `chat_tag_column_list`, `chat_tag_column_create`, `chat_tag_column_move`, `chat_session_pin`, `session_create`, `session_fork`, `session_stop`, `session_end_wait`, `session_set_model`, `session_reload`, `session_close`, `session_revive`, `session_send`, `session_broadcast`, `session_status`, `session_adopt`, `session_release`, `session_read_message`, `session_summary` |
 | `kirocrew-work` | `kirocrew mcp-work` (`mcp_work.py`) | `work_brief`, `work_report`, `work_ledger_read`, `work_ledger_record` |
 | `kirocrew-crew-log` | `kirocrew mcp-crew-log` (`mcp_crew_log.py`) | `crew_log_list`, `crew_log_read`, `crew_log_projection` |
 | `kirocrew-debug` | `kirocrew mcp-debug` (`mcp_debug.py`) | `debug_gateway`, `debug_refusals`, `debug_threads`, `debug_processes`, `debug_snapshots` |
@@ -1571,13 +1598,19 @@ See [browser](../system-specs/modules/browser.md).
 `kirocrew-core` is the surface EVERY session carries. kiro-cli reads `tools/list`
 once per session, so a tool listed there spends context in every request of every
 session for as long as the session lives — whether or not that session will ever
-use it. `agent.tool_search` is on by default, but **Crew's own servers are exempt
-from its deferral** (see below), so a tool in core costs its FULL JSON schema in
-every request, not a name plus a description.
+use it. With `agent.tool_search` on (the default), kiro defers MCP specs once they
+cross `agent.tool_search_min_pct` or `agent.tool_search_min_tokens`, and Crew's own
+servers defer like any other when the spawn runs the pinned kiro-cli install or its
+`kiro-cli-chat`, and both are >= 2.27.0. For any other executable (a pod bundle, a `kiro-cli`
+found on `PATH`), below that floor, or when the version is unknown, Crew keeps its
+servers resident to avoid the thinking-signature
+"tools list differs" rejection that bricks a session. A deferred tool costs a name
+plus a description rather than a full JSON schema; it is smaller, not zero, and it
+scales with the tool count. An operator's `ASBX_KIRO_MANDATORY_MCPS` value
+(comma-separated server names) in the gateway's environment always wins, including
+an explicit empty value; per-session overlays cannot change it.
 
-That makes the placement question a real one rather than a matter of taste —
-and the exemption is why it is sharper than it looks, since core is the one
-server deferral will never shrink:
+That makes the placement question a real one rather than a matter of taste:
 
 - **Core** is for capabilities a session may need *without being asked* —
   subagents, messaging, memory, artifacts, session-bound directives.
@@ -1599,78 +1632,6 @@ gates nothing an unreferenced server was not already denying.
 **Granularity: the set, not the tool.** A spec that references a server gets
 every tool in it. So a capability that must be grantable *separately* belongs in
 a server of its own, not alongside a set someone might want for other reasons.
-
-### Crew's own servers are exempt from Tool Search deferral
-
-`harness._common.apply_mandatory_mcps_env` sets `ASBX_KIRO_MANDATORY_MCPS` on the
-child from `agent.crew_owned_mcp_servers()`, and **both** kiro-family harnesses call
-it from their `apply_spawn_env`. kiro-cli keeps a named server's specs in the model's
-tool list even while deferral is active, so a Crew tool is never loaded mid-turn.
-Third-party servers keep deferring: they hold most of the spec weight and are
-reached rarely.
-
-**The harness hook is the only place both kiro spawn paths meet**, which is why it
-is not done at a call site. A session-serving child is spawned by `AcpRuntime` —
-kiro is in `ACP_BACKENDS_ACP_RUNTIME`, and `_start_kiro_runtime_impl` keeps its
-`AcpClient` for config storage and never spawns it — so an `AcpClient._spawn` hook
-would set the variable on none of the processes a user talks to. The auxiliary
-`AcpClient` kiro children (the knowledge pool, connection minting) run tool-less
-agents, so deferral has nothing to defer for them either way.
-
-**The reason is correctness, not cost.** Loading a deferred spec REWRITES the
-request's `tools` array, and an extended-thinking model's thinking blocks carry a
-signature bound to the array they were minted under. Replaying one across a load
-makes the provider reject the entire request —
-
-> Invalid `signature` in `thinking` block. … The `tools` list differs from the one
-> this block was created with.
-
-— and because the rejection is of the conversation's history, **every later turn
-on that session fails the same way**: the session is bricked, not slowed. Crew's
-own servers are the ones that trigger it, because they are the infrastructure an
-agent reaches for in nearly every session (measured on one heavy install: Crew's
-servers were 82% of all deferred loads and every observed failure, third-party
-servers 2.6%). So deferring them bought little and churned the array constantly.
-
-Three consequences worth knowing:
-
-- **The env var is a THIRD channel**, next to the `cli.json` overlay and the
-  `initialize` handshake (`agent_sdk.tool_search`). kiro-cli reads it from the
-  process environment when it builds the ACP session manager, so it is fixed at
-  spawn and cannot be changed on a live child.
-- **The list is every Crew-owned name, not the emitted ones.**
-  `crew_owned_mcp_servers()` deliberately includes `opt_in` servers, which
-  `emission_eligible_mcp_servers()` drops — a granted `kirocrew-work` serves tools
-  and would otherwise still churn. Naming an absent server matches no tool, so
-  erring wide is free and erring narrow is the defect. It also carries the edition
-  seam's extras, which are contributed by an edition ADAPTER rather than user
-  config, so they are Crew's own servers in the same sense the managed map is; the
-  seam does not constrain its keys, so nothing may assume a `kirocrew-` prefix.
-- **The operator's AMBIENT value wins; a per-session OVERLAY never does.** That is
-  why the hop reads `os.environ` rather than the `env` mapping it is handed, which is
-  already `{**os.environ, **extra_env}`. An ambient value is the operator's own
-  choice and is honoured verbatim, **including an explicit empty one** — the engine
-  reads an empty variable as an absent one, so `ASBX_KIRO_MANDATORY_MCPS=""` is the
-  only way to say "exempt nothing" and take the resident schema cost back off, and
-  truthiness would leave that unexpressible. `extra_env`, by contrast, carries
-  per-session overlays: a cron job's own `env` block reaches it through
-  `cron_job_env_without_reserved`, which passes every key outside
-  `_CRON_RESERVED_ENV_KEYS`, and an app manifest's `crons[].env` can author that.
-  An overlay value is therefore **overwritten**, and **removed** when Crew has no
-  servers to name — an overlay may neither disable the exemption nor invent it.
-  Letting one through would brick that cron's sessions with no code-level recovery,
-  since the variable is fixed at spawn and the next run inherits the same manifest.
-
-**KAS is covered too, because the relay IS kiro-cli.** Crew launches it as
-`kiro-cli acp --agent-engine v3` (`kas_transport.build_kas_argv`) — the same `acp`
-subcommand the kiro path uses — and that subcommand reads the variable
-unconditionally, not gated on `--agent-engine`. KAS is the more exposed of the two:
-it takes Tool Search over the `initialize` wire and defers every MCP spec whenever
-the setting is on, with no token threshold to stay under.
-
-This does not fix the underlying client bug — kiro-cli forwards a signed block
-without checking the tool set it was signed against — it stops Crew from being
-what walks into it.
 
 **A grant is not authority over everything the tools can name.** Assignment says
 which agent may call a set; it does not say what that agent may reach. The
@@ -1940,6 +1901,23 @@ applies the unattributable-caller refusal, the crew-member `member_owns_slot`
 fence and the App Kit ownership check that `api_chat_slot_folder` applies, and
 the member chat-route gate admits `PATCH` on that path for the same reason it
 admits the folder and tag writes.
+
+**Board columns follow the tag rules.** `chat_tag_column_list` reads the board
+(`GET /api/chat/tag-columns`), `chat_tag_column_create` appends a column that
+filters on one existing tag (`POST /api/chat/tag-columns` with `ensure: true`,
+which makes the endpoint return an existing column with the same name, tag and
+mode under its write lock instead of appending a twin), and
+`chat_tag_column_move` places one column before or after another
+(`PUT /api/chat/tag-columns/order` with the full id list plus `base_ids`, the
+order the tool read; the endpoint refuses 409 `stale_base` when the board changed
+in between, so a person's reorder is never overwritten). The board UI sends
+neither field and keeps its append and last-write-wins behaviour. The board is the person's own layout with no owner,
+like the vocabulary, so all four column write endpoints apply
+`_refuse_vocabulary_write` (apps and crew members get 403 `app_forbidden`), the
+create endpoint draws on its own `TAG_COLUMN_CREATE` budget, and the member
+chat-route gate admits only `GET` on the list. There is no delete or retag tool:
+either would remove a view the person built. The two writes are blocked for
+channel agents, at the permission prompt and again at dispatch.
 
 **Assignment is still not authorization.** Being unreferenced by default keeps a
 capability cheap and deliberate; it does not prove the user consented to reach the
@@ -2585,6 +2563,12 @@ CJK-pair tokenizer. Native tool schemas and Tool Search thresholds are unchanged
 gateway resolves scope from the signed session, never a model-supplied agent name.
 Without signed identity it uses the global installed catalog. Incremental indexing
 reports incomplete recall explicitly; list/read remain available during refresh.
+A read delivers at most one response's worth of body; a larger body is refused
+with its size and read in whole-line pages through the same `offset`/`limit`
+parameters, each page stateless and sized by the gateway to the capacity the
+tool derives from its own response framing, and a refused read names which of
+three reasons stopped it (outside the scope, unreadable, over the capacity).
+See [memory, skills and hooks](../system-specs/modules/memory-skills-hooks.md).
 
 ### Codex session-control delivery
 

@@ -25,6 +25,8 @@ import PendingQuestionCard from './PendingQuestionCard'
 import QueueStack, { SubagentDeliveryProgress, splitPaneMessages } from './QueueStack'
 import SubagentProgressBar from '../pages/chat/SubagentProgressBar'
 import CommandCenterDock from '../pages/chat/command-center/CommandCenterDock'
+import { usePreviewFlag } from '../hooks/usePreviewFlag'
+import { PREVIEW_DASHBOARD } from '../utils/previewFlags'
 import ChatFooter from '../pages/chat/ChatFooter'
 import PinnedPrompt from '../pages/chat/PinnedPrompt'
 import SessionTitleControl from '../pages/chat/SessionTitleControl'
@@ -51,7 +53,6 @@ import { useAvailableModels } from '../hooks/useAvailableModels'
 import { effortToCarry, filterInteractiveModels, legacyCodexEffort, modelWithoutEffort, shouldSeparateModelEffort, switchGroupedModel, useModelPickerConfigured, useModelPickerHiddenModelsQuery } from '../hooks/useInteractiveModels'
 import { modelSupportsEffort } from '../lib/effort'
 import { isUnpinnedModel, JEV_ROUTE_MODEL, jevRouteOffered, jevRouteShownModel, withJevRoute } from '../lib/jevRoute'
-import { usePlanActionMutation, isPlanAction } from '../hooks/usePlanActionMutation'
 import { useQueuedMessageActions, queuedSendStash } from '../hooks/useQueuedMessageActions'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useKirocrewConfigReader } from '../hooks/useKirocrewConfigReader'
@@ -82,11 +83,13 @@ import { resolveAskAfterSend } from '../lib/resolveAskAfterSend'
 import { classifyDrop } from '../utils/dropClassify'
 import { prepareSendPayload, serializeDirTokens, spliceDirTokens, VIDEO_EXT } from '../utils/fileTokens'
 import { Composer, type ComposerHandle, type ComposerVoiceOptions } from '../chat-core/composer/Composer'
-import { displayModel } from '../lib/model'
+import { displayModel, modelChipMarker } from '../lib/model'
+import { useSettingsDefaultModel } from '../hooks/useSettingsDefaultModel'
 import { slotApprovalMode } from '../utils/slotApprovalMode'
 
 
 import { i18nT } from '../i18n/t'
+import { fetchDashboardConfig } from '../api/dashboardConfigQuery'
 
 /**
  * ChatPane — one live chat session in the native session grid.
@@ -227,6 +230,9 @@ export default function ChatPane({
   // Same gate the main chat uses: hide a Connections-owned OAuth banner only
   // while the card that owns that flow is reachable.
   const connectionsUiOn = useConnectionsUiEnabled()
+  // The Dynamic Dashboard is a Feature Preview (Settings > Developer): its
+  // dock is offered only to someone who turned it on, whatever the host wired.
+  const dashboardPreview = usePreviewFlag(PREVIEW_DASHBOARD)
   const [input, setInput] = useState('')
   const [pendingFiles, setPendingFiles] = useState<string[]>([])
   // Collapsed paste blocks behind the `[ Paste #N · M lines ]` tokens in
@@ -490,7 +496,7 @@ export default function ChatPane({
   // for the same reason as ChatPage: both would offer the same choices, and
   // only the card can answer the blocked tool call.
   const pendingQuestion = useAppSelector((s) => pendingQuestionFor(s.chat.pendingQuestions, slotKey))
-  const { followUpOptions, followUpIsPlan, followUpSourceKey } = useMemo(
+  const { followUpOptions, followUpSourceKey } = useMemo(
     () => deriveFollowUpOptions(allMessages, busy, !!pendingQuestion),
     [allMessages, busy, pendingQuestion],
   )
@@ -519,26 +525,11 @@ export default function ChatPane({
     followUpInsertedRef.current = null
     setInput(next)
   }, [])
-  // Orchestrator plan dispatch (#5893) — same mutation ChatPage uses,
-  // targeting THIS pane's slot. The hook owns the latch acknowledgement,
-  // keyed on the derived options-row identity passed here; the ref lets the
-  // click handler see the in-flight state, not the render it closed over.
-  const planActionMutation = usePlanActionMutation(slotKey, followUpSourceKey)
-  const planActionMutationRef = useRef(planActionMutation); planActionMutationRef.current = planActionMutation
-  // One spelling for every plan-chip gesture (single-click, double-click,
-  // Send-now). `sourceKeyAtClick` is the row the gesture started on.
-  const dispatchPlanFollowUp = (action: string, sourceKeyAtClick?: string | null): boolean => {
-    if (!(followUpIsPlan && isPlanAction(action))) return false
-    if (!paneSlot) return true
-    if (paneSlot.mode !== 'orchestrator') return false
-    planActionMutationRef.current.mutate({ slot: slotKey, action, clickedSourceKey: sourceKeyAtClick })
-    return true
-  }
   const followUpOptionsKey = followUpOptions.join('\x00')
   useEffect(() => { setFollowUpPicked(new Set()); followUpInsertedRef.current = null }, [followUpOptionsKey, slotKey])
   // Quick Send parity with ChatPage: same query key, so the cache is shared
   // with the page and no extra request is made for a pane.
-  const { data: dashCfg } = useQuery<{ quick_send?: boolean; decisions_enabled?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
+  const { data: dashCfg } = useQuery<{ quick_send?: boolean; decisions_enabled?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: fetchDashboardConfig, staleTime: 30_000 })
   // Whether the split send button may offer `Auto (Jev)`: the fleet ceiling and
   // the owner's consent, both the gateway's answers (see useJevAutoSend).
   const jevAutoConsented = useJevAutoSend()
@@ -717,21 +708,32 @@ export default function ChatPane({
     _modelsDegraded,
     paneSlot?.model_withheld,
   )
+  // `default` only for the Settings default (see ChatPage).
+  const chipDefault = useSettingsDefaultModel(
+    paneSlot && !paneSlot.model ? paneAgentName : '',
+    paneRemoteCrew.isRemote,
+    codexPairModels,
+  )
+  const modelMarker = modelChipMarker(
+    paneSlot?.model || '',
+    shownModel,
+    _pinShownModel,
+    chipDefault.settingsDefault,
+    chipDefault.agentPinned,
+  )
 
   // One-time hydrate of this slot's message history via React Query + the api
   // client (caching + cross-pane dedup; staleTime Infinity keeps it one-shot —
   // live updates arrive through the WS store routing, not a refetch).
-  // Unbounded while streaming is deliberate, not a raw-row guard: the handler
-  // collapses chunk runs BEFORE computing total and slicing, even mid-stream.
-  // A background slot's stream state reads idle until an SSE frame arrives, so
-  // the slot record is the signal; latch only once unbounded so a turn that starts
-  // while the bounded fetch is still in flight can still upgrade it.
+  // Bounded whether or not the slot is running. The handler collapses chunk runs
+  // BEFORE it computes total and slices, even mid-stream, so a limit cannot cut
+  // a streaming response apart, and the page's `has_more` still marks older
+  // history. The rows a turn produces arrive over the WS routing, not this
+  // fetch. Lifting the bound for a running slot pulled its WHOLE transcript on
+  // every open: on a long, busy session that froze the renderer, and the crash
+  // recovery reopened the same chat into the same freeze (#12907).
   const limitRef = useRef<number | undefined>(PANE_HYDRATE_LIMIT)
   const limitLatched = useRef(false)
-  if (!limitLatched.current && (running || paneSlot?.running)) {
-    limitRef.current = undefined
-    limitLatched.current = true
-  }
   // A crewmate's chat that filters a BOUNDED window down to no speech has
   // proved nothing: the last thing it said may sit just behind the window,
   // under fifty newer patrol rows. The never-spoken hint is a claim about the
@@ -1619,6 +1621,7 @@ export default function ChatPane({
                 bodyBeyondPreview={pinnedState.bodyBeyondPreview}
                 pushUp={pinnedState.push}
                 liveH={pinnedState.liveH}
+                maxH={pinnedState.maxH}
                 bannerH={pinnedState.bannerH}
                 expanded={pin.pinExpanded}
                 onToggleExpanded={() => setPinExpanded(p => !p)}
@@ -1747,7 +1750,7 @@ export default function ChatPane({
         <JumpToBottomButton visible={!isAtBottom && messages.length > 0} onClick={scrollToBottom} />
 
         <SubagentProgressBar slot={slotKey} />
-        {onOpenCommandCenter && <CommandCenterDock slot={slotKey} onOpen={onOpenCommandCenter} />}
+        {dashboardPreview && onOpenCommandCenter && <CommandCenterDock slot={slotKey} onOpen={onOpenCommandCenter} />}
 
         <SubagentDeliveryProgress count={systemDeliveryCount} />
         {/* Rendered on server state only. A `steer-only` host never ASKS for a
@@ -1905,6 +1908,13 @@ export default function ChatPane({
           message={provider.capabilities.reasoningEffort && selectionCapabilitiesQ.isError
             ? i18nT('pages.chatPage.effort_options_unavailable') : ''}
         />
+        {/* No hand-off: this pane holds an unsent draft; the reads retry in place. */}
+        <ErrorNotice
+          variant="inline"
+          className="mx-4 mt-2"
+          testId="chat-pane-model-default-error"
+          message={chipDefault.failed ? i18nT('pages.settings.chatPanel.failed_to_load_config') : ''}
+        />
         {/* No hand-off: the composer draft is untouched by a failed stop; the
             turn is still running, so the Stop button stays for a retry. */}
         <ErrorNotice
@@ -1974,7 +1984,8 @@ export default function ChatPane({
           // Effort is edited inside the model picker below; the chip only
           // names the level in force.
           hasEffort={effortSupported}
-          modelIsInheritedDefault={shownModel !== 'auto' && shownModel !== _pinShownModel}
+          modelIsInheritedDefault={modelMarker === 'default'}
+          modelIsAutoChosen={modelMarker === 'auto'}
           // See ChatPage: the slot's RAW model, because `shownModel` substitutes
           // the served id and would hide every routed turn.
           modelIsJevRouted={jevRouteOn && isUnpinnedModel(paneSlot?.model)}
@@ -1989,21 +2000,7 @@ export default function ChatPane({
           followUpLayout={chatConfig.followUpLayout}
           quickSend={dashCfg?.quick_send}
           followUpSourceKey={followUpSourceKey}
-          followUpPendingOptions={planActionMutation.latchedActions}
-          followUpRefusedOptions={new Set(followUpOptions.filter(planActionMutation.isRefused))}
-          followUpError={planActionMutation.failure}
-          onFollowUpSelect={(o: string, e: React.MouseEvent, sourceKeyAtClick?: string | null) => {
-            // Mirrors ChatPage's wiring, plan branch included (#5893). Plan
-            // options (Go / Go All / Cancel — the only labels the plan
-            // pipeline emits and the only actions the endpoint accepts)
-            // dispatch directly against THIS pane's slot — no input fill:
-            // the same chip must mean the same thing here as in the main
-            // chat. A plan-SHAPED message carrying non-protocol labels keeps
-            // the composer path — dispatching those would 400 server-side
-            // while also skipping the append, leaving a dead chip.
-            // Slot record not yet delivered: dispatchPlanFollowUp no-ops
-            // rather than appending an approval label (the reported bug).
-            if (dispatchPlanFollowUp(o, sourceKeyAtClick)) return
+          onFollowUpSelect={(o: string, e: React.MouseEvent) => {
             // One-click Quick Send takes the same gate as ChatPage: enabled +
             // no shift + not busy + not already in multi-select.
             if (tryQuickSend(o, dashCfg?.quick_send, e.shiftKey, busy, followUpPickedRef.current.size, (t: string) => doSend(t))) return
@@ -2037,13 +2034,7 @@ export default function ChatPane({
               setFollowUpPicked(next)
             }
           }}
-          onFollowUpSend={(text?: string, sourceKeyAtClick?: string | null) => {
-            // Double-click and Send-now share dispatchPlanFollowUp with
-            // single-click (#6240). `sourceKeyAtClick` is the first-click
-            // row — a straddled double-click on a replaced footer is refused.
-            if (text && dispatchPlanFollowUp(text, sourceKeyAtClick)) return
-            doSend(text)
-          }}
+          onFollowUpSend={(text?: string) => doSend(text)}
           project={paneSlot?.project ?? ''}
           // A crewmate's chat is a DM with one named crewmate, so the composer
           // addresses it by name rather than the product ("Message Kiro Crew…").

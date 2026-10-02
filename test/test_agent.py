@@ -1132,13 +1132,17 @@ class TestAtomicJsonWrite:
 
         target = tmp_path / "test.json"
         target.write_text("{}")
-        target.chmod(0o664)
+        if sys.platform != "win32":
+            target.chmod(0o664)
 
         _atomic_json_write(target, {"key": "value"})
 
         import stat
 
-        assert stat.S_IMODE(target.stat().st_mode) == 0o664
+        if sys.platform != "win32":
+            # Windows has no POSIX mode bits; the content contract below is
+            # what this writer guarantees there.
+            assert stat.S_IMODE(target.stat().st_mode) == 0o664
         assert json.loads(target.read_text(encoding="utf-8")) == {"key": "value"}
 
     def test_new_file_gets_0o644(self, tmp_path: Path):
@@ -1149,7 +1153,8 @@ class TestAtomicJsonWrite:
 
         import stat
 
-        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        if sys.platform != "win32":
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
         assert json.loads(target.read_text(encoding="utf-8")) == {"new": True}
 
     def test_a_contended_rename_is_retried_on_windows(self, tmp_path: Path, monkeypatch):
@@ -5450,8 +5455,14 @@ class TestKiroHooksAutoimport:
         with caplog.at_level(logging.INFO, logger="kiro_crew.agent"):
             result = _autoimport_kiro_hooks(hooks_dir)
 
+        if sys.platform == "win32":
+            # No execute bit on Windows: a known script extension counts as
+            # runnable via platform_compat.is_executable_file, so the
+            # chmod -x sibling loads too instead of being skipped.
+            assert len(result["preToolUse"]) == 2
+            return
         assert len(result["preToolUse"]) == 1
-        assert result["preToolUse"][0]["command"].endswith("/ok.sh")
+        assert Path(result["preToolUse"][0]["command"]).name == "ok.sh"
         assert any("not executable" in rec.message for rec in caplog.records)
 
     @requires_symlinks
@@ -5528,7 +5539,7 @@ class TestKiroHooksAutoimport:
         _apply_user_kiro_hooks(config, mc_cfg)
 
         assert len(config["hooks"]["preToolUse"]) == 1
-        assert config["hooks"]["preToolUse"][0]["command"].endswith("/only.sh")
+        assert Path(config["hooks"]["preToolUse"][0]["command"]).name == "only.sh"
 
     def test_kiro_hooks_autoimport_respects_total_limit(self, tmp_path: Path, caplog):
         """More scripts than ``_MAX_TOTAL_USER_HOOKS`` get capped; one WARNING logged."""
@@ -6208,6 +6219,12 @@ class TestKiroHooksAutoimport:
         with caplog.at_level(logging.INFO, logger="kiro_crew.agent"):
             result = _autoimport_kiro_hooks(hooks_dir)
 
+        if sys.platform == "win32":
+            # Same platform rule as above: the script loads, so there is no
+            # rejection to audit.
+            assert len(result.get("preToolUse", [])) == 1
+            assert sel_calls == []
+            return
         assert result == {}
         assert len(sel_calls) == 1, (
             f"regression: expected exactly one _sel_hook_rejected call when "

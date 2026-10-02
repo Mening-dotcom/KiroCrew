@@ -60,6 +60,11 @@ from kiro_crew.atomic_write import atomic_write, on_event_loop
 # after the split must not join it.
 from kiro_crew.config import migration as _migration
 from kiro_crew.config import sections as _sections
+
+# Section DTOs and their field-level coercion live in a one-way sibling module.
+# Re-export every historical loader name so existing imports keep working while
+# KiroCrewConfig remains the compatibility facade and owns read/merge/save.
+from kiro_crew.config.fields import _coerce_bool
 from kiro_crew.config.migration import (  # noqa: F401
     _REPORTED_SUPERSEDED_KEYS,
     CONNECTIONS_UI_MIGRATION_MARKER,
@@ -156,7 +161,6 @@ from kiro_crew.config.section_builders import (  # noqa: F401
     _build_memory_config,
     _build_messaging_config,
     _build_monitoring_config,
-    _build_orchestrator_config,
     _build_publish_config,
     _build_session_summary_config,
     _build_skills_config,
@@ -174,10 +178,6 @@ from kiro_crew.config.section_builders import (  # noqa: F401
     _build_whatsapp_config,
     coerce_runtime_ceiling,
 )
-
-# Section DTOs and their field-level coercion live in a one-way sibling module.
-# Re-export every historical loader name so existing imports keep working while
-# KiroCrewConfig remains the compatibility facade and owns read/merge/save.
 from kiro_crew.config.sections import (  # noqa: F401
     _BOT_NAME_MAX,
     _BOT_NAME_RE,
@@ -296,7 +296,6 @@ from kiro_crew.config.sections import (  # noqa: F401
     MemoryStoreConfig,
     MessagingConfig,
     MonitoringConfig,
-    OrchestratorConfig,
     PublishConfig,
     ResolvedBindings,
     ResourceLimitsConfig,
@@ -408,6 +407,8 @@ from kiro_crew.config.validation import (  # noqa: F401
 )
 from kiro_crew.config.validation import validate_config_data as _validate_config_data  # noqa: F401
 from kiro_crew.constants import (
+    DEFAULT_SPAWN_MIN_MEMORY_GB,
+    DEFAULT_SUBAGENT_COST_GB,
     DEFAULT_SUBAGENT_MAX_TURNS,
     SUBAGENT_TIMEOUT_MAX,
     SUBAGENT_TIMEOUT_MIN,
@@ -702,6 +703,35 @@ def outbox_dir() -> Path:
 
 def config_path() -> Path:
     return config_dir() / "config.json"
+
+
+def overlay_pins(*key_path: str) -> bool:
+    """Whether ``config.local.json`` sets the key at *key_path*.
+
+    That overlay deep-merges OVER ``config.json``, so a Settings switch that
+    writes the BASE file snaps back to the overlay's value after a successful
+    write. A surface reporting this can say why instead of looking broken.
+
+    Best-effort: an unreadable, non-UTF-8 or malformed overlay reports "not
+    pinned" rather than raising, matching the loader itself (it warns and marks
+    the file degraded). The effective value a caller reports is authoritative
+    either way. One helper rather than one per key: the shadowing mechanism is
+    the overlay, not the key.
+    """
+    try:
+        path = config_local_path()
+        if not path.is_file():
+            return False
+        # ValueError covers JSONDecodeError AND the UnicodeDecodeError a file
+        # saved in a non-UTF-8 code page raises.
+        node: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    for key in key_path[:-1]:
+        if not isinstance(node, dict):
+            return False
+        node = node.get(key)
+    return isinstance(node, dict) and key_path[-1] in node
 
 
 def config_local_path() -> Path:
@@ -1841,7 +1871,10 @@ def refresh_config_meta_stamp() -> bool:
     Deliberately a plain field refresh, not a migration hook: the stamp is
     replaced, every other key is preserved, and nothing else changes. When
     the stored version already matches, the file is not rewritten at all
-    (no mtime churn, no ``lastTouchedAt`` bump).
+    (no mtime churn, no ``lastTouchedAt`` bump). Nor is it rewritten while
+    the one-shot legacy ``skills.lazy_load`` rewrite is still due
+    (``migration.legacy_lazy_load_rewrite_due``): the old stamp is that
+    rewrite's proof, and a degraded first load leaves it pending.
 
     The read-modify-write goes through :func:`update_config_locked` — the
     required path for new ``config.json`` mutations — so the refresh holds
@@ -1874,6 +1907,16 @@ def refresh_config_meta_stamp() -> bool:
         stored = meta.get("lastTouchedVersion") if isinstance(meta, dict) else None
         if stored == __version__:
             return None  # current: skip the write entirely
+        if (
+            _migration.legacy_lazy_load_rewrite_due(
+                data, connections_marker=config_dir() / CONNECTIONS_UI_MIGRATION_MARKER
+            )
+            is not None
+        ):
+            # The old stamp is the proof the pending one-shot rewrite reads, and a
+            # load that could not write (a degraded section) has not used it yet.
+            # It is still the build that wrote these bytes, so keeping it is true.
+            return None
         wrote = True
         return data  # update_config_locked stamps the meta block itself
 
@@ -2448,6 +2491,20 @@ def _subagent_timeout_from(raw: object) -> int:
     return value if value == 0 else max(SUBAGENT_TIMEOUT_MIN, value)
 
 
+def _clamp_compact_wait_secs(raw: object) -> float:
+    """Coerce ``session.compact_wait_secs``, preserving its ``0`` sentinel.
+
+    ``0`` means "use the built-in budget" and the resolver falls back to
+    ``COMPACT_WAIT_TIMEOUT_SECS`` for it, so it must survive coercion. A
+    positive value is lifted to at least ``COMPACT_WAIT_SECS_MIN`` and capped
+    at ``COMPACT_WAIT_SECS_MAX``: ``_safe_float`` with ``lo=0`` collapses a
+    negative to the sentinel, then the floor keeps a hand-edited near-zero
+    value from arming a budget that restarts every compaction.
+    """
+    value = _safe_float(raw, 0.0, lo=0.0, hi=_sections.COMPACT_WAIT_SECS_MAX)
+    return value if value == 0 else max(_sections.COMPACT_WAIT_SECS_MIN, value)
+
+
 _DEFAULT_MEMORY_MODES = frozenset({"persistent", "incognito", "temporary"})
 
 
@@ -2807,7 +2864,9 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         # default back to true. `_safe_bool` here is the final guard for a real
         # bool.
         crew_panel=_safe_bool(agent_data.get("crew_panel", True), True),
-        subagent_cost_gb=_safe_float(agent_data.get("subagent_cost_gb", 0.5), 0.5),
+        subagent_cost_gb=_safe_float(
+            agent_data.get("subagent_cost_gb", DEFAULT_SUBAGENT_COST_GB), DEFAULT_SUBAGENT_COST_GB
+        ),
         subagent_cpu_cost_cores=_safe_float(agent_data.get("subagent_cpu_cost_cores", 1.0), 1.0),
         subagent_auto_max=_safe_int(
             agent_data.get("subagent_auto_max", 32), 32, 3, SUBAGENT_AUTO_MAX_CEILING
@@ -2815,7 +2874,10 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         subagent_spawn_stagger_secs=_safe_float(
             agent_data.get("subagent_spawn_stagger_secs", 0.25), 0.25
         ),
-        spawn_min_memory_gb=_safe_float(agent_data.get("spawn_min_memory_gb", 4.0), 4.0),
+        spawn_min_memory_gb=_safe_float(
+            agent_data.get("spawn_min_memory_gb", DEFAULT_SPAWN_MIN_MEMORY_GB),
+            DEFAULT_SPAWN_MIN_MEMORY_GB,
+        ),
         resource_pressure_gb=_safe_float(agent_data.get("resource_pressure_gb", 4.0), 4.0),
         resource_critical_gb=_safe_float(agent_data.get("resource_critical_gb", 2.0), 2.0),
         admission_gate=_safe_bool(agent_data.get("admission_gate"), True),
@@ -2852,7 +2914,7 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         recovery_backoff_max_secs=_safe_float(
             agent_data.get("recovery_backoff_max_secs", 120.0), 120.0, 1.0, 3600.0
         ),
-        # Session-start gate (acp/runtime.py SessionStartGate).
+        # Session-start gate (acp/runtime_start.py SessionStartGate).
         session_start_concurrency=_safe_int(
             agent_data.get("session_start_concurrency", 2), 2, 1, 64
         ),
@@ -2964,6 +3026,12 @@ def _build_session_config(session_data: dict) -> SessionConfig:
             lo=AUTOCOMPACT_PCT_MIN,
             hi=AUTOCOMPACT_PCT_MAX,
         ),
+        # Clamped on the read, like the sibling floats: 0 is the sentinel for
+        # "use the built-in budget" and any positive value is the wait, so a
+        # hand-edited negative collapses to 0 (fallback) and an oversized value
+        # is capped. Bounds are referenced via the module handle, not imported:
+        # this module's top-level names are a frozen compatibility facade.
+        compact_wait_secs=_clamp_compact_wait_secs(session_data.get("compact_wait_secs", 0.0)),
         pool_size=_safe_int(
             session_data.get("pool_size", DEFAULT_POOL_SIZE),
             DEFAULT_POOL_SIZE,
@@ -3031,6 +3099,9 @@ def _build_dashboard_config(_degraded: set[str], dashboard_data: dict) -> Dashbo
         ),
         restore_sessions=dashboard_data.get("restore_sessions", False),
         crewmate_threads=_safe_bool(dashboard_data.get("crewmate_threads"), False),
+        crewmates_in_agent_picker=_safe_bool(
+            dashboard_data.get("crewmates_in_agent_picker"), False
+        ),
         dynamic_dashboard_cards=_safe_bool(dashboard_data.get("dynamic_dashboard_cards"), False),
         qr_session_until_restart=_safe_bool(dashboard_data.get("qr_session_until_restart"), True),
         qr_session_persist_across_restart=_safe_bool(
@@ -3104,6 +3175,7 @@ def _build_dashboard_config(_degraded: set[str], dashboard_data: dict) -> Dashbo
         verbosity=dashboard_data.get("verbosity", "default"),
         link_previews=_safe_bool(dashboard_data.get("link_previews"), False),
         tail_fork_enabled=dashboard_data.get("tail_fork_enabled", False),
+        default_crew_mode=_safe_bool(dashboard_data.get("default_crew_mode"), False),
         terminal=dashboard_data.get("terminal", {"enabled": True}),
         default_project=dashboard_data.get("default_project", ""),
         theme_mode=dashboard_data.get("theme_mode", ""),
@@ -3162,7 +3234,8 @@ def _build_dashboard_config(_degraded: set[str], dashboard_data: dict) -> Dashbo
         jira_auth=[
             JiraAuthEntry(
                 host=str(entry.get("host", "")),
-                email=str(entry.get("email", "")),
+                # ``user`` is accepted as an alias; ``email`` wins when both are set.
+                email=str(entry.get("email") or entry.get("user") or ""),
             )
             for entry in (dashboard_data.get("jira_auth") or [])
             if isinstance(entry, dict) and entry.get("host")
@@ -3186,10 +3259,6 @@ class KiroCrewConfig:
     taskrunner: TaskRunnerConfig = field(
         default_factory=TaskRunnerConfig,
         metadata=_meta("Task Runner", "Task runner configuration."),
-    )
-    orchestrator: OrchestratorConfig = field(
-        default_factory=OrchestratorConfig,
-        metadata=_meta("Orchestrator", "Autopilot/orchestrator settings."),
     )
     messaging: MessagingConfig = field(
         default_factory=MessagingConfig,
@@ -3412,7 +3481,12 @@ class KiroCrewConfig:
     )
     auto_update: bool = field(
         default=True,
-        metadata=_meta("Auto Update", "Enable automatic update checks."),
+        metadata=_meta(
+            "Auto Update",
+            "Where the install can apply updates, true installs them once no work is "
+            "running and restarts; false only notifies. Elsewhere it has no effect. "
+            "On those same installs a policy minimum version applies regardless.",
+        ),
     )
     #: Opt-in for the Connections gallery, which is merged but held for a later
     #: release. A real field rather than an unmodelled top-level key because the
@@ -3648,6 +3722,9 @@ class KiroCrewConfig:
         # therefore the correct answer on the hot path, not a missing one -- the load
         # that populated the cache already adopted.
         adoptable: list[SupersededDefault] = []
+        # Same rule for the legacy ``skills.lazy_load`` rewrite: the writer stamp of
+        # 0.6.x or older that the base document carried, or None.
+        legacy_lazy_stamp: str | None = None
         content_digest: str | None = None
         if cached is not None:
             data, sidecar, content_digest = cached
@@ -3711,7 +3788,18 @@ class KiroCrewConfig:
             adoptable = []
             if loaded_base:
                 adoptable = auto_adoptable(data)
-                _report_superseded_defaults(data, skip={e.dotted_key for e in adoptable})
+                # Decided here, on the base as the previous build left it: once this
+                # load writes, or the gateway's meta refresh runs, the stamp names
+                # the running build and the proof is gone.
+                legacy_lazy_stamp = _migration.legacy_lazy_load_rewrite_due(
+                    data, connections_marker=config_dir() / CONNECTIONS_UI_MIGRATION_MARKER
+                )
+                report_skip = {e.dotted_key for e in adoptable}
+                if legacy_lazy_stamp is not None:
+                    # The line must not send the operator after a key this same
+                    # load removes (it applies once the registry has a row for it).
+                    report_skip.add(_migration.LAZY_LOAD_KEY)
+                _report_superseded_defaults(data, skip=report_skip)
 
             # Deep-merge config.local.json overlay (user-owned, never touched by setup)
             local_data: dict = {}
@@ -3986,7 +4074,6 @@ class KiroCrewConfig:
         session_summary_data = _coerced_section(data, "session_summary", _degraded)
         messaging_data = _coerced_section(data, "messaging", _degraded)
         telemetry_data = _coerced_section(data, "telemetry", _degraded)
-        orchestrator_data = _coerced_section(data, "orchestrator", _degraded)
         watchdog_data = _coerced_section(data, "watchdog", _degraded)
         decisions_data = _coerced_section(data, "decisions", _degraded)
         resource_limits_data = _coerced_section(data, "resource_limits", _degraded)
@@ -4149,12 +4236,10 @@ class KiroCrewConfig:
             taskrunner=_build_taskrunner_config(taskrunner_data),
             cron_history=_build_cron_history_config(cron_history_data),
             messaging=_build_messaging_config(messaging_data),
-            # orchestrator/watchdog are advertised in config-baseline.json,
-            # served by /api/config/schema, and read by real consumers
-            # (acp/session_handle.py, dashboard/chat_orchestrator.py), so load()
-            # passes these kwargs — without them config.json values would be
+            # watchdog is advertised in config-baseline.json, served by
+            # /api/config/schema, and read by acp/session_handle.py, so load()
+            # passes this kwarg — without it config.json values would be
             # silently ignored and the dataclass defaults would always win.
-            orchestrator=_build_orchestrator_config(orchestrator_data),
             watchdog=_build_watchdog_config(watchdog_data),
             resource_limits=ResourceLimitsConfig.from_raw(resource_limits_data),
             telemetry=_build_telemetry_config(telemetry_data),
@@ -4193,7 +4278,18 @@ class KiroCrewConfig:
             # There is deliberately NO ``enabled`` key read here — see
             # ComputerUseConfig's docstring and computer_use_state_path().
             computer_use=_build_computer_use_config(computer_use_data),
-            auto_update=data.get("auto_update", True),
+            # ``_coerce_bool``, not ``_safe_bool``: this one key decides whether
+            # an unattended installer runs, and the two wrong answers are not
+            # symmetric. A hand-edited ``"auto_update": "false"`` is truthy to
+            # the loop, and ``_safe_bool`` would fold it (and ``0``, and
+            # ``null``) to this field's True default — installing on a host whose
+            # owner wrote the opposite. So a recognized spelling is honoured, and
+            # anything else unreadable falls back to OFF: an update not applied
+            # is a notification, while one applied against the owner's wish is a
+            # restart they did not ask for. An ABSENT key still defaults ON.
+            auto_update=(
+                True if "auto_update" not in data else _coerce_bool(data.get("auto_update"), False)
+            ),
             connections_ui=_safe_bool(data.get("connections_ui", True), True),
             _degraded_sections=frozenset(_degraded | _OBSERVED_DEGRADED_SECTIONS),
             timezone=data.get("timezone", ""),
@@ -4333,6 +4429,10 @@ class KiroCrewConfig:
             adopt_keys = {e.dotted_key for e in adoptable}
             if adopt_keys:
                 pending.add(MIGRATE_SUPERSEDED_DEFAULTS)
+            # The legacy lazy_load rewrite rides the same write, ledger and
+            # confirmed-only in-memory half as an adoption (see its id's docstring).
+            if legacy_lazy_stamp is not None:
+                pending.add(_migration.MIGRATE_SKILLS_LAZY_LOAD)
 
             needs_migration = bool(pending)
 
@@ -4371,6 +4471,22 @@ class KiroCrewConfig:
                         )
                     if entry is not None and not _overlay_supplies(local_data, key):
                         _adopt_in_memory(cfg, key, entry.old_default)
+                if _migration.LAZY_LOAD_KEY in confirmed_adoptions:
+                    overlay_sets_it = _overlay_supplies(local_data, _migration.LAZY_LOAD_KEY)
+                    logger.warning(
+                        "config: removed skills.lazy_load=false from config.json: Kiro "
+                        "Crew %s stored it when false was the default full skills "
+                        "listing, and false now selects the short skill entry. %s To "
+                        "choose the short entry: kirocrew config set skills.lazy_load false",
+                        legacy_lazy_stamp,
+                        (
+                            "config.local.json still sets the key, and its value applies."
+                            if overlay_sets_it
+                            else "The current default (the ranked skill index) applies."
+                        ),
+                    )
+                    if not overlay_sets_it:
+                        _adopt_in_memory(cfg, _migration.LAZY_LOAD_KEY, False)
             elif needs_migration:
                 # This load DISCARDED something (a malformed section, an
                 # unreadable file). The write-back serializes only the parsed
@@ -4434,7 +4550,11 @@ class KiroCrewConfig:
             # EVERY load for as long as the two conditions coexist. After the
             # restart the fixed file's fingerprint misses the (empty) cache and the
             # adoption retries on that first load -- no invalidation needed.
-            if adopt_keys and not adoption_landed and not cfg._degraded_sections:
+            if (
+                (adopt_keys or legacy_lazy_stamp is not None)
+                and not adoption_landed
+                and not cfg._degraded_sections
+            ):
                 _invalidate_config_cache()
 
         return cfg, ticket, content_digest
@@ -4474,7 +4594,6 @@ class KiroCrewConfig:
             "mcp_gateway": asdict(self.mcp_gateway),
             "mcp": asdict(self.mcp),
             "taskrunner": asdict(self.taskrunner),
-            "orchestrator": asdict(self.orchestrator),
             "watchdog": asdict(self.watchdog),
             "resource_limits": asdict(self.resource_limits),
             "messaging": asdict(self.messaging),

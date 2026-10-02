@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ...execution_context import ExecutionContext
     from ...subagent import (
         AGENT_NOT_AVAILABLE_CODE,
+        MEMORY_CAUSE_CGROUP_USAGE_UNREADABLE,
         QUEUED_REASON_ADAPTIVE_CAP_ZERO,
         QUEUED_REASON_CONCURRENCY_LIMIT,
         QUEUED_REASON_LOW_MEMORY,
@@ -20,17 +21,23 @@ if TYPE_CHECKING:
         KiroCrewConfig,
         ParentSpawnPolicy,
         SubagentInfo,
+        _cost_bucket,
+        _dedicated_start_price_gb,
+        _shared_start_price_gb,
+        _spawn_memory_floor_and_cost,
         _startup_memory_reserve_gb,
         _validate_agent,
         _validate_app_agent_ownership,
         _vet_parent_available_agents,
         _vet_spawn_governance,
+        adaptive_pause_text,
         asyncio,
         cached_admission_check,
         check_memory_available,
         logger,
         parent_spawn_policy,
         platform_compat,
+        pop_memory_check_cause,
         redact_credentials,
         redact_exfiltration_urls,
         sel,
@@ -129,15 +136,27 @@ class _GateMixin(ManagerComponent):
                     template_id=agent or inherited[1],
                 )
                 if inherited[0] == "member":
-                    selected = KiroCrewConfig.load().agents.get(inherited[1])
-                    if selected is None:
-                        raise ValueError("selected member is unavailable")
-                    execution = replace(
-                        execution,
-                        selection_kind="member",
-                        selection_name=inherited[1],
-                        template_id=selected.kiro_agent or "kirocrew",
+                    from kiro_crew.crewmate_prune_migration import (
+                        removed_crewmate_names as _removed_crewmate_names,
                     )
+
+                    selected = KiroCrewConfig.load().agents.get(inherited[1])
+                    if selected is not None:
+                        execution = replace(
+                            execution,
+                            selection_kind="member",
+                            selection_name=inherited[1],
+                            template_id=selected.kiro_agent or "kirocrew",
+                        )
+                    elif (
+                        execution.store.store_id != "default"
+                        or execution.member_id is not None
+                        or inherited[1] not in _removed_crewmate_names()
+                    ):
+                        raise ValueError("selected member is unavailable")
+                    # Otherwise the member is a synced crewmate the startup prune
+                    # removed: same rule ``adopt_removed_synced_crewmate`` applies
+                    # to records, so the run keeps its template on the shared store.
             execution = derive_execution(
                 execution,
                 target_member=target_member or crew or None,
@@ -340,9 +359,15 @@ class _GateMixin(ManagerComponent):
             """A policy refusal of a spawn whose row ALREADY exists (a drained
             row the pump re-checks) marks that row failed in the same step,
             so the refusal the caller sees is also the store's verdict and
-            the pump can never dispatch work that was refused."""
+            the pump can never dispatch work that was refused.
+
+            The refused run is registered as a terminal record too: the
+            caller was told it was accepted, and its next ``GET
+            /api/spawn/{id}`` must read this failure, not a 404 for an id
+            that is neither queued nor started any more."""
             if _from_queue and info.error:
                 self._manager._admission.taskq_fail(agent_id, info.error)
+                self._manager._agents.setdefault(info.id, info)
             return self._manager._announce_rejection(info)
 
         # The mutable policy gates (memory identity, cwd allowlist,
@@ -730,35 +755,94 @@ class _GateMixin(ManagerComponent):
         # --- Memory guard: defer (durable) or refuse (legacy) while host memory
         # is critically low. ---
         agents_snapshot = list(self._manager._agents.values())
+        loaded_cfg = None
         try:
-            memory_cfg = KiroCrewConfig.load().agent
-            min_mem = memory_cfg.spawn_min_memory_gb
-            # Clamped once here: the reserve, the log line and the deferral
-            # record all report this same non-negative price.
-            start_cost = max(0.0, float(memory_cfg.subagent_cost_gb))
+            loaded_cfg = KiroCrewConfig.load()
         except Exception:
-            min_mem = 4.0
-            start_cost = 0.5
-        if min_mem > 0 and not _dispatch_now:
+            logger.debug("Subagent spawn: config unreadable; pricing at defaults", exc_info=True)
+        # Clamped once here, so every price below is built on the same
+        # non-negative cost.
+        min_mem, start_cost = _spawn_memory_floor_and_cost(
+            loaded_cfg.agent if loaded_cfg is not None else None
+        )
+        # This start's price: what it is reserved at here, and what the row
+        # carries (``_start_price_gb``) so every later admission charges it the
+        # same until it settles. A start the run will put on its parent's
+        # runtime launches no process; the decision is the run's own
+        # (``_sharing_plan``), and only a real True prices it shared -- an
+        # unknown answer is the dedicated projection, since it may become one.
+        candidate_price: float | None = None
+        priced_shared = False
+        settled = self._manager._learned_settled_gb
+        # The fields the sharing decision reads, shared by the prediction's probe
+        # and the row registered below so the two cannot describe different runs.
+        # ``agent`` stays out: validation below may normalize it.
+        run_fields: dict[str, Any] = {
+            "id": agent_id,
+            "parent_session_key": parent_session_key,
+            "model": model or "",
+            "reasoning_effort": reasoning_effort or "",
+            "allowed_tools": list(allowed_tools) if allowed_tools else [],
+            "bare": bare,
+            "keep": keep,
+            "execution_context": execution,
+        }
+        if _dispatch_now:
+            # The claim re-entry registers at the price its first half CHECKED;
+            # recomputing here would store a price no admission ever tested. A
+            # re-entry that does not proceed (a retained claim) keeps the entry,
+            # so the slot it still holds stays charged at that price.
+            claim = self._manager._claim_prices
+            candidate_price, priced_shared = (
+                claim.pop(agent_id, (None, False))
+                if _claimed is not None and _claimed[1]
+                else claim.get(agent_id, (None, False))
+            )
+        elif min_mem > 0:
+            candidate_price = _dedicated_start_price_gb(
+                start_cost, settled, _cost_bucket(agent, execution)
+            )
+            try:
+                plan = self._manager._sharing_plan(
+                    SubagentInfo(task="", agent=agent, **run_fields), cfg=loaded_cfg
+                )
+                if plan.shared is True:
+                    candidate_price = _shared_start_price_gb(candidate_price)
+                    priced_shared = True
+            except Exception:
+                logger.debug("Subagent spawn: sharing prediction failed", exc_info=True)
             # RSS grows after a process starts. Reserve the unobserved part so
             # a fast drain cannot repeatedly spend the same free memory before
-            # the next controller sample. Each warming start is priced at the
-            # configured start cost; memory used by work a run launches later is
-            # not priced here.
+            # the next controller sample: this start at its own price, and each
+            # row still warming at the price it was admitted at. Memory used by
+            # work a run launches later is not priced here.
             min_mem += _startup_memory_reserve_gb(
                 agents_snapshot,
                 running_count=self._manager._running_count,
                 cost_gb=start_cost,
+                next_start_gb=candidate_price,
+                settled_gb=settled,
+                claim_prices=[price for price, _ in self._manager._claim_prices.values()],
             )
+        pop_memory_check_cause()  # drop a cause left by any earlier reading
         mem_ok, avail_gb = (True, -1.0) if _dispatch_now else check_memory_available(min_gb=min_mem)
+        memory_cause = pop_memory_check_cause()
         if not mem_ok:
+            # An unreadable cgroup usage file still defers; only the words change.
+            unknown_usage = memory_cause == MEMORY_CAUSE_CGROUP_USAGE_UNREADABLE
+            unknown_note = (
+                "memory headroom unknown: a finite cgroup memory limit is set but its "
+                "usage is unreadable; restore read access to memory.current / "
+                "memory.usage_in_bytes"
+            )
             logger.warning(
-                "Subagent spawn %s: only %.2f GB available (min %.1f GB required; each "
-                "warming start priced at %.2f GB from agent.subagent_cost_gb).",
+                "Subagent spawn %s: %s, need %.2f GB (this start "
+                "priced at %.2f GB, plus the starts still warming, with "
+                "agent.spawn_min_memory_gb left over).",
                 "deferred" if _durable else "refused",
-                avail_gb,
+                unknown_note if unknown_usage else f"only {avail_gb:.2f} GB available",
                 min_mem,
-                start_cost,
+                candidate_price or 0.0,
             )
             sel().log_tool_invocation(
                 session_key=parent_session_key or "",
@@ -769,6 +853,8 @@ class _GateMixin(ManagerComponent):
                     "available_gb": avail_gb,
                     "min_gb": min_mem,
                     "startup_cost_gb": start_cost,
+                    "start_price_gb": candidate_price,
+                    **({"cause": memory_cause} if memory_cause else {}),
                     **_task_audit,
                 },
             )
@@ -782,16 +868,22 @@ class _GateMixin(ManagerComponent):
                 parent_session_key=parent_session_key,
                 done=True,
                 error=(
-                    f"spawn refused: only {avail_gb:.1f} GB memory available (need "
-                    f"{min_mem:.1f} GB; {start_cost:.1f} GB per warming start)"
+                    f"spawn refused: {unknown_note} (need {min_mem:.1f} GB)"
+                    if unknown_usage
+                    else f"spawn refused: only {avail_gb:.1f} GB memory available (need "
+                    f"{min_mem:.1f} GB; {candidate_price or 0.0:.2f} GB for this start)"
                 ),
                 batch_id=batch_id,
                 batch_total=max(0, int(batch_total)),
             )
             deferred = (
                 _deferred(
-                    f"low memory: {avail_gb:.1f} GB available, need {min_mem:.1f} GB "
-                    f"({start_cost:.1f} GB per warming start)",
+                    (
+                        f"{unknown_note}; need {min_mem:.1f} GB"
+                        if unknown_usage
+                        else f"low memory: {avail_gb:.1f} GB available, need {min_mem:.1f} GB "
+                        f"({candidate_price or 0.0:.2f} GB for this start)"
+                    ),
                     info,
                     wait={
                         "reason": QUEUED_REASON_LOW_MEMORY,
@@ -976,13 +1068,7 @@ class _GateMixin(ManagerComponent):
                 )
             }
             capacity_detail = (
-                (
-                    "dispatch paused: the host is low on memory or overloaded, so no new "
-                    "subagent starts until it recovers (configured cap "
-                    f"{self._manager._user_max_concurrent}, effective cap 0)"
-                )
-                if adaptive_paused
-                else ""
+                adaptive_pause_text(self._manager._user_max_concurrent) if adaptive_paused else ""
             )
             # Advisory UI signal: tell the chip how many agents are now waiting
             # to start for this parent so it can appear immediately and show a
@@ -1101,6 +1187,10 @@ class _GateMixin(ManagerComponent):
                 # counted by every admission decided in between.
                 self._manager._startup_reservations += 1
                 self._manager._last_spawn_ts = time.monotonic()
+                if candidate_price is not None:
+                    # Charged at its checked price while the claim is pending,
+                    # and carried to the re-entry that registers it.
+                    self._manager._claim_prices[agent_id] = (candidate_price, priced_shared)
                 return ClaimPoint(agent_id, parent_session_key, _stage_boundary_owner)
             taskq_generation, proceed, claim_reason = self._manager._admission.taskq_claim(agent_id)
         if not proceed and claim_reason in (self.CLAIM_UNAVAILABLE, self.CLAIM_RETAINED):
@@ -1115,8 +1205,9 @@ class _GateMixin(ManagerComponent):
                 agent_id,
                 "retained admitted generation" if retained else "left queued for the pump",
             )
-            # The row is still QUEUED (or ADMITTED and retained), so the depth
-            # published here must count it. A pump that popped it marked it
+            # The row is still QUEUED (or ADMITTED and retained), and the depth
+            # published here counts both: ``taskq_overflow`` includes admitted
+            # rows no run is registered for. A pump that popped it marked it
             # dispatching; that mark describes an attempt that just ended.
             self._manager._dispatching_ids.discard(agent_id)
             self._manager._emit_queue_depth(parent_session_key, batch_id)
@@ -1165,22 +1256,15 @@ class _GateMixin(ManagerComponent):
             )
 
         info = SubagentInfo(
-            id=agent_id,
             task=_redacted_task,
-            parent_session_key=parent_session_key,
             agent=agent,
             app=app,
             approval_mode=approval_mode or "",
             silent=silent,
             max_turns=max_turns,
-            model=model or "",
-            reasoning_effort=reasoning_effort or "",
-            allowed_tools=list(allowed_tools) if allowed_tools else [],
-            bare=bare,
             cwd=resolved_cwd,
             batch_id=batch_id,
             batch_total=max(0, int(batch_total)),
-            keep=keep,
             conversation_key=conversation_key,
             delegation=dict(delegation or {}),
             include_memory=include_memory,
@@ -1189,8 +1273,10 @@ class _GateMixin(ManagerComponent):
             memory_store=memory_store or "",
             crew=crew,
             memory_mode=_memory_mode,
-            execution_context=execution,
+            **run_fields,
         )
+        info._start_price_gb = candidate_price
+        info._start_priced_shared = priced_shared
         info._raw_task = task  # unredacted prompt for kiro-cli execution
         info._memory_mode_ready = not bool(conversation_key)
         info._taskq_generation = taskq_generation

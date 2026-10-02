@@ -322,7 +322,10 @@ async def test_derived_worker_identity_keeps_freshness_and_readiness(
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
     monkeypatch.setattr(agent, "kiro_agents_dir_path", lambda: agents_dir)
-    monkeypatch.setattr(paths_mod, "kiro_agents_dir", lambda: agents_dir)
+    # Redirect through the override: ``acp.skill_projection`` is first imported
+    # inside this test and binds ``kiro_agents_dir`` by name, so the redirect must
+    # live in a value that function reads on every call.
+    monkeypatch.setattr(paths_mod, "_agents_dir_override", lambda: agents_dir)
     monkeypatch.setattr(agent_state, "config_dir", lambda: tmp_path / "derived-state")
     default = agents_dir / "kirocrew.json"
     spec = {
@@ -1223,7 +1226,7 @@ async def test_answer_cap_timeout_marks_runtime_dead_without_growth():
         else:
             second_started.set()
 
-    def mark_dead(reason: str) -> None:
+    def mark_dead(reason: str, **_kw: object) -> None:
         dead_reasons.append(reason)
         rt._dead = True
         marked_dead.set()
@@ -5861,7 +5864,7 @@ class TestAcpSessionHandleCommands:
         sent_payloads = []
         req_counter = [100]
 
-        async def capture_send(method, params):
+        async def capture_send(method, params, **_kw):
             sent_payloads.append((method, params))
             req_id = req_counter[0]
             req_counter[0] += 1
@@ -5887,7 +5890,7 @@ class TestAcpSessionHandleCommands:
         sent_payloads = []
         req_counter = [200]
 
-        async def capture_send(method, params):
+        async def capture_send(method, params, **_kw):
             sent_payloads.append((method, params))
             req_id = req_counter[0]
             req_counter[0] += 1
@@ -5913,7 +5916,7 @@ class TestAcpSessionHandleCommands:
         sent_payloads = []
         req_counter = [300]
 
-        async def capture_send(method, params):
+        async def capture_send(method, params, **_kw):
             sent_payloads.append((method, params))
             req_id = req_counter[0]
             req_counter[0] += 1
@@ -8015,7 +8018,7 @@ async def test_send_command_redacts_output(monkeypatch):
     rt, _, _ = _make_runtime()
     q = _register(rt, "sA")
 
-    async def _fake_send_request(method, params):
+    async def _fake_send_request(method, params, **_kw):
         return 1
 
     rt.send_request = _fake_send_request  # type: ignore[method-assign]
@@ -12805,7 +12808,7 @@ async def test_answer_task_cap_marks_dead_instead_of_growing_unbounded():
     )
     dead: list[str] = []
 
-    def _fake_mark_dead(reason):
+    def _fake_mark_dead(reason, **_kw):
         dead.append(reason)
         rt._dead = True  # mirror the real _mark_dead contract
 
@@ -12909,7 +12912,7 @@ async def test_sel_audit_tasks_do_not_count_toward_answer_cap():
         _t.add_done_callback(rt._audit_tasks.discard)
 
     dead: list[str] = []
-    rt._mark_dead = lambda reason: dead.append(reason)  # type: ignore[method-assign]
+    rt._mark_dead = lambda reason, **_kw: dead.append(reason)  # type: ignore[method-assign]
 
     answered: list[object] = []
 
@@ -12948,7 +12951,7 @@ async def test_buffered_burst_with_responsive_backend_does_not_trip_cap():
     _register(rt, "sA")
     rt._max_answer_tasks = 4
     dead: list[str] = []
-    rt._mark_dead = lambda reason: dead.append(reason)  # type: ignore[method-assign]
+    rt._mark_dead = lambda reason, **_kw: dead.append(reason)  # type: ignore[method-assign]
 
     # Buffer MORE frames than the cap before the reader runs at all.
     for i in range(10):

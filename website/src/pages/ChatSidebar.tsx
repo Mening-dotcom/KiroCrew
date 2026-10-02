@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, memo, useMemo, useCallback, useId, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutGroup, AnimatePresence, motion } from 'framer-motion'
-import { Plus, X, Pin, Monitor, ArrowUpDown, Eye, EyeOff, VenetianMask, Ghost, FolderPlus, MessageSquare, MessageSquarePlus, Folder, ChevronRight, ChevronDown, ChevronUp, Clock, Pencil, BrushCleaning, Link2, Circle, MoreVertical, Tag as TagIcon, Columns3, CornerDownRight, GripVertical, Zap, Check, Copy, List, ListTree, Loader, Loader2, Settings, RotateCcw, Bot, ExternalLink, Cpu, GitMerge, Workflow, CircleDot, Users, TriangleAlert, Goal, MessageCircleQuestionMark, ShieldCheck, Server } from 'lucide-react'
+import { Plus, X, Pin, Monitor, ArrowUpDown, Eye, EyeOff, VenetianMask, Ghost, FolderPlus, FolderX, MessageSquare, MessageSquarePlus, Folder, ChevronRight, ChevronDown, ChevronUp, Clock, Pencil, BrushCleaning, Link2, Circle, MoreVertical, Tag as TagIcon, Columns3, CornerDownRight, GripVertical, Check, GitFork, List, ListTree, Loader, Loader2, Settings, RotateCcw, Bot, ExternalLink, Cpu, GitMerge, Workflow, CircleDot, Users, TriangleAlert, Goal, MessageCircleQuestionMark, ShieldCheck, Server } from 'lucide-react'
 import GithubLogo from '../components/icons/GithubLogo'
 import GitlabLogo from '../components/icons/GitlabLogo'
 import { FolderBody } from '../components/FolderBody'
+import { FolderRail } from '../components/FolderRail'
 import ErrorNotice, { ErrorNoticeMenuItem } from '../components/ErrorNotice'
 import JiraLogo from '../components/icons/JiraLogo'
 import { sourceProviderMeta } from '../utils/sourceProviderMeta'
@@ -13,6 +14,8 @@ import { DndContext, DragOverlay, MeasuringStrategy } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
+import { usePreviewFlag } from '../hooks/usePreviewFlag'
+import { PREVIEW_DASHBOARD } from '../utils/previewFlags'
 import { shallowEqual, useStore } from 'react-redux'
 import { useAppDispatch, useAppSelector } from '../store'
 import type { RootState } from '../store'
@@ -50,6 +53,7 @@ import { useChatPopouts } from '../hooks/useChatPopouts'
 import { platformShortcut } from '../utils/platform'
 import { useImeGuard } from '../hooks/useImeGuard'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { useIsTouchDevice } from '../hooks/useIsTouchDevice'
 import ResizeHandle from '../components/ResizeHandle'
 import { SearchFilterBar, FilterMenuButton, FilterChip, FILTER_CHIP_ROW_CLS, FilterMenuLabel, FilterMenuContent } from '../components/SearchFilterBar'
 import { ListDock } from '../components/ListDock'
@@ -106,11 +110,12 @@ import { useHistoryPane } from './chat-sidebar/history'
 import { usePinnedSessionOrder, usePinnedOrderAuthority, usePinnedKeyboardReorder } from './chat-sidebar/pinnedOrder'
 import { useStaleCollapse, useStaleMoveWatcher, useStaleNarrowBridge } from './chat-sidebar/stale'
 import { useFolderSort, useFolderVisibility, useFolderFilterReveal, useFolderFilterRows, useFolderMutations, useFolderTree, useRootFolderLanes } from './chat-sidebar/folders'
+import FolderCleanupPanel from './chat-sidebar/FolderCleanupPanel'
 import { useSidebarResize } from './chat-sidebar/resize'
 import { useSidebarTags } from './chat-sidebar/tags'
 import { useBoardColumns, useColumnPopover, useBoardColumnMutations, useColumnMatches, useBoardFolderCollapse } from './chat-sidebar/board'
 import { useHoverHold, useHoverPinLiveness } from './chat-sidebar/hoverHold'
-import { useLineageSeed, useConductorLane } from './chat-sidebar/conductor'
+import { useLineageSeed, useConductorLane, citedCreatorOf } from './chat-sidebar/conductor'
 import { useShortcutOrder } from './chat-sidebar/shortcuts'
 import { useFolderDropOps, useSidebarMoveUndo, useSidebarDragHandlers } from './chat-sidebar/dnd/useSidebarDrag'
 import { useSidebarReveal } from './chat-sidebar/reveal'
@@ -766,7 +771,7 @@ const FOLDER_ROW_STICKY_Z = 20
  *  divider: 2px left of) its content column. Shared by the list-view and
  *  board-view folder bodies. */
 export const FOLDER_ROW_PAD_CLS = '[&_.session-row]:pl-[9px] [&_[data-row-divider]]:ml-[9px] [&_[data-stale-toggle]]:pl-[9px] [&_[data-folder-new-chat]]:pl-[9px] [&_[data-pinned-divider]]:ml-[7px] [&_[data-folder-hidden-reveal]]:pl-[9px]'
-export const FOLDER_BODY_CLS = `border-l border-border mb-1 ml-1 pl-[3px] rounded-bl-md ${FOLDER_ROW_PAD_CLS}`
+export const FOLDER_BODY_CLS = `relative border-l border-border mb-1 ml-1 pl-[3px] rounded-bl-md ${FOLDER_ROW_PAD_CLS}`
 
 /** The board-view folder body. Its header is not the list header: `paddingLeft`
  *  6, an 11px glyph and `gap-2` 8 put the folder name at 6 + 11 + 8 = 25 from the
@@ -775,7 +780,7 @@ export const FOLDER_BODY_CLS = `border-l border-border mb-1 ml-1 pl-[3px] rounde
  *  D 2 + `ml-2` 8 + border 1 + `pl-[5px]` 5 + R_in 9 = 25, rows on the name. The
  *  connector lands at D + 8 = 10, inside the glyph's 6..17 span. Each board
  *  nesting level costs 2 + 8 + 1 + 5 = 16px. */
-export const BOARD_FOLDER_BODY_CLS = `border-l border-border ml-2 pl-[5px] ${FOLDER_ROW_PAD_CLS}`
+export const BOARD_FOLDER_BODY_CLS = `relative border-l border-border ml-2 pl-[5px] ${FOLDER_ROW_PAD_CLS}`
 
 /** Test seam: reports every SessionRow body execution. The memo boundary
  *  below is a behavioral contract — one slot's background event re-renders one
@@ -842,6 +847,9 @@ interface SessionRowProps {
   onPinnedKeyboardReorder: (key: string, container: string, delta: -1 | 1, row: HTMLElement) => void
   defaultAgent: string
   mode?: string
+  /** Show the single ⋯ menu instead of the hover-revealed action cluster: a
+   *  phone-width viewport, or any touch screen, where the cluster would sit
+   *  permanently over the row's timestamp and pin. */
   isMobile: boolean
   colorMode: string
   installedAgents: AgentInfo[]
@@ -1219,7 +1227,7 @@ const SessionRow = memo(function SessionRow({
     // Ordinary sessions need the same reboot/error visibility as goal loops,
     // without claiming that an older interrupted parent turn has stopped live
     // child work. A goal loop keeps its richer cycle-specific treatment below;
-    // active workflows, subagents, turns, orchestration, and queued work keep
+    // active workflows, subagents, turns, and queued work keep
     // their progress indicators.
     const turnNeedsAttention = !goalLoop && !!s.interrupted && !liveWorkSupersedesInterruption
     // Whatever this row would have said if no loop were running, reused as the
@@ -1504,7 +1512,7 @@ const SessionRow = memo(function SessionRow({
         ),
       },
       {
-        // Reconnect snapshots can report orchestration, queued work, or running
+        // Reconnect snapshots can report queued work or running
         // children before their detailed activity records arrive. The shared
         // predicate suppresses stale Resume; this branch replaces the equally
         // stale last-message fallback with an honest localized working state.
@@ -1669,7 +1677,7 @@ const SessionRow = memo(function SessionRow({
             <button type="button" className="mc-touch-hit text-muted/50 active:text-text p-1 cursor-pointer bg-transparent border-none" aria-label={i18nT('pages.chatSidebar.more_options')} onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}><MoreVertical size={14} /></button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-[160px]" onClick={e => e.stopPropagation()} onCloseAutoFocus={onMenuCloseAutoFocus}>
-            <SessionActionsMenu variant="dropdown" {...rowMenuProps} />
+            <SessionActionsMenu variant="dropdown" {...rowMenuProps} onDuplicate={() => onDuplicate(rowKey)} />
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -1683,7 +1691,7 @@ const SessionRow = memo(function SessionRow({
             <SessionActionsMenu variant="dropdown" {...rowMenuProps} />
           </DropdownMenuContent>
         </DropdownMenu>
-        <IconButton variant="accent" title={i18nT('pages.chatSidebar.duplicate')} aria-label={i18nT('pages.chatSidebar.duplicate')} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onDuplicate(rowKey) }}><Copy size={12} /></IconButton>
+        <IconButton variant="accent" title={i18nT('pages.chatSidebar.duplicate')} aria-label={i18nT('pages.chatSidebar.duplicate')} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onDuplicate(rowKey) }}><GitFork size={12} /></IconButton>
         <IconButton variant="danger" title={i18nT('pages.chatSidebar.close')} aria-label={i18nT('pages.chatSidebar.close_session')} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onCloseSession(rowKey) }}><X size={12} /></IconButton>
       </IconButtonGroup>
     )) : null
@@ -2128,7 +2136,6 @@ const SessionRow = memo(function SessionRow({
               )}
               {s.memory_mode === 'incognito' && <span className="text-muted" title={i18nT('pages.chatSidebar.incognito_no_memory_writes')}><EyeOff size={10} /></span>}
               {s.memory_mode === 'temporary' && <span className="text-aim" title={i18nT('pages.chatSidebar.temporary_no_memory_reads_or_writes')}><VenetianMask size={10} /></span>}
-              {s.mode === 'orchestrator' && <span className="px-1 py-0 rounded bg-accent/15 text-accent font-medium" title={i18nT('pages.chatSidebar.autopilot_mode')}>{i18nT('pages.chatSidebar.autopilot')}</span>}
               {/* Trailing meta grouped under ONE ml-auto: two sibling auto
                *  margins would split the free space and strand the timestamp
                *  mid-row.
@@ -2420,6 +2427,7 @@ function ChatSidebar({
   const store = useStore<RootState>()
   const ime = useImeGuard()
   const isMobile = useIsMobile()
+  const isTouchDevice = useIsTouchDevice()
 
   // Sidebar-only state
   const [seedError, setSeedError] = useState('')
@@ -2632,6 +2640,7 @@ function ChatSidebar({
     historyOpen, setHistoryOpen, openHistoryPane, historyHeight, historyDragging, historyResize,
   } = useHistoryPane({ setHistoryFilter, slotFilter, dispatch })
   const [cleanupOpen, setCleanupOpen] = useState(false)
+  const [folderCleanupOpen, setFolderCleanupOpen] = useState(false)  // header ⋮ → "Clean up empty folders" panel
   const [manageTagsOpen, setManageTagsOpen] = useState(false)  // header ⋮ → "Manage tags…" panel (list-view tag CRUD)
   const [filterSortOpen, setFilterSortOpen] = useState(false)
   const [cleanupDays, setCleanupDays] = useState(3)
@@ -3287,11 +3296,15 @@ function ChatSidebar({
   } = useFolderChatCreate({ folders, defaultAgent, mode, dispatch, dropSlotMutation, onOpenSlotInNewTab, updateFolderMutation, clearBoardCollapse })
 
   const {
-    createAutopilotMutation, crewPreview, openCrewMembers, remoteCrewChatPreview,
-    createChatMutation, createRemoteChatMutation, createPlainChatMutation, createEphemeralChatMutation,
+    crewPreview, openCrewMembers, remoteCrewChatPreview,
+    createChatMutation, createRemoteChatMutation, createEphemeralChatMutation,
   } = useSessionCreate({ setNewChatError, dispatch, defaultAgent, mode, onOpenSlotInNewTab, setRemoteCrewError, setNewChatMenuOpen })
   // A conductor-lane member anchor opens on the Members page (see renderSessionRow).
   const navigate = useNavigate()
+  // The Dynamic Dashboard is a Feature Preview (Settings > Developer): the
+  // kebab's "All dashboards" door is offered only once it is on. The page it
+  // opens stays routable either way, like every preview's route.
+  const dashboardPreview = usePreviewFlag(PREVIEW_DASHBOARD)
 
   // Session colors
   const { paletteColors, boost, boostFor, colorMode } = useSessionPalette()
@@ -3459,7 +3472,7 @@ function ChatSidebar({
           {/* List-view parity: an empty folder's row keeps its action cluster
             *  visible (see the note in renderFolderHeader). */}
           {!(editingId === folder.id && editScope === columnId) && (
-          <span className={`${emptyBody ? '' : 'opacity-0 '}group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 has-[[data-state=open]]:opacity-100 transition-opacity flex items-center gap-0.5`}>
+          <span className={`${emptyBody ? '' : 'opacity-0 '}group-hover:opacity-100 [@media(hover:none)]:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 has-[[data-state=open]]:opacity-100 transition-opacity flex items-center gap-0.5`}>
             {/* ⋯ menu + a primary "new chat in folder" action, mirroring the
              *  list-view folder header (renderFolderHeader) so board view has
              *  the same one-click way to start a session inside a folder. */}
@@ -3538,6 +3551,9 @@ function ChatSidebar({
            *  (`FOLDER_ROW_PAD_CLS`), with a body pad sized to this header, so in
            *  both views a folder's rows land on that folder's name column. */}
           <div className={BOARD_FOLDER_BODY_CLS}>
+            {(deepChildren.length > 0 || childSlots.length > 0) && (
+              <FolderRail name={folder.name} id={`${columnId}-${folder.id}`} onToggle={() => toggleColumnCollapse(columnId, folder)} />
+            )}
             {/* Default: the empty-folder affordance stays exactly as it was, in
              *  list-view parity (see renderFolderBlock). Reached only when the
              *  setting is OFF - with it on there is no body to put this in. */}
@@ -3657,7 +3673,7 @@ function ChatSidebar({
         // window: every later row shares the clamped stamp and snaps, keeping
         // Framer's projection registry bounded at every total list size.
         rowAnimEnabled={rowAnimEnabled && orderStamp < SIDEBAR_DISPLACEMENT_WINDOW && !staticRows}
-        defaultAgent={defaultAgent} mode={mode} isMobile={isMobile} colorMode={colorMode}
+        defaultAgent={defaultAgent} mode={mode} isMobile={isMobile || isTouchDevice} colorMode={colorMode}
         installedAgents={installedAgents} tagById={tagById}
         paletteColors={paletteColors} boost={boost} boostFor={boostFor}
         renameInputRef={renameInputRef}
@@ -4119,7 +4135,7 @@ function ChatSidebar({
           *  is what an empty folder usually wants), so nothing is ADDED to the
           *  row and the two-buttons-per-row cap is untouched. */}
         {!(editingId === folder.id && editScope === 'list') && (
-        <div className={`transition-all flex items-center gap-0.5 rounded-md group-focus-within:opacity-100 focus-within:opacity-100 has-[[data-state=open]]:opacity-100${emptyRow ? ' shrink-0 -my-1' : ' absolute top-1/2 -translate-y-1/2 right-1.5 p-1 bg-card border border-border shadow-sm opacity-0 group-hover:opacity-100'}`}>
+        <div className={`transition-all flex items-center gap-0.5 rounded-md group-focus-within:opacity-100 focus-within:opacity-100 has-[[data-state=open]]:opacity-100${emptyRow ? ' shrink-0 -my-1' : ' absolute top-1/2 -translate-y-1/2 right-1.5 p-1 bg-card border border-border shadow-sm opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 [@media(hover:none)]:static [@media(hover:none)]:translate-y-0 [@media(hover:none)]:shrink-0 [@media(hover:none)]:-my-1 [@media(hover:none)]:p-0 [@media(hover:none)]:bg-transparent [@media(hover:none)]:border-transparent [@media(hover:none)]:shadow-none'}`}>
           {/* ⋯ menu first, then the primary "new chat" action.  Sibling
            *  <button>s of the collapse toggle (valid ARIA — no nesting). */}
           <DropdownMenu>
@@ -4280,6 +4296,7 @@ function ChatSidebar({
     const emptyBody = hideEmptyFolderBody && childNodes.length === 0
     const wrapped = childNodes.length > 0 ? (
       <div key={`folder-children-${folder.id}`} className={FOLDER_BODY_CLS}>
+        <FolderRail name={folder.name} id={folder.id} onToggle={() => toggleCollapse(folder.id)} />
         {childNodes}
       </div>
     ) : emptyBody || listNarrowed ? null : (
@@ -4429,10 +4446,10 @@ function ChatSidebar({
               <button className="mc-touch-hit w-7 h-7 rounded-md border border-border bg-transparent text-muted cursor-pointer flex items-center justify-center hover:border-border-strong hover:text-text transition-all" title={i18nT('pages.chatSidebar.more_options')} aria-label={i18nT('pages.chatSidebar.more_options')}><MoreVertical size={14} /></button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
-              <DropdownMenuItem onSelect={() => navigate('/session-dashboards')}>
+              {dashboardPreview && <DropdownMenuItem onSelect={() => navigate('/session-dashboards')}>
                 <Monitor size={14} className="text-muted" />
                 {i18nT('commandCenter.all_title')}
-              </DropdownMenuItem>
+              </DropdownMenuItem>}
               <DropdownMenuItem disabled={seedStateLanesMutation.isPending} onClick={() => {
                 if (seedStateLanesMutation.isPending) return
                 const isActive = tagColumnsEnabled && rawColumns.length > 0
@@ -4470,6 +4487,10 @@ function ChatSidebar({
               <DropdownMenuItem onClick={() => { setCleanupOpen(!cleanupOpen); setCleanupExpanded(false); setCleanupError('') }}>
                 <BrushCleaning size={14} className="text-muted" />
                 {i18nT('pages.chatSidebar.clean_up_sessions')}
+              </DropdownMenuItem>
+              <DropdownMenuItem data-testid="clean-up-empty-folders" onClick={() => setFolderCleanupOpen(!folderCleanupOpen)}>
+                <FolderX size={14} className="text-muted" />
+                {i18nT('pages.chatSidebar.clean_up_empty_folders_menu')}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => { setBulkModelOpen(true); setBulkModel(''); setBulkSkipRunning(true); setBulkModelError('') }}>
                 <Cpu size={14} className="text-muted" />
@@ -4522,26 +4543,11 @@ function ChatSidebar({
               <DropdownMenuContent align="end" className="min-w-[200px] max-w-[264px]" onCloseAutoFocus={onMenuCloseAutoFocus}>
                 {/* The plain chat is what the button's main segment does, but a
                  *  menu that lists every OTHER way to create and omits the
-                 *  ordinary one reads as if autopilot were the only kind of
-                 *  chat the caret can make. Listed first so the default stays
-                 *  the default. */}
-                <DropdownMenuItem disabled={creatingSlot} onClick={() => { createPlainChatMutation.mutate() }}>
+                 *  ordinary one reads as if the other kinds were the only ones
+                 *  the caret can make. Listed first so the default stays the
+                 *  default. */}
+                <DropdownMenuItem disabled={creatingSlot} onClick={() => { createChatMutation.mutate({ inNewTab: false }) }}>
                   <MessageSquarePlus size={14} className="text-muted" /> {i18nT('pages.chatSidebar.new_chat')}
-                </DropdownMenuItem>
-                {/* The two engineered modes carry a one-line description, because the
-                 *  moment a user cannot tell them apart is the moment this menu opens
-                 *  — and until now the only explanation lived in a native title= on
-                 *  the sidebar badge, i.e. after the session already existed. The
-                 *  plain entries stay single-line: "New chat" and "New folder" need
-                 *  no gloss, and describing them would bury the contrast that
-                 *  actually needs drawing. `items-start` so the icon aligns to the
-                 *  label, not to the middle of the two-line block. */}
-                <DropdownMenuItem className="items-start" disabled={creatingSlot} onClick={() => { createAutopilotMutation.mutate() }}>
-                  <Zap size={14} className="text-muted mt-[3px] shrink-0" />
-                  <span className="flex min-w-0 flex-col gap-px">
-                    <span>{i18nT('pages.chatSidebar.new_autopilot_chat')}</span>
-                    <span className="whitespace-normal text-[11px] leading-snug text-muted">{i18nT('pages.chatSidebar.autopilot_desc')}</span>
-                  </span>
                 </DropdownMenuItem>
                 {/* Ephemeral session types are grouped one level down: they are two
                  *  spellings of one choice (a session that leaves no lasting memory),
@@ -4765,6 +4771,7 @@ function ChatSidebar({
        *  and the header's "in split" badge is the way back into a live split. */}
 
       {/* Clean Up dialog */}
+      {folderCleanupOpen && <FolderCleanupPanel folders={folders} onClose={() => setFolderCleanupOpen(false)} />}
       {cleanupOpen && (() => {
         const archivable = cleanupPreview ? cleanupPreview.map(k => localSlots.find(s => s.key === k)).filter(Boolean) as Slot[] : []
         const noStale = cleanupPreview != null && cleanupPreview.length === 0 && !activeIsStale
@@ -5755,9 +5762,9 @@ function ChatSidebar({
                 // against the unfiltered population. A creator that is still there is
                 // open and running, so saying it closed would be false.
                 const cited = orphanCitation(slot, tree.parentOf.get(key) ?? null)
-                const citedKey = slot.parent?.key
-                const creatorStillOpen = cited != null && citedKey != null
-                  && (citedCreatorExists.get(slot.peer_id)?.has(citedKey) ?? false)
+                const creator = citedCreatorOf(slot)
+                const creatorStillOpen = cited != null && creator !== null
+                  && (citedCreatorExists.get(creator.origin)?.has(creator.key) ?? false)
                 rows.push({
                   id: key,
                   slot,
@@ -6648,7 +6655,7 @@ function ChatSidebar({
                     dispatch(resumeFromHistory({ key: s.key, title: s.title || s.key }))
                   }
                   return (
-                    <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} role="button" tabIndex={0} aria-disabled={!connected} onKeyDown={e => {
+                    <div className={`group relative flex items-start gap-2.5 pr-4 py-2 rounded-md text-sm transition-all select-none ${remoteInstanceId ? '' : '[@media(hover:none)]:pr-10 '}${!connected ? 'text-muted opacity-50 cursor-not-allowed' : 'text-muted hover:text-text hover:bg-bg-hover cursor-pointer'}`} style={{ paddingLeft: '10px' }} title={s.title || s.key} {...offlineProps(connected, 'resume sessions')} role="button" tabIndex={0} aria-disabled={!connected} onKeyDown={e => {
                       // WCAG 2.1.1: history rows must be resumable via keyboard.
                       if (e.key !== 'Enter' && e.key !== ' ') return
                       if ((e.target as HTMLElement) !== e.currentTarget) return
@@ -6713,7 +6720,7 @@ function ChatSidebar({
                           Hidden for remote rows: deleteHistorySession targets the
                           LOCAL session file, which for a remote row is at best a
                           same-keyed unrelated conversation. */}
-                      {!remoteInstanceId && <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
+                      {!remoteInstanceId && <div className="absolute top-1/2 -translate-y-1/2 right-1.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-all flex items-center gap-0.5 rounded-md p-1 bg-card border border-border shadow-sm">
                         <button type="button" title={i18nT('pages.chatSidebar.delete_history_session')} aria-label={i18nT('pages.chatSidebar.delete_history_session')} className="text-[12px] text-muted cursor-pointer p-[4px] rounded hover:text-danger hover:bg-danger-subtle transition-all bg-transparent border-none" onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); if (confirm(i18nT('pages.chatSidebar.are_you_sure_you_want_to_delete_this_history_ses'))) dispatch(deleteHistorySession(s.key)) }}><X size={12} /></button>
                       </div>}
                     </div>

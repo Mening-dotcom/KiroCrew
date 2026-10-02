@@ -28,8 +28,9 @@ Fewer than two qualifying items means one long session is the better shape, and
 a conductor would only add overhead.
 
 To start one, open a session on the **`kirocrew-conductor`** agent (see
-[Agents](agents.md) for the per-session, per-thread and per-cron selectors) and
-give it the goal. Its operating procedure ships as the `goal-conductor` skill.
+[Agents](agents.md) for the per-session, per-thread and per-cron selectors), or
+turn on **Crew Mode** above the chat input, which does the same, and give it
+the goal. Its operating procedure ships as the `goal-conductor` skill.
 `kirocrew-ledger-conductor` is a deprecated alias of the same spec, kept for one
 release so an existing session or cron that names the old string keeps resolving.
 
@@ -53,7 +54,12 @@ An item is the unit of dispatch. It holds:
 
 The conductor writes its half with `work_ledger_record` (one action per call:
 `goal`, `create`, `bind`, `decide`, `verdict`, `accept`, `close`) and reads the
-whole ledger back with `work_ledger_read`. A worker writes its half with
+ledger back with `work_ledger_read`. A patrol cycle reads it with `compact=true`
+(status columns and derived flags only); `item_id`, `state`, `since` and
+`events` narrow a full read. A reply over the tool-result limit comes back as
+valid JSON marked `truncated`: event tails go first, then oversized acceptances
+are elided, then rows are dropped (closed first, then open oldest-created), and
+the newest open item is always kept. A worker writes its half with
 `work_report` and reads its own item with `work_brief`. A conductor whose ledger
 files read as damaged or missing rewrites them from the crew log with
 `work_ledger_rebuild`: every accepted write was recorded there, so the files are a

@@ -33,13 +33,6 @@ logger = logging.getLogger(_FACADE)
 # whole JSON dict lose each other's entries.
 _pidfile_lock = threading.Lock()
 
-# The unreadable condition recorded_backend_pids last warned about, under "text",
-# and empty after a clean read. The reconciler calls it every cleanup tick, so the
-# same damage would otherwise be said again at WARNING for as long as the gateway
-# runs; a mutable container rather than a rebound name, so every module holding it
-# holds the one object.
-_unreadable_condition: dict[str, str] = {}
-
 
 def _pidfile_path() -> Path:
     return config_dir() / "app_backends.pids.json"
@@ -64,28 +57,13 @@ def _proc_start_time(pid: int) -> str | None:
     return platform_compat.process_start_time(pid)
 
 
-def _load_pidfile() -> dict[str, dict[str, Any]]:
-    """The pidfile's rows, ``{}`` when there is no file. RAISES when it cannot be read.
-
-    ``OSError`` for a file that exists and cannot be opened, ``ValueError`` for one
-    that is not a JSON object. :func:`_read_pidfile` turns both into ``{}`` for the
-    spawn, stop and reap paths, which must not fail on a damaged file; a reader whose
-    empty answer would decide a kill calls this instead, so "unreadable" never reads
-    as "nothing recorded".
-    """
+def _read_pidfile() -> dict[str, dict[str, Any]]:
     try:
         with open(_pidfile_path()) as fh:
             data = json.load(fh)
+        return data if isinstance(data, dict) else {}
     except FileNotFoundError:
         return {}
-    if not isinstance(data, dict):
-        raise ValueError("app-backend pidfile does not hold a JSON object")
-    return data
-
-
-def _read_pidfile() -> dict[str, dict[str, Any]]:
-    try:
-        return _load_pidfile()
     except (OSError, ValueError) as exc:
         # A corrupt/half-written pidfile (e.g. a SIGKILL mid-write before atomic
         # writes landed, or a leftover from an older build) silently disabling
@@ -164,59 +142,6 @@ def _forget_app_pid_if(app_name: str, pid: int, start_time: str | None) -> None:
                 _write_pidfile(data)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Could not conditionally forget app pid for %s: %s", app_name, exc)
-
-
-def recorded_backend_pids() -> set[int]:
-    """Every backend pid a pidfile row names whose process can still be the one recorded.
-
-    The app-backend part of the runtime reconciler's membership read
-    (:mod:`kiro_crew.runtime_reconcile`). A backend is not a session, not a pooled MCP
-    backend and in neither tracked pid file, yet it runs inside the agent slice that
-    reconciler compares against, so without this record it is unowned on every pass.
-
-    A row is left out only on proof that its process is gone: the pid probes DEAD, or
-    both start identities are readable and differ, so the number now names another
-    process. Anything short of proof keeps the pid, because leaving one out makes it a
-    kill candidate and keeping one only spares it. Leaving the dead out keeps a row the
-    next start's stale-reap has not cleared yet from reading as a dead runtime on every
-    pass. No row is ever changed here: the spawn, stop and reap paths own the file.
-
-    RAISES when the file exists and cannot be read, as :func:`_load_pidfile` does, and
-    logs a warning once per distinct condition: the reconciler reports its refused pass
-    only at debug, and nothing but a spawn or stop rewrites this file, so without the
-    warning a damaged record would leave the reconciler refusing every pass with no
-    visible cause. The same damage read again on the next pass is a steady state, not
-    a new fault, so it is not said again; a clean read forgets the condition, so later,
-    different damage warns anew.
-    """
-    try:
-        rows = _load_pidfile()
-    except (OSError, ValueError) as exc:
-        condition = str(exc)
-        if _unreadable_condition.get("text") != condition:
-            _unreadable_condition["text"] = condition
-            logger.warning(
-                "App-backend pidfile unreadable (%s); runtime reconcile refused this pass",
-                exc,
-            )
-        raise
-    _unreadable_condition.clear()
-    pids: set[int] = set()
-    for entry in rows.values():
-        if not isinstance(entry, dict):
-            continue
-        pid = entry.get("pid")
-        if not isinstance(pid, int) or pid <= 1:
-            continue
-        if platform_compat.pid_liveness(pid) == platform_compat.PID_DEAD:
-            continue
-        recorded_start = entry.get("start_time")
-        if recorded_start:
-            live_start = _proc_start_time(pid)
-            if live_start is not None and live_start != recorded_start:
-                continue
-        pids.add(pid)
-    return pids
 
 
 def retire_windows_app_tracking(pid: int, creation: int) -> None:

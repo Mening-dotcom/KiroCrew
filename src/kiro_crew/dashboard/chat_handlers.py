@@ -60,20 +60,14 @@ from kiro_crew.dashboard.chat_folders import (
     _unhide_folder,
     resolve_folder_project_dir_off_loop,
 )
-from kiro_crew.dashboard.chat_orchestrator import (
-    _cancel_stage_subagents,
-    _capture_stage_cancellation_scope,
-    _queue_consumed_stage_resume,
-    _release_cancelled_plan_boundary,
-    _reserve_stage_cancellation_scopes,
-    _settle_discarded_stage_deliveries,
-    _stage_loop,
-)
 from kiro_crew.dashboard.chat_persistence import (
     _FLUSH_SNAPSHOT_RETRIES,
     _TRANSIENT_ROLES,
     COLOR_HEX_RE,
     _attach_variants,
+    _coerce_requested_mode,
+    _has_validated_effort_marker,
+    _load_restore_cfg,
     _local_turn_generation,
     _local_turn_prompt,
     _rebase_rehydrated_refresh_mark,
@@ -81,6 +75,7 @@ from kiro_crew.dashboard.chat_persistence import (
     _rehydrate_slot_title,
     _remember_reasoning_effort_for_restore,
     _restore_dismissed_source_links,
+    _restore_model_fields,
     _restored_agent_name,
     _restored_mode,
     _validate_autocompact_pct,
@@ -176,7 +171,7 @@ from kiro_crew.dashboard.slot_buffers import (
     note_hold_durable,
     persist_deferred_notes_sync,
 )
-from kiro_crew.dashboard.slot_projection import resolved_row_identity
+from kiro_crew.dashboard.slot_projection import resolved_row_identity, stop_declined_armed
 from kiro_crew.dashboard.slot_queue_repository import warn_if_not_durable
 from kiro_crew.dashboard.state import (
     _MAX_DISMISSED_SOURCE_LINKS,
@@ -222,7 +217,7 @@ from kiro_crew.security import (
     redact_credentials,
     redact_exfiltration_urls,
 )
-from kiro_crew.sel import SecurityEvent, sel
+from kiro_crew.sel import sel
 from kiro_crew.session_agent_selection import (
     SelectionChange,
     record_agent_selection,
@@ -230,6 +225,7 @@ from kiro_crew.session_agent_selection import (
     restore_agent_selection,
     session_agent_selection_name,
 )
+from kiro_crew.session_lifecycle import compaction_in_flight
 from kiro_crew.session_summary import count_user_turns_in_records
 from kiro_crew.trust_patterns import (
     base_consent_pattern,
@@ -840,27 +836,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             {"error": "message is required", "code": "message_required"}, status=400
         )
 
-    _pending_control_text = message.strip().lower()
-    _pending_control_words = _pending_control_text.split()
-    _widget_origin = user_meta is not None and user_meta.get("origin") == "widget"
-    _stop_words = {"stop", "cancel", "abort"}
-    _orchestrator_mode = getattr(slot, "mode", "") == "orchestrator"
-    _is_go = _pending_control_text in ("go", "go all")
-    _is_go_all = _pending_control_text == "go all"
-    tracker = slot._orch_tracker
-    _pending_escalated_stop = bool(
-        tracker is not None
-        and tracker.has_escalated
-        and not tracker.stopped
-        and _pending_control_words
-        and _pending_control_words[0] in _stop_words
-    )
-    _pending_stage_control = _orchestrator_mode and (
-        (_is_go and not _widget_origin) or _pending_escalated_stop
-    )
-    _pending_stage_boundary = (
-        stage_boundary_for(slot).stage is not None and not _pending_stage_control
-    )
+    _pending_stage_boundary = stage_boundary_for(slot).stage is not None
     if slot.turn_running or slot._in_stage_execution or _pending_stage_boundary:
         # Mid-turn steer: inject into the RUNNING turn instead of queueing for
         # the next turn. Gated on an explicit `steer` flag + a live, steer-capable
@@ -1033,7 +1009,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     if (
         not body.get("steer")
         and state.subagents is not None
-        and state.subagents.running_agents_for(f"dashboard:{slot.key}")
+        and state.subagents.running_agents_for(effective_session_key(slot))
     ):
         # circular import: session_control imports this package's modules at module level.
         from kiro_crew.dashboard.session_control import containment_meta
@@ -1105,7 +1081,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # row in local history, and the user's retry would append a SECOND one while
     # only the retry ever reaches the peer — the local and peer transcripts then
     # diverge. Every turn-refusing validation (member reserve, app
-    # ownership, agent conflict, busy/steer/queue, crew and orchestrator modes)
+    # ownership, agent conflict, busy/steer/queue, crew and app-worker modes)
     # has already run above, so a remote slot that reaches here is otherwise
     # cleared to dispatch.
     #
@@ -1254,127 +1230,6 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             _autonudge.notify_user_input(slot.key)
     except Exception:
         logger.warning("autonudge.notify_user_input failed", exc_info=True)
-
-    # ── Orchestrator "Go All" detection ─────────────────────────────
-    # Deny-by-default trust boundary: a turn tagged origin="widget" was
-    # pre-filled into the composer by an LLM-emitted <mcwidget> postMessage.
-    # Even though the frontend requires a human gesture to send it, the
-    # message TEXT is still attacker-controlled — an
-    # injected widget can pre-fill "go all" and socially engineer the user
-    # into pressing Enter. "go"/"go all" is the only chat-text-reachable
-    # privilege escalation (it flips the orchestrator into unattended
-    # per-stage auto-approval via slot._auto_run + _stage_loop), so we refuse
-    # to honour it for widget-origin turns and let the text fall through to a
-    # normal, fully-gated _run_chat turn instead. Mode changes and tool
-    # approvals live on separate endpoints a widget iframe cannot reach.
-    # `is not None` (not truthiness): user_meta is normalized to dict-or-None
-    # above, and with the body typed by read_bounded_json, mypy narrows the
-    # Optional only through an explicit None check. `_widget_origin` is computed
-    # before pending-stage admission so rejected control text cannot bypass that
-    # boundary and fall through as an ordinary turn.
-    if _orchestrator_mode and _is_go and _widget_origin:
-        sel().log(
-            SecurityEvent(
-                event_id=uuid.uuid4().hex,
-                timestamp=datetime.now(tz=timezone.utc).isoformat(),
-                event_type="auto_run_denied",
-                caller_identity=f"dashboard:{slot.key}",
-                agent=getattr(slot, "agent", ""),
-                source="dashboard",
-                operation="go_typed_widget_origin",
-                outcome="denied",
-                resources=f"slot={slot.key}",
-                error="orchestrator go/go-all refused for widget-origin turn",
-            )
-        )
-        logger.warning(
-            "Refused orchestrator auto-run escalation for widget-origin turn on slot %s",
-            slot.key,
-        )
-    elif _orchestrator_mode and _is_go:
-        _is_auto = _is_go_all
-        if _is_auto:
-            slot._auto_run = True
-            logger.info("Auto-run enabled for slot %s", slot.key)
-            sel().log(
-                SecurityEvent(
-                    event_id=uuid.uuid4().hex,
-                    timestamp=datetime.now(tz=timezone.utc).isoformat(),
-                    event_type="auto_run_enabled",
-                    caller_identity=f"dashboard:{slot.key}",
-                    agent=getattr(slot, "agent", ""),
-                    source="dashboard",
-                    operation="go_all_typed",
-                    outcome="approved",
-                    resources=f"slot={slot.key}",
-                )
-            )
-        sel().log(
-            SecurityEvent(
-                event_id=uuid.uuid4().hex,
-                timestamp=datetime.now(tz=timezone.utc).isoformat(),
-                event_type="stage_approved",
-                caller_identity=f"dashboard:{slot.key}",
-                agent=getattr(slot, "agent", ""),
-                source="dashboard",
-                operation="go_typed",
-                outcome="approved",
-                resources=f"slot={slot.key}",
-            )
-        )
-        # Use Python-controlled stage loop instead of _run_chat
-        if stage_boundary_for(slot).stage is not None:
-            _queue_consumed_stage_resume(
-                state,
-                slot,
-                directive_user_origin=not bool(request.get("app", "")),
-            )
-            slot._last_turn_auth_required = False
-        task = asyncio.create_task(
-            _stage_loop(state, slot, auto_run=_is_auto),
-            name=f"dashboard-stage:{slot.key}",
-        )
-        slot.track_stage_controller(task)
-        slot.task = task
-        # S4: one accepted Go resets the recovery budget shared by its stages.
-        stage_boundary_for(slot).recovery_retrigger_count = 0
-        state._background_tasks.add(task)
-        task.add_done_callback(state._background_tasks.discard)
-        state.push_slots_update()
-        # All output delivered via WebSocket — return JSON like api_chat_plan_action
-        return web.json_response({"ok": True, "slot": slot.key})
-
-    # ── Orchestrator stop detection ─────────────────────────────────
-    if _pending_escalated_stop and tracker is not None:
-        tracker.stop()
-        # Same latch as the plan-action Cancel handler: tracker.stopped
-        # alone does not survive the Slack gateway lazily re-creating a fresh
-        # unstopped tracker on this slot, so without the latch a later Go could
-        # resurrect a plan the user stopped by word. One revocation semantics
-        # across both cancel surfaces.
-        scope = _capture_stage_cancellation_scope(slot)
-        slot._plan_cancelled = True
-        slot._auto_run = False
-        reservation_reason = _reserve_stage_cancellation_scopes(state, scope)
-        await _cancel_stage_controller(slot)
-        release_boundary = await _cancel_stage_subagents(
-            state,
-            slot,
-            scope=scope,
-            reservation_reason=reservation_reason,
-        )
-        if release_boundary:
-            await _release_cancelled_plan_boundary(
-                state,
-                slot,
-                terminal_message="🛑 [SYSTEM] Orchestration stopped by user.",
-            )
-        return web.json_response({"ok": True, "stopped": True})
-
-    # ── Reset rounds after user guidance (not a stop) ───────────────
-    if tracker is not None and tracker.has_escalated:
-        tracker.reset_after_guidance()
-        logger.info("Rounds reset after user guidance for slot %s", slot.key)
 
     # Drain stale pending messages from previous turns that completed
     # after their SSE reader disconnected. Must happen BEFORE _run_chat
@@ -3962,11 +3817,11 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
 # allowlist (chat_folders._VALID_MODES) and the fork override allowlist
 # (chat_fork): "design-critique" is an app-worker mode assigned at birth by the
 # Design Critique app's openSlot() — the custom mode keeps its throwaway dc-*
-# slots off the chat sidebar, which renders only "" and "orchestrator"
+# slots off the chat sidebar, which renders only plain "" slots
 # (ChatPage.tsx filteredSlots). Switching an existing session INTO an app-worker
 # mode, or forking one with it as an override, is not a real flow, so those two
 # allowlists deliberately stay narrower — do not "sync" them to this one.
-_CREATABLE_MODES = ("", "orchestrator", "design-critique")
+_CREATABLE_MODES = ("", "design-critique")
 
 # Deferral is an optimization, so a request shape added later must stay on the
 # synchronous path until its publication ordering has been reviewed explicitly.
@@ -4127,12 +3982,11 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     memory_mode = body.get("memory_mode", "persistent")
     if memory_mode not in ("persistent", "incognito", "temporary"):
         return web.json_response({"error": "invalid memory_mode"}, status=400)
-    _mode = body.get("mode", "")
+    _mode = _coerce_requested_mode(body.get("mode", ""))
     if _mode not in _CREATABLE_MODES:
         return web.json_response({"error": "invalid mode", "code": "invalid_mode"}, status=400)
-    # A crew-bound session runs PLAIN chat only. A non-plain mode (orchestrator,
-    # design-critique) is consumed by an EARLIER dispatch branch in ``api_chat``
-    # — the orchestrator stage loop — not by the remote arm, which only replaces
+    # A crew-bound session runs PLAIN chat only. A non-plain mode
+    # (design-critique) is not handled by the remote arm, which only replaces
     # the plain ``_run_chat`` dispatch. So a remote slot created with a mode
     # would run that mode's tools and filesystem work on THIS machine instead of
     # the crew the user picked. Refused here, alongside the other pre-peer
@@ -5500,7 +5354,15 @@ def _resolve_stop_event(slot: _ChatSlot, outcome: str) -> None:
     if not stop_id:
         return
     now_ts = datetime.now(tz=timezone.utc).isoformat()
-    final_state = "stopped" if outcome == "soft" else "stop_failed_reset"
+    if outcome == "soft":
+        final_state = "stopped"
+    elif outcome == "compacting":
+        # Nothing was stopped: the session's own /compact turn held it and a
+        # cooperative Stop was declined. The card becomes the notice,
+        # so the row the press opened tells the user what happened to it.
+        final_state = "stop_declined_compacting"
+    else:
+        final_state = "stop_failed_reset"
     found = False
     for msg in reversed(slot.messages):
         cls_val = msg.get("cls", "")
@@ -5890,19 +5752,34 @@ def _app_cancel_denied(
     return _slot_not_found()
 
 
-async def _cancel_stage_controller(slot: "_ChatSlot") -> None:
-    """Cancel and boundedly join the outer Autopilot controller, if live."""
-    controller = getattr(slot, "_stage_controller_task", None)
-    if controller is None or controller is asyncio.current_task() or controller.done():
+async def _settle_discarded_stage_deliveries(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    contents: list[str],
+) -> None:
+    """Settle queued completion and boundary report debt through one seam."""
+    manager = getattr(state, "subagents", None)
+    if manager is None:
         return
-    controller.cancel()
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(controller, return_exceptions=True),
-            timeout=2.0,
-        )
-    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-        pass
+    owed = slot.take_pending_subagent_deliveries(contents)
+    if owed:
+        try:
+            settlement = manager.settle_queued_delivery(owed)
+            if asyncio.iscoroutine(settlement):
+                await settlement
+        except Exception:
+            logger.warning(
+                "Could not settle discarded stage deliveries for slot %s",
+                slot.key,
+                exc_info=True,
+            )
+    boundary = stage_boundary_for(slot)
+    owner = boundary.owner or boundary.generation
+    parents = tuple(boundary.parent_session_keys) or (effective_session_key(slot),)
+    discard_failures = getattr(manager, "discard_report_failures", None)
+    if owner and callable(discard_failures):
+        for parent in parents:
+            discard_failures(parent, owner)
 
 
 async def stop_slot_turn(
@@ -5951,6 +5828,52 @@ async def stop_slot_turn(
     # travel. Deliberately placed before the local path rather than beside it:
     # there is no local turn to also stop, and running both would insert a second
     # stop_event card for one press.
+    # The second press after a DECLINED Stop (the session was compacting) is
+    # the user's escape hatch and takes the escalation branch below, which is
+    # the only path to a hard kill. The decline itself leaves ``_stop_state``
+    # idle -- the queue drain reads that machine as "a stop is in progress" and
+    # would persist a false "Session reset" row on the next queued turn -- so the
+    # arming lives in its own marker, consumed here: the claim it makes lasts
+    # exactly as long as the escalation needs it, on a press that IS a stop.
+    # Gated on the caller's own ``escalate``: a caller that says its call may be
+    # a retry (a board stop re-sent by a timed-out browser, the steer-containment
+    # stop) must never be turned into a hard kill by a marker it did not set.
+    # ...and on the compaction still holding the session: the marker is a
+    # memory of a refusal, not proof the refusal still applies. Once the
+    # compaction has ended, the next press is an ordinary first press and
+    # takes the cooperative path; the stale marker is simply dropped.
+    # Set when this press is the ESCAPE from a compaction decline (the armed
+    # second press, or an explicit ``?force=true``). The hard kill below then
+    # keeps the SESSION queue: on a channel-linked slot that queue is the linked
+    # channel's, holding other people's messages the compaction, not the user,
+    # is what the Stop is aimed at; ``stop_turn`` parks it for the successor.
+    # The slot's own dashboard queue is still discarded, as on any hard kill.
+    compaction_escape = False
+    if slot.running and slot._stop_state == "idle" and stop_declined_armed(slot):
+        if escalate and _compaction_in_flight(state, cancel_key):
+            # Consumed by the press it armed. A non-escalating call (a retry, the
+            # steer-containment stop) must not spend the user's hatch, and a
+            # marker for a compaction that has ended is dropped as stale.
+            slot._stop_declined_at = 0.0
+            slot._stop_state = "soft_pending"
+            compaction_escape = True
+        elif not _compaction_in_flight(state, cancel_key):
+            slot._stop_declined_at = 0.0
+    elif (
+        force
+        and escalate
+        and slot.running
+        and slot._stop_state == "idle"
+        and _compaction_in_flight(state, cancel_key)
+    ):
+        # An explicit ``?force=true`` on an idle stop state is the escape hatch
+        # from the DECLINE only: it must reach the hard-stop escalation below
+        # rather than be declined. Without a compaction, a ``force`` arriving on
+        # an idle state is a retried first press whose original was lost on the
+        # wire, and it keeps the cooperative path it always had.
+        slot._stop_state = "soft_pending"
+        compaction_escape = True
+
     if slot.is_remote:
         accepted = await forward_peer_stop(state, slot, force or slot._stop_state == "soft_pending")
         if not accepted:
@@ -5977,6 +5900,11 @@ async def stop_slot_turn(
     if escalate and slot._stop_state == "soft_pending":
         slot._stop_state = "killing"
         stage_boundary_for(slot).preserve_stop_generation = -1
+        # A decline settled its own card and left no open one; the hard kill
+        # that follows needs a row of its own, or the last stop row the user
+        # sees still reads "nothing was stopped" for a session that was reset.
+        if not slot._stop_event_id:
+            _open_stop_event_card(slot, "stopping")
         # Survives turn teardown, which resets _stop_state to "idle". Without
         # it a cooperative ack from the first press could still land and label
         # this hard kill a clean stop. Scoped to this card so it cannot defer
@@ -6006,9 +5934,11 @@ async def stop_slot_turn(
             # the client's send id onto.
             slot._steer_send_ids.pop(_discarded, None)
             slot._steer_user_origin.pop(_discarded, None)
+            slot._steer_channel_origin.pop(_discarded, None)
             slot._steer_admissions.pop(_discarded, None)
             slot._steer_attachment_meta.pop(_discarded, None)
             slot._steer_decision_strips.pop(_discarded, None)
+            slot._steer_possibly_delivered.discard(_discarded)
         slot._pending_steers.clear()
         state.push_slots_update()
         logger.info("Stop (force): hard-killing session for slot %s", name)
@@ -6025,8 +5955,12 @@ async def stop_slot_turn(
         # dashboard:<slot> key names a session no running turn owns — the stop
         # reports success and cancels nothing. The SEL record below stays on the
         # slot-derived key, which identifies the tab the operator pressed.
-        await state.sessions.stop_turn(cancel_key, force=True, on_hard=_on_hard_force)
-        await _cancel_stage_controller(slot)
+        await state.sessions.stop_turn(
+            cancel_key,
+            force=True,
+            preserve_queue=compaction_escape,
+            on_hard=_on_hard_force,
+        )
         sel().log_tool_invocation(
             session_key=_history_key_for(name),
             agent=getattr(slot, "agent", "") or "kirocrew",
@@ -6071,27 +6005,47 @@ async def stop_slot_turn(
         # reaches routinely.
         return {"ok": True, "info": _info, "already_stopping": bool(slot.running)}
 
+    # A cooperative Stop while the session's own automatic /compact holds it is
+    # DECLINED, before any of the soft-stop side effects below run. Cancelling
+    # that turn fails the compaction, and the failure arm recycles the session:
+    # a user who pressed Stop on what looked like a stalled turn would lose the
+    # session's memory to a restart the notice then blames on compaction.
+    # The card the press would have opened is opened and settled in
+    # one step, so the press still leaves a visible answer in the transcript.
+    # A force stop (second press, or ?force=true) is the escape hatch and is
+    # never declined: the force branch above runs first, and the decline below
+    # arms ``_stop_declined_at`` so the NEXT press reaches that branch instead
+    # of being declined again -- a live turn that shares the session with a
+    # compaction must stay stoppable. ``_stop_state`` stays idle: nothing is
+    # stopping. ``stop_turn`` repeats the compacting check for the race in
+    # which a compaction starts between here and the cancel.
+    if _compaction_in_flight(state, cancel_key):
+        stop_id = _open_stop_event_card(slot, "stopping")
+        _resolve_stop_event(slot, "compacting")
+        slot._stop_event_id = None
+        if escalate:
+            # Only a press that could itself escalate arms the second press; a
+            # caller that said "this may be a retry" must not arm a hard kill
+            # for the user's next ordinary Stop.
+            slot._stop_declined_at = time.monotonic()
+        state.push_slots_update()
+        logger.info("Stop: declined for slot %s — compaction in flight", name)
+        sel().log_tool_invocation(
+            session_key=_history_key_for(name),
+            agent=getattr(slot, "agent", "") or "kirocrew",
+            source="dashboard",
+            tool_name="dashboard_stop",
+            tool_kind="command",
+            outcome="compacting",
+            metadata={"slot": name, "via": source, "force": False, "stop_id": stop_id},
+        )
+        return {"ok": True, "info": "compacting", "compacting": True}
+
     # First press: soft stop
     slot._stop_state = "soft_pending"
     # NOTE: Do NOT clear the queue here — stop should only cancel the
     # currently running turn, leaving queued messages intact for the user
     # to process or dismiss individually.
-    _was_auto = slot._auto_run
-    slot._auto_run = False
-    if _was_auto:
-        sel().log(
-            SecurityEvent(
-                event_id=uuid.uuid4().hex,
-                timestamp=datetime.now(tz=timezone.utc).isoformat(),
-                event_type="auto_run_stopped",
-                caller_identity=f"dashboard:{slot.key}",
-                agent=getattr(slot, "agent", ""),
-                source="dashboard",
-                operation="stop",
-                outcome="stopped",
-                resources=f"slot={slot.key}",
-            )
-        )
 
     # One card per press: re-arm an orphaned card in place or append a fresh
     # one (see _open_stop_event_card for why sweeping the orphan rendered two
@@ -6115,11 +6069,22 @@ async def stop_slot_turn(
         on_soft=_on_soft,
         on_hard=_on_hard,
     )
-    await _cancel_stage_controller(slot)
     # Resolve orphaned card when provider reports no active turn
     if outcome == "idle" and slot._stop_event_id:
         _resolve_stop_event(slot, "soft")
         slot._stop_state = "idle"
+        state.push_slots_update()
+    elif outcome == "compacting":
+        # The race the pre-check above cannot close: the compaction committed
+        # between that read and the cancel. Same answer, and the soft-stop side
+        # effects taken above are undone: ``_stop_state`` back to idle (nothing
+        # is stopping), the decline marker armed so the next press escalates,
+        # as on the pre-check path.
+        _resolve_stop_event(slot, "compacting")
+        slot._stop_event_id = None
+        slot._stop_state = "idle"
+        if escalate:
+            slot._stop_declined_at = time.monotonic()
         state.push_slots_update()
     sel().log_tool_invocation(
         session_key=_history_key_for(name),
@@ -6130,7 +6095,14 @@ async def stop_slot_turn(
         outcome=outcome,
         metadata={"slot": name, "via": source, "force": False},
     )
+    if outcome == "compacting":
+        return {"ok": True, "info": "compacting", "compacting": True}
     return {"ok": True}
+
+
+def _compaction_in_flight(state: DashboardState, cancel_key: str) -> bool:
+    """The shared pre-stop probe (``session_lifecycle.compaction_in_flight``)."""
+    return compaction_in_flight(state.sessions, cancel_key)
 
 
 async def api_chat_slot_stop(request: web.Request) -> web.Response:
@@ -6519,6 +6491,9 @@ async def api_chat_slot_end_wait(request: web.Request) -> web.Response:
             {"error": "no such wait in flight", "code": "wait_not_in_flight"}, status=409
         )
     slot._end_wait_request = wait_id
+    # The button, not a session: clears any requester a session_end_wait left
+    # behind, so the woken tool reports the user as the one who ended it.
+    slot._end_wait_by = ""
     sel().log_tool_invocation(
         session_key=_history_key_for(name),
         agent=getattr(slot, "agent", "") or "kirocrew",
@@ -6655,13 +6630,35 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     if not slot._queue:
         return web.json_response({"error": "queue empty, use /stop instead"}, status=400)
 
+    # An automatic compaction holds the session: the interrupt is declined
+    # BEFORE the claim below mutates the running turn (``_stop_state``) and
+    # before ``_unblock_pending_waits`` rejects its pending
+    # approvals -- none of that may happen to a turn that is not being stopped.
+    # No escalation marker: an interrupt is "run the next queued message", not
+    # a Stop, and must not turn the user's next Stop press into a hard kill.
+    # ``_stop_state`` stays idle.
+    if _compaction_in_flight(state, cancel_key):
+        stop_id = _open_stop_event_card(slot, "interrupting")
+        _resolve_stop_event(slot, "compacting")
+        slot._stop_event_id = None
+        state.push_slots_update()
+        sel().log_tool_invocation(
+            session_key=_history_key_for(name),
+            agent=getattr(slot, "agent", "") or "kirocrew",
+            source="dashboard",
+            tool_name="dashboard_interrupt",
+            tool_kind="command",
+            outcome="compacting",
+            metadata={"slot": name, "stop_id": stop_id},
+        )
+        return web.json_response({"ok": True, "outcome": "compacting", "compacting": True})
+
     # Claim the stop slot synchronously BEFORE the await below: the
     # idempotency guard above is check-then-act, and a concurrent /interrupt
     # arriving during the awaited body read below would otherwise still see
     # _stop_state == "idle" and slip past the guard (double stop_turn +
     # double SEL audit for one logical press). /stop is race-safe because it
     # has no await between guard and claim; this makes /interrupt match.
-    prev_auto_run = slot._auto_run
     slot._stop_state = "soft_pending"
     # Per-attempt identity for the claim itself. The stand-down guard below
     # cannot rely on the state VALUE alone: a concurrent /stop can escalate,
@@ -6671,14 +6668,11 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     # identity that survives card reuse); the claim above bumped it, so any
     # later initiation moves it again.
     claim_generation = slot._stop_generation
-    slot._auto_run = False
 
     # Optionally promote a specific queue item to front. The except is not a
     # parse guard (read_bounded_json owns that): it rolls the claimed stop
     # state back when the body read fails in transit, and the refused-body
-    # branch below rolls it back the same way. Both paths also restore
-    # _auto_run: a refused request must not leave orchestrator auto-run
-    # disabled when no interrupt actually happened. The rollback is
+    # branch below rolls it back the same way. The rollback is
     # conditional on our claim being intact: a concurrent /stop arriving
     # during the body await may escalate _stop_state (e.g. to "killing"),
     # and an unconditional reset to "idle" would erase that escalation and
@@ -6693,12 +6687,10 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
         # re-enable auto-run under a real stop.
         if slot._stop_state == "soft_pending" and slot._stop_generation == claim_generation:
             slot._stop_state = "idle"
-            slot._auto_run = prev_auto_run
         raise
     if body_err is not None:
         if slot._stop_state == "soft_pending" and slot._stop_generation == claim_generation:
             slot._stop_state = "idle"
-            slot._auto_run = prev_auto_run
         return body_err
     assert body is not None  # read_bounded_json returns (dict, None) on success
     queue_id = body.get("queue_id")
@@ -6729,8 +6721,7 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     # marker-clear would erase a LIVE escalation marker, letting a late
     # cooperative ack relabel the hard kill as a clean stop. The other stop
     # owns the posture now: stand down and answer like the idempotent-repeat
-    # branch above. `_auto_run` stays disabled — a stop was initiated either
-    # way. This also fires when the superseding stop has ALREADY settled
+    # branch above. This also fires when the superseding stop has ALREADY settled
     # (state back to "idle"), including the benign case where the running
     # turn simply ended during the body read; queue promotion already
     # happened above, so nothing of the user's intent is dropped.
@@ -6745,6 +6736,28 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
             metadata={"slot": name, "reason": "stop claim superseded during body read"},
         )
         return web.json_response({"ok": True, "info": "stop already in progress"})
+
+    # The probe again, AFTER the body await and with no await between here and
+    # the pending-wait rejection below. A compaction that committed during the
+    # body read would otherwise have the user's pending approval or question
+    # rejected (irreversible) by a Stop the compaction then declines. Same
+    # answer as the pre-check: the claim is released, nothing is touched.
+    if _compaction_in_flight(state, cancel_key):
+        slot._stop_state = "idle"
+        stop_id = _open_stop_event_card(slot, "interrupting")
+        _resolve_stop_event(slot, "compacting")
+        slot._stop_event_id = None
+        state.push_slots_update()
+        sel().log_tool_invocation(
+            session_key=_history_key_for(name),
+            agent=getattr(slot, "agent", "") or "kirocrew",
+            source="dashboard",
+            tool_name="dashboard_interrupt",
+            tool_kind="command",
+            outcome="compacting",
+            metadata={"slot": name, "stop_id": stop_id, "reason": "committed during body read"},
+        )
+        return web.json_response({"ok": True, "outcome": "compacting", "compacting": True})
 
     # Stop current turn but preserve the queue so dequeue loop fires
     # (soft_pending already claimed above, before the request-body await)
@@ -6773,6 +6786,18 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     # Resolve orphaned card when provider reports no active turn
     if outcome == "idle" and slot._stop_event_id:
         _resolve_stop_event(slot, "soft")
+        slot._stop_state = "idle"
+        state.push_slots_update()
+    elif outcome == "compacting":
+        # The window the two probes above cannot close: a compaction commits
+        # between the second probe and ``stop_turn`` taking the registry lock,
+        # with no await of ours in between, so only another task's tick can
+        # land here. Nothing was interrupted. The pending waits
+        # ``_unblock_pending_waits`` rejected cannot be un-rejected, which is
+        # why both probes run first. ``_stop_state`` goes back to idle; no
+        # escalation marker, for the reason the pre-check gives.
+        _resolve_stop_event(slot, "compacting")
+        slot._stop_event_id = None
         slot._stop_state = "idle"
         state.push_slots_update()
     sel().log_tool_invocation(
@@ -7419,6 +7444,39 @@ async def _await_guarded_history_write(slot: "_ChatSlot", name: str) -> bool:
         await asyncio.wait(pending, timeout=remaining)
 
 
+async def _wake_conductor_for_closed_worker(name: str) -> None:
+    """Pull *name*'s conductor's work-ledger tick forward, if *name* was a bound worker.
+
+    NEVER RAISES. A close is a user action with rollback paths for its own four failure
+    modes; "the conductor was not told early" is not one of them, because the conductor's
+    scheduled tick reads the same ledger a cadence later. So every failure here is a
+    DEBUG line and the close proceeds.
+
+    The import is function-local: ``conductor_wake`` reaches the work-ledger store, and
+    every gateway runs this close path whether or not any conductor has ever opened a
+    ledger.
+
+    WHEN IT IS CALLED. TRIGGER TWO of the crew-log wake, and only from the two exits
+    where the close is COMMITTED: after the archival save succeeds, and after the
+    hand-over exit's tail drain landed. Never between the pop and the save. The
+    conductor's probe answers "is this worker closed" by looking the slot up, and a
+    ``worker_closed`` answer persists a stall observation that no rollback retracts; a
+    tick fired in that window would read the popped slot as gone, and the save's
+    failure arm would then put the slot back under a permanent false "worker gone".
+
+    Awaited rather than detached: the binding read is offloaded inside and ``fire_now``
+    has no suspension point, so this adds one executor hop to a teardown that has
+    already awaited several -- and a detached task would outlive the close and could
+    fire after a same-key recreate.
+    """
+    try:
+        from kiro_crew import conductor_wake
+
+        await conductor_wake.fire_for_worker_slot(name)
+    except Exception:  # noqa: BLE001 - a push must never fail a close
+        logger.debug("conductor wake on close failed for %s", name, exc_info=True)
+
+
 async def close_slot(
     state: DashboardState,
     slot: "_ChatSlot",
@@ -7670,11 +7728,7 @@ async def _close_slot(
     # was claimed), while a cancel landing mid-removal would interrupt
     # provider.shutdown() after the registry entry was already popped and
     # leak the process holding kiro-cli's native session lock.
-    _teardown_tasks = {
-        task
-        for task in (slot.task, slot._stage_controller_task)
-        if task is not None and not task.done()
-    }
+    _teardown_tasks = {task for task in (slot.task,) if task is not None and not task.done()}
     if _teardown_tasks:
         for task in _teardown_tasks:
             task.cancel()
@@ -7762,6 +7816,8 @@ async def _close_slot(
         # Otherwise return, do not raise: for the ORIGINAL the close is complete
         # (popped, task cancelled, tail durable), so every caller — the DELETE
         # handler and session-control's close_target — must read this as success.
+        # Committed, so the conductor may be told now and not before.
+        await _wake_conductor_for_closed_worker(name)
         return
     try:
         await save_slot_off_loop(state, slot, closed=True, closed_at=closed_at, best_effort=False)
@@ -7851,6 +7907,8 @@ async def _close_slot(
         # per-slot cards on it can never be pruning a slot that comes back.
         state.push_slot_removed(name)
         discard_closing_failure_scopes()
+        # Committed, so the conductor may be told now and not before.
+        await _wake_conductor_for_closed_worker(name)
     # The app was already told, and compensated if the persist above failed — see
     # the notify block before the pop and the rollback in the except branch.
     # Kill the per-tab session to free resources. Re-check identity ONE more
@@ -11286,21 +11344,91 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
     process re-reads its agent spec and environment and re-initializes MCP
     servers via session/load -- with the conversation preserved.
 
-    Refused with 409 while a turn is in flight (killing an in-flight ACP
-    process orphans the streaming prompt: resume refusals, empty responses)
-    and while sub-agent children are attached (their shared runtime is torn
-    down with the parent session -- see ``SessionManager.reset`` -- so a
-    reload under a working child silently discards its work). The
-    has_active_turn() check is a best-effort fast path; the authoritative
-    guard is the reset's skip_if_busy, which evaluates busyness atomically
-    with the session pop (see _reset_slot_session for why the unblock half of
-    the chokepoint is safe even when the guard declines).
+    The teardown itself is :func:`reload_slot_session`, shared with the
+    session-control ``session_reload`` verb; this handler supplies the
+    dashboard route's own authorization (slot identity and app isolation).
     """
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     if not slot:
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+
+    def _still_ours(_after_reset: bool) -> bool:
+        # Re-authorize after every await: ``name`` can be recreated for a
+        # DIFFERENT app while this request queued on a lock (slot removal +
+        # re-registration under the same name is how a client reconnects), and
+        # the stale ``slot`` object's app-isolation check would then authorize
+        # this teardown against the NEW slot's session -- the same
+        # cross-slot-identity gap the tags/folders/regenerate handlers close
+        # with this exact re-check (e.g. chat_tags.py's ``is not slot`` guard).
+        return not _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload")
+
+    def _denied(session_key: str) -> web.Response | None:
+        # App isolation, same policy as the cancel routes: reload is a
+        # teardown, so an app token must own both the slot and the session the
+        # teardown lands on, and a denial is indistinguishable from a missing
+        # slot.
+        return _app_cancel_denied(request, slot, "chat.slot_reload", session_key)
+
+    def _busy(session_key: str) -> bool:
+        provider = state.sessions.get_provider(session_key)
+        return provider is not None and provider.has_active_turn()
+
+    return await reload_slot_session(
+        state,
+        slot,
+        name,
+        still_ours=_still_ours,
+        denied=_denied,
+        busy=_busy,
+        notice=_SESSION_RELOAD_NOTICE,
+    )
+
+
+async def reload_slot_session(
+    state: DashboardState,
+    slot: _ChatSlot,
+    name: str,
+    *,
+    still_ours: Callable[[bool], bool],
+    denied: Callable[[str], web.Response | None],
+    busy: Callable[[str], bool],
+    notice: str,
+) -> web.Response:
+    """Tear down *slot*'s agent process and re-arm its resume spawn.
+
+    The one reload teardown, shared by ``api_chat_slot_reload`` (the tab menu)
+    and ``session_control.reload_target`` (the ``session_reload`` MCP verb), so
+    the lock order and the re-checks below cannot drift between the two. The
+    transcript is not touched: only the agent session is reset, and one notice
+    row (*notice*, tagged ``SESSION_RELOAD_KIND``) is appended afterwards.
+
+    The caller supplies its own authorization as three callbacks:
+
+    * ``still_ours(after_reset)`` -- re-run after every await; False answers
+      the byte-identical ``slot_not_found`` 404. ``after_reset`` is True only
+      for the re-check that follows ``_reset_slot_session``, so a caller can
+      tell "refused, nothing was torn down" from "the process is already
+      gone" without inferring the phase from call order. It may also RAISE
+      (the session-control verb re-runs its gate here and lets a pre-reset
+      refusal propagate); the lock stack still unwinds.
+    * ``denied(session_key)`` -- the teardown-target check, run once the
+      session key is resolved inside both locks; a response it returns is
+      returned as-is.
+    * ``busy(session_key)`` -- the fast-path busy probe, refusing with
+      ``turn_in_flight``.
+
+    Refused with 409 while a turn is in flight (killing an in-flight ACP
+    process orphans the streaming prompt: resume refusals, empty responses)
+    and while sub-agent children are attached (their shared runtime is torn
+    down with the parent session -- see ``SessionManager.reset`` -- so a
+    reload under a working child silently discards its work). The ``busy``
+    check is a best-effort fast path; the authoritative guard is the reset's
+    skip_if_busy, which evaluates busyness atomically with the session pop
+    (see _reset_slot_session for why the unblock half of the chokepoint is
+    safe even when the guard declines).
+    """
     # Two locks, in the order documented at _slot_switch_session_lock:
     # slot._lock, then the session lock. The four commit-before-reset switch
     # handlers hold both across their commit-then-reset span, and reload joins
@@ -11313,15 +11441,9 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
     # earlier read could leave this holding the wrong session lock.
     async with contextlib.AsyncExitStack() as _stack:
         await _stack.enter_async_context(slot._lock)
-        # Re-authorize after the await above: ``name`` can be recreated for a
-        # DIFFERENT app while this request queued on the lock (slot removal +
-        # re-registration under the same name is how a client reconnects), and
-        # the stale ``slot`` object's app-isolation check below would then
-        # authorize this teardown against the NEW slot's session -- the same
-        # cross-slot-identity gap the tags/folders/regenerate handlers close
-        # with this exact re-check (e.g. chat_tags.py's ``is not slot`` guard).
-        # A mismatch here is indistinguishable from a missing slot.
-        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload"):
+        # Re-authorize after the await above. A mismatch here is
+        # indistinguishable from a missing slot.
+        if not still_ours(False):
             return _slot_not_found()
         # The session the reload will tear down. ``effective_session_key``,
         # never ``_history_key_for``: a channel- or cron-born slot runs its
@@ -11344,7 +11466,7 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
         # above. Without this, the 7396 check would guard only the first
         # await and leave the exact gap it exists to close open on the
         # second.
-        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload"):
+        if not still_ours(False):
             return _slot_not_found()
         # Re-derive rather than trust the captured session_key: it names a
         # MUTABLE attribute (slot.linked_session_key), so a cron/channel
@@ -11357,15 +11479,10 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
                 {"error": "slot session was rebound during the switch", "code": "session_rebound"},
                 status=409,
             )
-        # App isolation, same policy as the cancel routes: reload is a
-        # teardown, so an app token must own both the slot and the session the
-        # teardown lands on, and a denial is indistinguishable from a missing
-        # slot.
-        denied = _app_cancel_denied(request, slot, "chat.slot_reload", session_key)
-        if denied is not None:
-            return denied
-        provider = state.sessions.get_provider(session_key)
-        if provider is not None and provider.has_active_turn():
+        refusal = denied(session_key)
+        if refusal is not None:
+            return refusal
+        if busy(session_key):
             return web.json_response(
                 {"error": "a turn is in flight", "code": "turn_in_flight"}, status=409
             )
@@ -11383,7 +11500,39 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
             # can observe that the other actor now blocks on the session lock
             # instead of interleaving.
             await _test_interleave("reload:pre_reset")
-        reloaded = await _reset_slot_session(state, slot, session_key, skip_if_busy=True)
+        # Re-authorize once more before the teardown: the children probe (and
+        # the test seam) above are awaits too, and a channel link, mirror or
+        # slot replacement landing during them would otherwise reach
+        # _reset_slot_session on authorization read before that await. This
+        # is the last pre-reset check, so a refusal here still means nothing
+        # was torn down.
+        if not still_ours(False):
+            return _slot_not_found()
+        teardown_incomplete = False
+
+        async def _reset() -> bool:
+            # SessionManager.reset pops the session before its shutdown can
+            # raise, so a raise after the pop means the old process is gone and
+            # the reload has happened with a degraded teardown. Propagating it
+            # would answer 500 with no notice and no respawn for a completed
+            # teardown. Same identity probe as _reset_slot_session_or_warn: the
+            # SAME provider still registered means the raise came before the
+            # pop, nothing was torn down, and the raise propagates.
+            nonlocal teardown_incomplete
+            prior_provider = state.sessions.get_provider(session_key)
+            try:
+                return await _reset_slot_session(state, slot, session_key, skip_if_busy=True)
+            except Exception:
+                if (
+                    prior_provider is not None
+                    and state.sessions.get_provider(session_key) is prior_provider
+                ):
+                    raise
+                logger.exception("Slot %s reload: old session teardown incomplete", name)
+                teardown_incomplete = True
+                return True
+
+        reloaded = await _reset()
         if not reloaded:
             provider = state.sessions.get_provider(session_key)
             if provider is not None and provider.has_active_turn():
@@ -11397,7 +11546,7 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
                 # survives -- the silent failure this endpoint exists to
                 # prevent. Retry once; a second decline means another turn is
                 # genuinely racing, which is the turn-in-flight case.
-                reloaded = await _reset_slot_session(state, slot, session_key, skip_if_busy=True)
+                reloaded = await _reset()
                 if not reloaded:
                     return web.json_response(
                         {"error": "a turn is in flight", "code": "turn_in_flight"},
@@ -11423,7 +11572,7 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
         # cross-slot-identity gap the two earlier checks close, just moved to
         # this last await. Same response as those checks: a mismatch here is
         # indistinguishable from a missing slot.
-        if _slot_replaced_while_queued(state, slot, name, request, "chat.slot_reload"):
+        if not still_ours(True):
             return _slot_not_found()
         if effective_session_key(slot) != session_key:
             return web.json_response(
@@ -11439,7 +11588,7 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
     # notice twice.
     slot.append(
         "assistant",
-        _SESSION_RELOAD_NOTICE,
+        notice,
         "msg msg-a",
         meta={"kind": SESSION_RELOAD_KIND},
     )
@@ -11447,6 +11596,8 @@ async def api_chat_slot_reload(request: web.Request) -> web.Response:
     # process (and its rebuilt toolset) is ready when the user comes back.
     schedule_eager_spawn(state, slot, allow_resume=True)
     state.push_slots_update()
+    if teardown_incomplete:
+        return web.json_response({"ok": True, "warning": _TEARDOWN_INCOMPLETE_WARNING})
     return web.json_response({"ok": True})
 
 
@@ -12797,6 +12948,15 @@ def _hydrate_slot_from_history(
             slot.mode = _mode
     if meta.get("workspace"):
         slot.workspace = meta["workspace"]
+    # The namespace the agent was picked in rides with the pick itself, exactly
+    # as in the two persistence loaders (same position, same two-value guard on
+    # the operator-editable transcript). Restoring the name without it leaves
+    # the dropdown's name-only fallback lighting the same-name MEMBER row for a
+    # template-picked slot, and the next canonical full save -- which rebuilds
+    # meta_line from the live slot -- then omits the empty field and strips the
+    # recorded namespace from disk.
+    if meta.get("agent_kind") in ("member", "template"):
+        slot.agent_kind = meta["agent_kind"]
     if meta.get("project"):
         slot.project = meta["project"]
     if meta.get("channel_folder_filed"):
@@ -13322,6 +13482,13 @@ async def resume_slot_from_history(
     restored_agent = await asyncio.to_thread(
         _restored_agent_name, _resume_session_identity(state, history_key), meta
     )
+    # The model restore needs the provider (config.json) and the effort marker
+    # (a file under the config dir). Both are disk reads, so they are taken here,
+    # off the loop, before the synchronous construction below.
+    _prefetched_effort = meta.get("reasoning_effort")
+    restore_cfg, effort_marker = await asyncio.to_thread(
+        lambda: (_load_restore_cfg(), _has_validated_effort_marker(_prefetched_effort))
+    )
     # Re-check after the await: a concurrent resume can publish the slot while we
     # are suspended, and the publish below would skip the ownership gate above.
     resume_outcome = await _live_slot_for_resume(
@@ -13645,6 +13812,17 @@ async def resume_slot_from_history(
         # Restore the protected choice read before construction, not the
         # editable transcript's provisional agent name.
         slot.agent = restored_agent
+    # Same model + effort restore as the restart loaders. Without it the resumed
+    # slot runs on the default model, and its next save writes ``model: ""``
+    # over the user's pick. Resume only: import deliberately does not carry a
+    # model (see session_transfer). The marker was read for the pre-await
+    # snapshot, so it only vouches for an unchanged effort value.
+    _restore_model_fields(
+        slot,
+        meta,
+        cfg=restore_cfg,
+        effort_marker=effort_marker and meta.get("reasoning_effort") == _prefetched_effort,
+    )
     if containment is not None and not getattr(slot, "_app", "") and post_read_meta.get("app"):
         # The hook reads the slot's own fields; ``_app`` comes from the request
         # (none here), so the line's app scope is restored onto the built slot

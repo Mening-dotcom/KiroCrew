@@ -16,7 +16,7 @@ from typing import Any
 from aiohttp import web
 
 from kiro_crew import pinned_fs
-from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
+from kiro_crew.dashboard.chat_persistence import _coerce_requested_mode, save_slot_off_loop
 from kiro_crew.dashboard.chat_tags import tags_write_lock, validate_folder_tag_ids
 from kiro_crew.dashboard.chat_utils import effective_session_key, slot_history_key
 from kiro_crew.dashboard.create_rate_limit import FOLDER_CREATE, allow_create
@@ -1916,7 +1916,8 @@ async def api_chat_folder_reorder(request: web.Request) -> web.Response:
     in one ``mutate_folders`` pass under the folder-store lock, all-or-none -- so
     a rejected row leaves the stored order exactly as it was, never half-applied.
 
-    Body: ``{"orders": [{"id": str, "order": int}, ...]}``. Every entry is
+    Body: ``{"orders": [{"id": str, "order": int}, ...]}``, plus the optional
+    request-level ``expected_parent`` described below. Every entry is
     validated into a pending map BEFORE the lock is taken (the same shape
     discipline ``api_chat_folder_update`` uses for its single row), so a
     malformed request is a 400 that never touches the store.
@@ -1935,6 +1936,21 @@ async def api_chat_folder_reorder(request: web.Request) -> web.Response:
     retags. A row naming a folder absent from the store is a 404 for the whole
     batch (the reorder the caller computed describes a tree that has since
     shifted), so no partial renumber lands against a shifted tree.
+
+    ``order`` is a per-container index, so a renumber is only correct for rows
+    still living in the container the caller computed it against. The optional
+    request-level ``expected_parent`` states that container: when the key is
+    present, every written row's stored ``parent_id`` must equal its value
+    (empty string names the root lane), compared under the same lock that does
+    the writing -- checking earlier would reopen the window it closes. A
+    mismatch means a concurrent reparent moved a row between the caller's read
+    and this write, and landing the batch anyway would persist an index
+    computed for the old container onto a row in a new one; the whole batch is
+    refused as 409 ``folder_parent_changed`` with the store untouched. Absence
+    of the key is the one way to make no assumption -- a caller positioning
+    rows by absolute index never read a container, so no claim is demanded of
+    it -- and is told apart from an empty string by the key's presence, never
+    its value. The stored parent is read, never written.
     """
     state: DashboardState = request.app["state"]
     if (refusal := _refuse_unattributable_caller(state, request)) is not None:
@@ -1953,6 +1969,20 @@ async def api_chat_folder_reorder(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "too many folders in one reorder", "code": "orders_too_many"}, status=400
         )
+    # The container claim is presence-checked, the same idiom the reparent PATCH
+    # uses for ``parent_id``: ``None`` here means the key is absent and no row's
+    # parent is compared. A present value must be a real string -- coercing
+    # (say) a JSON null or 0 through falsiness would silently turn caller junk
+    # into a root claim, so a non-string is a 400 instead.
+    expected_parent: str | None = None
+    if "expected_parent" in body:
+        raw_expected = body["expected_parent"]
+        if not isinstance(raw_expected, str):
+            return web.json_response(
+                {"error": "expected_parent must be a string", "code": "expected_parent_invalid"},
+                status=400,
+            )
+        expected_parent = raw_expected
     # Validate every entry into an id -> order map BEFORE the lock is taken, the
     # same shape discipline api_chat_folder_update applies to its single row: a
     # malformed batch is a 400 that never touches the store. Last-writer-wins on
@@ -2019,6 +2049,17 @@ async def api_chat_folder_reorder(request: web.Request) -> web.Response:
                 folders, root_id=fid, request_app=request_app
             ):
                 return False, "subtree_not_owned"
+            # The container claim is decided last, so authorization always wins
+            # over the precondition: a caller refused a foreign row learns
+            # nothing about where that row now lives. The stored parent is
+            # normalized the way the tree walkers read it (absent and null both
+            # mean the root lane), and one mismatched row refuses the whole
+            # batch -- its order number was computed for a container it has
+            # left, so landing the rest around it renumbers a tree the caller
+            # never saw.
+            if expected_parent is not None:
+                if str(target.get("parent_id") or "") != expected_parent:
+                    return False, "parent_changed"
         changed = False
         for fid, order in pending.items():
             target = by_id[fid]
@@ -2035,6 +2076,19 @@ async def api_chat_folder_reorder(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "a folder in the reorder no longer exists", "code": "folder_not_found"},
             status=404,
+        )
+    if err == "parent_changed":
+        # A row's stored parent differs from the caller's claim: a concurrent
+        # reparent moved it between the caller's read and this write. A benign
+        # race like the deleted-row 404 above, not a violation, so it is not
+        # audited as denied. The 409 tells the caller its cached tree is stale;
+        # refetching and redrawing is the recovery, exactly as for the 404.
+        return web.json_response(
+            {
+                "error": "a folder in the reorder was moved to another parent",
+                "code": "folder_parent_changed",
+            },
+            status=409,
         )
     if err == "not_owned":
         # One row named a folder this app does not own. Refused whole, and
@@ -2637,7 +2691,7 @@ async def api_chat_slot_pin(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "pinned": slot.pinned, "changed": changed})
 
 
-_VALID_MODES = ("", "orchestrator")
+_VALID_MODES = ("",)
 
 
 async def api_chat_slot_mode(request: web.Request) -> web.Response:
@@ -2697,7 +2751,7 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    mode = body.get("mode", "")
+    mode = _coerce_requested_mode(body.get("mode", ""))
     if mode not in _VALID_MODES:
         return web.json_response({"error": "invalid mode"}, status=400)
     # Member DM threads (mode="member") are pinned to their crew, and every
@@ -2714,9 +2768,8 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
         )
     # A crew-bound (remote) session runs PLAIN chat only — the same rule
     # api_chat_slot_create enforces at birth, applied here to the post-create
-    # switch that would otherwise reopen it. A non-plain mode (orchestrator,
-    # design-critique) is consumed by an earlier dispatch branch in api_chat that
-    # runs its tools and filesystem work on THIS machine, not on the peer the
+    # switch that would otherwise reopen it. A non-plain mode would run
+    # its tools and filesystem work on THIS machine, not on the peer the
     # session is bound to. Keyed on ``executor`` rather than
     # ``is_remote`` so even a half-bound slot can never be switched into one.
     if slot.executor == "remote" and mode:
@@ -2785,12 +2838,7 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
                 {"error": "cannot switch mode while session is running"}, status=409
             )
         prior_mode = slot.mode
-        prior_auto_run = getattr(slot, "_auto_run", False)
         slot.mode = mode
-        # Clear orchestrator auto-run flag when leaving orchestrator mode to
-        # prevent stale "Go All" state from triggering on re-entry.
-        if mode != "orchestrator" and getattr(slot, "_auto_run", False):
-            slot._auto_run = False
         if not await save_slot_off_loop(
             state, slot, force=True, expected_history_key=authorized_history_key
         ):
@@ -2800,7 +2848,6 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
             # writer's newer commit is not erased.
             if slot.mode == mode:
                 slot.mode = prior_mode
-                slot._auto_run = prior_auto_run
             # The UNPINNED periodic flush may have persisted the provisional
             # value while this save awaited (review-caught): mark dirty so the
             # next flush reconverges the durable record to the live state.

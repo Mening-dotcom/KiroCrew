@@ -389,7 +389,7 @@ Priorities: P0 10 · P1 37 · P2 162 · P3 61. Deduped from 387 raw records.
 | P2 | `settings-developer-feature-previews` | As an early adopter, I want to turn on a feature preview in Settings > Developer, so that unfinished surfaces appear in the dashboard. | `/settings/developer` | minimal | nightly | 4 |
 | P2 | `settings-display-language-select` | As a non-English user, I want to change the dashboard Language in Settings > Display, so that the UI is shown in my language. | `/settings/display` | minimal | nightly | 3 |
 | P2 | `settings-display-session-color-palette` | As a dashboard user, I want to set the session colour palette and defaults in Settings > Display, so that sidebar rows are colour-coded. | `/settings/display` | sessions-a-few | nightly | 5 |
-| P2 | `settings-display-terminal-settings` | As a developer, I want to set the terminal shell, font, font size and command completion in Settings > Display, so that the built-in terminal matches my workflow. | `/settings/display` | minimal | nightly | 5 |
+| P2 | `settings-display-terminal-settings` | As a developer, I want to set the terminal shell, font, font size, command completion, and reuse-current-terminal in Settings > Display, so that the built-in terminal matches my workflow. | `/settings/display` | minimal | nightly | 5 |
 | P2 | `settings-display-zoom-level-stepper` | As a dashboard user, I want to step the Zoom Level in Settings > Display, so that the UI is larger or smaller. | `/settings/display` | minimal | nightly | 3 |
 | P2 | `settings-imports-panel` | As a new user, I want to import existing agent setups, so that I do not start from scratch. | `/settings/imports` | minimal | nightly | 3 |
 | P2 | `settings-notifications-category-sound-override` | As a dashboard user, I want to choose a different sound for Approval or Cron notifications, so that I can tell them apart by ear. | `/settings/notifications` | minimal | nightly | 4 |
@@ -431,7 +431,7 @@ Priorities: P0 10 · P1 37 · P2 162 · P3 61. Deduped from 387 raw records.
 
 | Priority | Id | User story | Start URL | Seed | Runnable | Steps |
 |---|---|---|---|---|---|---|
-| P2 | `developer-agent-backend` | As a developer, I want to see which agent harness backend is live, what each harness can and cannot do, and whether Kiro prerequisites are met, so that I know what turns run on before I choose a harness. | `/developer` | minimal | nightly | 3 |
+| P2 | `developer-agent-backend` | As a developer, I want to see which agent harness backend is live, what each harness can and cannot do, and whether Kiro prerequisites are met, so that I know what turns run on before I choose a harness. | `/settings/agent` | minimal | nightly | 3 |
 | P2 | `developer-archive` | As a developer, I want a consolidated session archive browser, so that I can inspect compacted history. | `/developer` | sessions-long-history | nightly | 3 |
 | P2 | `developer-config` | As a developer, I want raw Kiro Crew and agent config editors, so that I can fix a setting no panel exposes. | `/developer` | minimal | nightly | 3 |
 | P2 | `developer-debug-tools` | As a developer, I want diagnostic overlays such as the chat scroll inspector, so that I can debug layout issues. | `/developer` | sessions-a-few | nightly | 3 |
