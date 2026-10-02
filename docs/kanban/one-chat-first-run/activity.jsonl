@@ -477,3 +477,17 @@
 {"timestamp":"2026-09-30T16:18:16.568655573Z","action":"move","task_id":128,"detail":"in-progress -\u003e review"}
 {"timestamp":"2026-09-30T16:18:16.569730556Z","action":"handoff","task_id":128,"detail":"PN.25 After Move in: the commands to reach the home next time"}
 {"timestamp":"2026-09-30T16:18:16.570091805Z","action":"release","task_id":128,"detail":"PN.25 After Move in: the commands to reach the home next time"}
+{"timestamp":"2026-10-02T14:25:05.597211831Z","action":"create","task_id":129,"detail":"P2.25 Setup cards arrive as one-line hints that expand to act"}
+{"timestamp":"2026-10-02T14:32:54.534982679Z","action":"create","task_id":130,"detail":"UX.2 Scripted onboarding in the chat until the harness is ready (no inference)"}
+{"timestamp":"2026-10-02T14:32:54.568697017Z","action":"create","task_id":131,"detail":"UX.3 After privacy: get started with tips, or a more detailed setup"}
+{"timestamp":"2026-10-02T14:32:54.60212258Z","action":"create","task_id":132,"detail":"UX.4 A theme step in the detailed setup"}
+{"timestamp":"2026-10-02T14:32:54.635326282Z","action":"create","task_id":133,"detail":"UX.5 Examples of things to get started, with tips"}
+{"timestamp":"2026-10-02T14:32:54.669783098Z","action":"create","task_id":134,"detail":"UX.6 Arriving in a blank-slate app is a valid end to onboarding"}
+{"timestamp":"2026-10-02T14:32:54.704659645Z","action":"create","task_id":135,"detail":"Q16: Main chat, Mates or Sessions as the default landing; where the Mate assistant fits"}
+{"timestamp":"2026-10-02T14:32:54.738959921Z","action":"create","task_id":136,"detail":"Q17: Funnel metrics for onboarding: what to measure, how to report, legal sign-off"}
+{"timestamp":"2026-10-02T14:32:54.774080411Z","action":"create","task_id":137,"detail":"Q18: Bundle the harness CLI with the desktop app so there is no separate CLI sign-in"}
+{"timestamp":"2026-10-02T14:32:54.808918273Z","action":"create","task_id":138,"detail":"Q19: Modals or in-chat cards for the pre-chat steps"}
+{"timestamp":"2026-10-02T14:57:38.839573875Z","action":"edit","task_id":130,"detail":"UX.2 Scripted onboarding in the chat until the harness is ready (no inference)"}
+{"timestamp":"2026-10-02T15:28:44.306572353Z","action":"move","task_id":129,"detail":"in-progress -\u003e review"}
+{"timestamp":"2026-10-02T15:28:44.306821938Z","action":"handoff","task_id":129,"detail":"P2.25 Setup cards arrive as one-line hints that expand to act"}
+{"timestamp":"2026-10-02T15:28:44.306987913Z","action":"release","task_id":129,"detail":"P2.25 Setup cards arrive as one-line hints that expand to act"}
