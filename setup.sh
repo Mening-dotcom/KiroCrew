@@ -235,6 +235,11 @@ if [ -z "$_py" ]; then
     cd - > /dev/null 2>&1
     return 1 2>/dev/null || exit 1
 fi
+# A Python reached through a symlink (uv's `python install --default` puts them in
+# ~/.local/bin) can make a venv that cannot find its own standard library; the
+# interpreter's real path makes one that can.
+_py_real="$("$_py" -c 'import os, sys; print(os.path.realpath(sys.executable))' 2>/dev/null || true)"
+[ -n "$_py_real" ] && [ -x "$_py_real" ] && _py="$_py_real"
 echo "  ✅ $($_py --version 2>&1) ($(which "$_py"))"
 # Kiro CLI now, before the long build, so it is known up front whether the default
 # agent engine is here. This script installs no engine and waits on none: the
