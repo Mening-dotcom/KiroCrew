@@ -7047,6 +7047,7 @@
         "verbosity": "default",
         "link_previews": false,
         "tail_fork_enabled": false,
+        "default_crew_mode": false,
         "auto_open_browser": true,
         "prevent_sleep": false,
         "quick_send": false,
@@ -7577,6 +7578,20 @@
       "tags": [],
       "label": "Tail-only Fork",
       "help": "When forking, keep only the messages after the chosen point. The earlier messages are dropped.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "dashboard.default_crew_mode",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Crew Mode for New Sessions",
+      "help": "Start new dashboard chats on the default agent in Crew Mode, which runs them on the kirocrew-conductor agent. Applied when you start a new chat from the dashboard; existing chats, chats on another agent and chats an app creates are not changed.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false

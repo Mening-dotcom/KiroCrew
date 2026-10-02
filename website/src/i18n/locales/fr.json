@@ -9456,17 +9456,16 @@
       "chip_on": "Crew Mode activé",
       "chip_hint_off": "Active Crew Mode. Ton chef d'orchestre envoie chaque tâche dans son propre chat.",
       "chip_hint_on": "Désactive Crew Mode et reviens à l'agent par défaut.",
-      "eyebrow": "Crew Mode activé",
       "title": "Crew Mode",
       "tagline_lead": "Tu fixes l'objectif.",
       "tagline_strong": "Ton équipe fait le travail.",
-      "does_new_chat": "Nouveau chat",
-      "does_pass_notes": "Passer des notes",
-      "does_take_asks": "Prendre des demandes",
-      "does_check_in": "Faire le point",
+      "does_new_chat": "Ouvre des chats",
+      "does_pass_notes": "Partage les nouvelles",
+      "does_take_asks": "Prend les demandes",
+      "does_check_in": "Montre l'avancement",
       "board_title": "Ton équipe",
-      "board_preview": "Aperçu",
-      "sample_question": "Quel jour te convient ?",
+      "board_preview": "Exemple",
+      "sample_question": "Quel jour te convient ?",
       "sample_answer_a": "Aujourd'hui",
       "sample_answer_b": "Demain",
       "sample_email": "E-mail",
@@ -17487,7 +17486,7 @@
         "label": "Diffs divisés (côte à côte)"
       },
       "defaultCrewMode": {
-        "description": "Les nouveaux chats sur l'agent par défaut démarrent en Crew Mode : le chef d'orchestre ouvre des chats séparés pour faire le travail et te rend compte ici. Les chats existants ne changent pas.",
+        "description": "Les nouveaux chats sur l'agent par défaut démarrent en Crew Mode : le chef d'orchestre ouvre des chats séparés pour faire le travail et te rend compte ici. Les chats existants ne changent pas.",
         "label": "Activer Crew Mode par défaut pour les nouvelles sessions"
       }
     },

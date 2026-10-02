@@ -40,7 +40,7 @@ const configuredDefaultMemoryMode = () =>
 
 export const createSlot = createAsyncThunk<
   ChatSlot,
-  { agent?: string; agent_kind?: 'member' | 'template'; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; instanceId?: string; adoptRemoteSlot?: string; crew_mode?: boolean } | string | undefined,
+  { agent?: string; agent_kind?: 'member' | 'template'; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; instanceId?: string; adoptRemoteSlot?: string } | string | undefined,
   { fulfilledMeta: { originActiveSlot: string | null; activate: boolean } }
 >(
   'chat/createSlot',
@@ -74,9 +74,6 @@ export const createSlot = createAsyncThunk<
     // (the peer that owns the key), which the backend refuses with
     // `400 adopt_needs_instance` rather than guessing an owner.
     const adoptRemoteSlot = typeof opts === 'string' ? undefined : opts?.adoptRemoteSlot
-    // The composer's Crew Mode switch (true / false), or undefined to let the
-    // server apply the Settings default. Only meaningful on the default agent.
-    const crewMode = typeof opts === 'string' ? undefined : opts?.crew_mode
     // `activate: false` creates the session WITHOUT stealing focus, so a caller
     // that must finish setting the slot up (e.g. scoping it to a worktree) can
     // do so before the user is able to type into it. Defaults to true — every
@@ -95,12 +92,7 @@ export const createSlot = createAsyncThunk<
     // and resolving a local default here would only race it.
     const memory_mode = requestedMemoryMode
       || (adoptRemoteSlot ? undefined : await configuredDefaultMemoryMode())
-    // The twelfth argument rides only when the switch was touched, so every other
-    // create keeps its old call shape byte for byte.
-    const createArgs = [undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, instanceId, adoptRemoteSlot, agentKind] as const
-    const slot = crewMode === undefined
-      ? await api.createChatSlot(...createArgs)
-      : await api.createChatSlot(...createArgs, crewMode)
+    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, instanceId, adoptRemoteSlot, agentKind)
     const dashState = (getState() as RootState).dashboard
     // An explicit color (e.g. carried from a slot being recreated on a
     // mode switch) wins; otherwise fall back to the default-color policy.

@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from 'framer-motion'
-import { ArrowLeftRight, Eye, Inbox, Plus, type LucideIcon } from 'lucide-react'
+import { ArrowLeftRight, CircleHelp, Eye, Inbox, Plus, type LucideIcon } from 'lucide-react'
 import { KiroGhost } from './KiroGhost'
 import { KiroGhostMark } from './KiroGhostMark'
 
@@ -79,38 +79,36 @@ export default function CrewModeWelcome() {
   return (
     <motion.div
       data-testid="crew-mode-welcome"
-      className="w-full max-w-[620px] mx-auto pt-6 pb-4 flex flex-col items-center gap-5 text-center"
+      className="w-full max-w-[620px] mx-auto pt-2 pb-4 flex flex-col items-center gap-4 text-center"
       initial={still ? false : { opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.25 }}
     >
-      <div aria-hidden="true" className="relative w-full h-[170px] sm:h-[200px]">
+      <div aria-hidden="true" className="relative w-full h-[150px] sm:h-[170px]">
         {!still && [0, 1.4].map(d => (
           <motion.span
             key={d}
-            className="absolute left-1/2 top-1/2 -ml-[70px] -mt-[70px] w-[140px] h-[140px] rounded-full border-2 border-aim"
+            className="absolute left-1/2 top-1/2 -ml-[56px] -mt-[56px] w-[112px] h-[112px] rounded-full border-2 border-aim"
             initial={{ scale: 0.7, opacity: 0.7 }}
             animate={{ scale: 1.7, opacity: 0 }}
             transition={{ delay: d, duration: 2.8, repeat: Infinity, ease: 'easeOut' }}
           />
         ))}
+        {/* The ghost is white artwork, so it sits on an aim-colored disc: on a light
+            theme a bare white ghost would vanish into the page. */}
         <motion.span
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-          style={{ filter: 'drop-shadow(0 0 22px var(--color-aim))' }}
+          className="absolute left-1/2 top-1/2 -ml-[48px] -mt-[48px] w-24 h-24 rounded-full bg-aim grid place-items-center"
+          style={{ boxShadow: '0 0 32px var(--color-aim)' }}
           initial={still ? false : { opacity: 0, scale: 0.3 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ type: 'spring', stiffness: 220, damping: 14 }}
         >
-          <KiroGhost size={76} />
+          <KiroGhost size={52} />
         </motion.span>
         {CREW_GHOSTS.map(g => <PoppingGhost key={`${g.x}-${g.y}`} {...g} still={still} />)}
       </div>
 
-      <span className="inline-flex items-center gap-2 rounded-full border border-ok bg-ok-subtle px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-ok">
-        <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-ok" />
-        {i18nT('components.crewMode.eyebrow')}
-      </span>
-      <h2 className="m-0 text-5xl sm:text-7xl font-bold tracking-tight leading-none bg-gradient-to-r from-aim via-info to-ok bg-clip-text text-transparent">
+      <h2 className="m-0 text-5xl sm:text-6xl font-bold tracking-tight leading-none text-aim">
         {i18nT('components.crewMode.title')}
       </h2>
       <p className="m-0 text-lg sm:text-xl text-text">
@@ -121,7 +119,7 @@ export default function CrewModeWelcome() {
       <ul className="list-none m-0 p-0 w-full grid grid-cols-2 sm:grid-cols-4 gap-3">
         {capabilities().map(({ Icon, label, tone }) => (
           <li key={label} className="flex flex-col items-center gap-2">
-            <span aria-hidden="true" className={`w-14 h-14 rounded-2xl grid place-items-center border border-border bg-card ${TONE_TEXT[tone]}`}>
+            <span aria-hidden="true" className={`w-14 h-14 rounded-full grid place-items-center bg-bg-hover ${TONE_TEXT[tone]}`}>
               <Icon size={24} />
             </span>
             <span className="text-[13px] font-medium text-text-strong">{label}</span>
@@ -129,18 +127,19 @@ export default function CrewModeWelcome() {
         ))}
       </ul>
 
-      <section aria-label={i18nT('components.crewMode.board_title')} className="w-full rounded-2xl border border-border bg-card p-4 flex flex-col gap-3 text-left">
+      {/* Sample content, so it is muted and nothing in it looks clickable: a
+          reader must not take it for a crew that is already working. */}
+      <section aria-label={i18nT('components.crewMode.board_title')} className="w-full rounded-2xl border border-dashed border-border p-4 flex flex-col gap-3 text-left opacity-70">
         <div className="flex items-baseline justify-between">
           <span className="text-[15px] font-semibold text-text-strong">{i18nT('components.crewMode.board_title')}</span>
-          <span className="rounded-full border border-dashed border-border px-2 text-[10px] text-muted">{i18nT('components.crewMode.board_preview')}</span>
+          <span className="rounded-full bg-bg-hover px-2 text-[11px] font-semibold uppercase tracking-wider text-muted">{i18nT('components.crewMode.board_preview')}</span>
         </div>
-        <div className="flex items-center gap-3 rounded-xl border border-warn bg-warn-subtle px-3 py-2.5">
-          <span aria-hidden="true" className="shrink-0 w-9 h-9 rounded-lg grid place-items-center bg-warn text-warn-fg text-lg font-extrabold">?</span>
+        <div className="flex items-center gap-3 rounded-xl bg-warn-subtle px-3 py-2.5">
+          <span aria-hidden="true" className="shrink-0 w-9 h-9 rounded-lg grid place-items-center bg-warn text-warn-fg"><CircleHelp size={20} /></span>
           <div className="min-w-0">
             <div className="text-[15px] font-semibold text-text-strong">{i18nT('components.crewMode.sample_question')}</div>
-            <div className="mt-1 flex gap-1.5">
-              <span className="rounded-full border border-warn px-2.5 text-[12px] font-semibold text-warn">{i18nT('components.crewMode.sample_answer_a')}</span>
-              <span className="rounded-full border border-warn px-2.5 text-[12px] font-semibold text-warn">{i18nT('components.crewMode.sample_answer_b')}</span>
+            <div className="mt-0.5 text-[12px] text-muted">
+              {i18nT('components.crewMode.sample_answer_a')} · {i18nT('components.crewMode.sample_answer_b')}
             </div>
           </div>
         </div>

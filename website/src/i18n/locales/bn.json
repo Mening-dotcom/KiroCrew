@@ -9328,19 +9328,18 @@
     "crewMode": {
       "chip_off": "Crew Mode",
       "chip_on": "Crew Mode চালু",
-      "chip_hint_off": "Crew Mode চালু করুন। আপনার কন্ডাক্টর প্রতিটি কাজ আলাদা চ্যাটে পাঠায়।",
-      "chip_hint_on": "Crew Mode বন্ধ করে ডিফল্ট এজেন্টে ফিরে যান।",
-      "eyebrow": "Crew Mode চালু",
+      "chip_hint_off": "Crew Mode চালু করো। তোমার কন্ডাক্টর প্রতিটি কাজ আলাদা চ্যাটে পাঠায়।",
+      "chip_hint_on": "Crew Mode বন্ধ করে ডিফল্ট এজেন্টে ফিরে যাও।",
       "title": "Crew Mode",
-      "tagline_lead": "আপনি লক্ষ্য ঠিক করুন।",
-      "tagline_strong": "আপনার দল কাজটি করে।",
-      "does_new_chat": "নতুন চ্যাট",
-      "does_pass_notes": "বার্তা পৌঁছায়",
-      "does_take_asks": "নতুন কাজ নেয়",
-      "does_check_in": "অগ্রগতি দেখে",
-      "board_title": "আপনার দল",
-      "board_preview": "প্রিভিউ",
-      "sample_question": "কোন দিন আপনার সুবিধা?",
+      "tagline_lead": "তুমি লক্ষ্য ঠিক করো।",
+      "tagline_strong": "তোমার দল কাজটি করে।",
+      "does_new_chat": "চ্যাট খোলে",
+      "does_pass_notes": "আপডেট জানায়",
+      "does_take_asks": "অনুরোধ নেয়",
+      "does_check_in": "অগ্রগতি দেখায়",
+      "board_title": "তোমার দল",
+      "board_preview": "উদাহরণ",
+      "sample_question": "কোন দিন তোমার সুবিধা?",
       "sample_answer_a": "আজ",
       "sample_answer_b": "আগামীকাল",
       "sample_email": "ইমেল",
@@ -9349,7 +9348,7 @@
       "sample_screenshot": "স্ক্রিনশট",
       "state_done": "সম্পন্ন",
       "state_working": "চলছে",
-      "state_needs_you": "আপনাকে দরকার",
+      "state_needs_you": "তোমাকে দরকার",
       "state_waiting": "অপেক্ষায়"
     }
   },
@@ -17241,7 +17240,7 @@
       },
       "defaultCrewMode": {
         "description": "ডিফল্ট এজেন্টের নতুন চ্যাট Crew Mode-এ শুরু হয়: কন্ডাক্টর কাজ করতে আলাদা চ্যাট খোলে এবং এখানে জানায়। বিদ্যমান চ্যাট বদলায় না।",
-        "label": "নতুন সেশনে ডিফল্টভাবে Crew Mode চালু করুন"
+        "label": "নতুন সেশনে ডিফল্টভাবে Crew Mode চালু করো"
       }
     },
     "display": {

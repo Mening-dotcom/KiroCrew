@@ -118,17 +118,16 @@ the peer's `POST /api/chat/slots` payload, while agent and model remain sparse
 explicit picks. Omitting the mode would let a local Incognito or Temporary row
 execute as Persistent on the peer and read or write memory the user disabled.
 
-**Crew Mode at birth.** `POST /api/chat/slots` accepts an optional boolean
-`crew_mode` (anything else is `400 invalid_crew_mode`). Crew Mode is a UI over
-the existing `kirocrew-conductor` (`agent_files.CREW_MODE_AGENT_NAME`), so a
-chat with it on simply has that agent. `_crew_mode_applies_at_birth` decides
-it for a NEW, local, plain chat whose agent is the default (`""`, `kirocrew` or
-`default_agent`), created by a non-app caller: an explicit `crew_mode` wins, and
-an absent one follows `dashboard.default_crew_mode`. When it applies, the slot
-is created with that agent in the `template` namespace. A member pick, another
-agent, a mode session, a crew-bound or adopted session, an app's own session and
-a create naming an existing slot keep exactly what they asked for. Turning it on
-or off later is an ordinary `POST /api/chat/slots/{slot}/agent`.
+**Crew Mode** has no field of its own. It is a UI over the existing
+`kirocrew-conductor`: a chat is in Crew Mode exactly when its agent is that one.
+The composer switch is an ordinary `POST /api/chat/slots/{slot}/agent`, and a
+new chat starts in Crew Mode by being created with `agent: kirocrew-conductor`,
+`agent_kind: template`. `dashboard.default_crew_mode` is never read by the
+server: the dashboard's own new-chat gestures (the composer's first send, New
+Chat in the sidebar, the keyboard shortcut and the command palette) apply it
+through `website/src/lib/crewMode.ts` (`newChatAgent`), and only in place of the
+default agent. App workstreams, "Chat with" rows and every other creator keep
+exactly the agent they name.
 
 A slot ADOPTED from a peer row (`POST /api/chat/slots` with `adopt_remote_slot`)
 inherits `agent`, `title`, `memory_mode` and `workspace` from that row

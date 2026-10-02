@@ -1,5 +1,6 @@
 /** Creating sessions from the sidebar: the New chat variants (local, crew,
  *  ephemeral) and a new chat inside a folder. */
+import { newChatAgent } from '../../lib/crewMode'
 import { useState, useRef, useCallback, type Dispatch, type SetStateAction } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -66,7 +67,9 @@ export function useFolderChatCreate({ folders, defaultAgent, mode, dispatch, dro
       const project = resolveFolderProjectDir(folders, folderId)
       // The tab gesture registers the slot without stealing focus -- same
       // `activate: false` contract as the header New button's gesture.
-      return dispatch(createSlot({ agent, mode: mode || '', folder_id: folderId, project, activate: !inNewTab, ...(memoryMode ? { memory_mode: memoryMode } : {}) })).unwrap()
+      // A folder that names its own agent keeps it; Crew Mode's Settings default
+      // only replaces the default agent (lib/crewMode).
+      return dispatch(createSlot({ ...(mode ? { agent } : newChatAgent(agent, defaultAgent, memoryMode)), mode: mode || '', folder_id: folderId, project, activate: !inNewTab, ...(memoryMode ? { memory_mode: memoryMode } : {}) })).unwrap()
     },
     onSuccess: (slot: Slot, { folderId, columnId, focus, attempt, inNewTab }: CreateChatInFolderVars) => {
       // A create that went through supersedes an earlier failure notice for
@@ -204,7 +207,7 @@ export function useSessionCreate({ setNewChatError, dispatch, defaultAgent, mode
   const createChatMutation = useMutation({
     mutationFn: ({ inNewTab }: { inNewTab: boolean }) => {
       setNewChatError('')
-      return dispatch(createSlot({ agent: defaultAgent || undefined, mode: mode || '', activate: !inNewTab })).unwrap()
+      return dispatch(createSlot({ ...(mode ? { agent: defaultAgent || undefined } : newChatAgent(defaultAgent || undefined, defaultAgent)), mode: mode || '', activate: !inNewTab })).unwrap()
     },
     onSuccess: (slot, { inNewTab }) => {
       if (inNewTab && onOpenSlotInNewTab) {
@@ -282,7 +285,7 @@ export function useSessionCreate({ setNewChatError, dispatch, defaultAgent, mode
   const createEphemeralChatMutation = useMutation({
     mutationFn: (memoryMode: 'incognito' | 'temporary') => {
       setNewChatError('')
-      return dispatch(createSlot({ agent: defaultAgent || undefined, mode: mode || '', memory_mode: memoryMode })).unwrap()
+      return dispatch(createSlot({ ...(mode ? { agent: defaultAgent || undefined } : newChatAgent(defaultAgent || undefined, defaultAgent, memoryMode)), mode: mode || '', memory_mode: memoryMode })).unwrap()
     },
     onSuccess: focusComposer,
     onError: onNewChatError,

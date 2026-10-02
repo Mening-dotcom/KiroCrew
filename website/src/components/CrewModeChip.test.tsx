@@ -22,6 +22,8 @@ describe('CrewModeChip', () => {
     const chip = screen.getByTestId('crew-mode-chip')
     expect(chip).toHaveAttribute('aria-pressed', 'true')
     expect(chip).toHaveTextContent('Crew Mode on')
+    // A visible "off" mark beside the label.
+    expect(chip.querySelector('svg.lucide-x')).not.toBeNull()
   })
 
   it('calls onToggle on click', () => {
@@ -48,7 +50,7 @@ describe('CrewModeWelcome', () => {
     expect(within(page).getByRole('heading', { name: 'Crew Mode' })).toBeInTheDocument()
     expect(page).toHaveTextContent('You set the goal.')
     expect(page).toHaveTextContent('Your crew does the work.')
-    for (const label of ['New chat', 'Pass notes', 'Take asks', 'Check in']) {
+    for (const label of ['Opens chats', 'Shares updates', 'Takes requests', 'Shows progress']) {
       expect(within(page).getByText(label)).toBeInTheDocument()
     }
   })
@@ -56,7 +58,9 @@ describe('CrewModeWelcome', () => {
   it('marks its task board as a preview, with the question that needs the person first', () => {
     renderWithProviders(<CrewModeWelcome />)
     const board = screen.getByRole('region', { name: 'Your crew' })
-    expect(within(board).getByText('Preview')).toBeInTheDocument()
+    expect(within(board).getByText('Example')).toBeInTheDocument()
+    // Sample answers are text, not controls a reader would try to click.
+    expect(within(board).queryAllByRole('button')).toHaveLength(0)
     const text = board.textContent ?? ''
     expect(text.indexOf('Which day works for you?')).toBeLessThan(text.indexOf('Email'))
     for (const state of ['Done', 'Working', 'Needs you', 'Waiting']) {

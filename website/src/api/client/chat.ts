@@ -105,7 +105,7 @@ export function createChatEndpoints({ post, put, del, patch, j, sessionKeyHeader
      *  the `remote_already_bound` guard does not fire, and the peer's transcript is
      *  backfilled server-side. Requires `instance_id`; without it the backend
      *  answers `400 adopt_needs_instance`. */
-    createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, artifact?: string, folder_id?: string, instance_id?: string, adopt_remote_slot?: string, agent_kind?: 'member' | 'template', crew_mode?: boolean) => {
+    createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, artifact?: string, folder_id?: string, instance_id?: string, adopt_remote_slot?: string, agent_kind?: 'member' | 'template') => {
       // ADOPT deliberately resolves NO default memory mode. The adopted slot carries
       // the PEER session's own `memory_mode` — that mode is the privacy boundary and
       // the session it belongs to already chose it — so sending this machine's
@@ -130,9 +130,6 @@ export function createChatEndpoints({ post, put, del, patch, j, sessionKeyHeader
         ...(folder_id ? { folder_id } : {}),
         ...(instance_id ? { instance_id } : {}),
         ...(adopt_remote_slot ? { adopt_remote_slot } : {}),
-        // The composer's Crew Mode switch, when the user touched it. Absent lets
-        // the server apply Settings -> Chat's default for new chats.
-        ...(crew_mode !== undefined ? { crew_mode } : {}),
       }).then(j) as Promise<ChatSlot>
     },
     /** Inject silent background context into a slot — consumed on the next user

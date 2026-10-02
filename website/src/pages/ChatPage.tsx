@@ -223,7 +223,8 @@ export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import { PREFILL_STORAGE_KEY, writePrefill } from '../utils/navIntent'
 import WelcomeView from '../components/WelcomeView'
 import { MemoryModeChip, type MemoryMode } from '../components/MemoryModeChip'
-import { CrewModeChip, CREW_MODE_AGENT } from '../components/CrewModeChip'
+import { CrewModeChip } from '../components/CrewModeChip'
+import { CREW_MODE_AGENT, isDefaultAgentName, memoryModeAllowsCrewMode, newChatAgent } from '../lib/crewMode'
 import CrewModeWelcome from '../components/CrewModeWelcome'
 import { openPanelView, claimAppAutoOpen } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
@@ -945,15 +946,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     pendingAgentRef.current = v
     pendingAgentKindRef.current = v ? kind : undefined
     _setPendingAgent(v)
-  }, [])
-  // The composer's Crew Mode pick for the chat that does not exist yet:
-  // undefined while untouched (Settings -> Chat's default then applies on the
-  // server), true / false once the user flips the switch. Rides the create.
-  const [pendingCrewMode, _setPendingCrewMode] = useState<boolean | undefined>(undefined)
-  const pendingCrewModeRef = useRef<boolean | undefined>(undefined)
-  const setPendingCrewMode = useCallback((v: boolean | undefined) => {
-    pendingCrewModeRef.current = v
-    _setPendingCrewMode(v)
   }, [])
   const [pendingModel, _setPendingModel] = useState('')  // model for next new slot
   const pendingModelRef = useRef('')
@@ -1959,7 +1951,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       // paste blocks and attachments, surface the failure, and bail.
       let created: { key: string } | null = null
       try {
-        created = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, agent_kind: pendingAgentRef.current ? pendingAgentKindRef.current : undefined, model: pendingModelRef.current || undefined, mode: modeRef.current, crew_mode: pendingCrewModeRef.current })).unwrap()
+        created = await dispatch(createSlot({ ...(pendingAgentRef.current ? { agent: pendingAgentRef.current, agent_kind: pendingAgentKindRef.current } : modeRef.current ? { agent: defaultAgent || undefined } : newChatAgent(defaultAgent || undefined, defaultAgent)), model: pendingModelRef.current || undefined, mode: modeRef.current })).unwrap()
       } catch (e: unknown) {
         sendingRef.current = false
         if (isolated) {
@@ -2130,7 +2122,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         })
       }
     }
-    setPendingAgent(''); setPendingModel(''); setPendingProject(''); setPendingCrewMode(undefined)
+    setPendingAgent(''); setPendingModel(''); setPendingProject('')
     // Build meta for persistence (knowledge, files, pastes)
     const meta: Record<string, unknown> = {}
     if (filePaths.length) meta.files = filePaths
@@ -4971,7 +4963,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // `focusComposerAfter`, not a bare dispatch + rAF: there is one composer and
     // it is bound to the ACTIVE slot, so focusing before creation fulfils puts
     // the caret on the old session and loses whatever is typed. See the module.
-    focusComposerAfter(dispatch(createSlot({ agent: defaultAgent || undefined, mode: mode || '' })).unwrap())
+    focusComposerAfter(dispatch(createSlot({ ...(mode ? { agent: defaultAgent || undefined } : newChatAgent(defaultAgent || undefined, defaultAgent)), mode: mode || '' })).unwrap())
   }, [dispatch, defaultAgent, mode, flyout])
 
   // Force the list open when there is nothing in it, so a user with no sessions
@@ -5117,13 +5109,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // the recreated slot keeps its identity and placement.
     const old = currentSlot
     const opts = {
-      agent: old?.agent || defaultAgent || undefined,
+      // Crew Mode needs a Persistent chat (an Incognito or Temporary session may
+      // not open sessions), so leaving Persistent also leaves the conductor.
+      agent: (old?.agent === CREW_MODE_AGENT && old?.agent_kind !== 'member' && !memoryModeAllowsCrewMode(newMode))
+        ? (defaultAgent || undefined)
+        : (old?.agent || defaultAgent || undefined),
       model: old?.model || undefined,
       mode,
       memory_mode: newMode,
-      // The recreated chat keeps its Crew Mode state rather than re-reading
-      // the Settings default.
-      crew_mode: old?.agent === CREW_MODE_AGENT,
       folder_id: old?.folder_id ?? null,
       color_index: old?.color_index ?? null,
       color_hex: old?.color_hex ?? null,
@@ -5142,24 +5135,30 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const showComposerMemoryChip = isWelcomeState
 
   // Crew Mode (CrewModeChip): a UI over the existing conductor. A chat with the
-  // switch on runs on CREW_MODE_AGENT; flipping it is an ordinary agent switch.
-  // Offered only on a plain local chat whose agent is the default one (or
-  // already the conductor), the same set the server's birth rule accepts.
-  const { data: crewModeCfg } = useQuery<{ default_crew_mode?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
-  const isDefaultAgentName = (name: string) => name === '' || name === 'kirocrew' || name === defaultAgent
+  // switch on runs on CREW_MODE_AGENT; flipping it is an ordinary agent switch,
+  // and there is no other Crew Mode state. Offered only on a plain local, non-app
+  // chat whose agent is the default one (or already the conductor).
+  const { data: crewModeCfg } = useQuery<{ default_crew_mode?: boolean; default_memory_mode?: string }>({ queryKey: ['dashboardConfig'], queryFn: fetchDashboardConfig, staleTime: 30_000 })
   const pendingAgentName = pendingAgent || defaultAgent || ''
+  // Crew Mode is the conductor TEMPLATE; a crew member that happens to carry
+  // the same name is that member, not Crew Mode.
+  const isCrewModeAgent = (name: string | undefined, kind: string | undefined) =>
+    name === CREW_MODE_AGENT && kind !== 'member'
   const crewModeEligible = activeSlot
-    ? !!currentSlot && !currentSlot.mode && !currentSlot.instance_id && currentSlot.agent_kind !== 'member'
-      && (currentSlot.agent === CREW_MODE_AGENT || isDefaultAgentName(currentSlot.agent ?? ''))
-    : !mode && (pendingAgent === CREW_MODE_AGENT || isDefaultAgentName(pendingAgentName))
+    ? !!currentSlot && !currentSlot.mode && !currentSlot.instance_id && currentSlot.origin !== 'app'
+      && memoryModeAllowsCrewMode(currentSlot.memory_mode)
+      && (isCrewModeAgent(currentSlot.agent, currentSlot.agent_kind) || (currentSlot.agent !== CREW_MODE_AGENT && isDefaultAgentName(currentSlot.agent ?? '', defaultAgent)))
+    : !mode && (isCrewModeAgent(pendingAgent, pendingAgentKindRef.current) || (pendingAgent !== CREW_MODE_AGENT && isDefaultAgentName(pendingAgentName, defaultAgent)))
+  // Before the chat exists: on when the switch picked the conductor, or when
+  // nothing was picked yet and Settings starts new chats in Crew Mode (the
+  // first send then creates it on the conductor through newChatAgent).
   const crewModeOn = crewModeEligible && (activeSlot
-    ? currentSlot?.agent === CREW_MODE_AGENT
-    : pendingAgent === CREW_MODE_AGENT
-      || (pendingCrewMode === undefined && !!crewModeCfg?.default_crew_mode && isDefaultAgentName(pendingAgentName)))
+    ? isCrewModeAgent(currentSlot?.agent, currentSlot?.agent_kind)
+    : isCrewModeAgent(pendingAgent, pendingAgentKindRef.current) || (!pendingAgent && crewModeCfg?.default_crew_mode === true && memoryModeAllowsCrewMode(crewModeCfg.default_memory_mode)))
+  // switchAgent handles both cases: before the chat exists it sets the pending
+  // agent (which also overrides the Settings default), after it runs the
+  // server-side agent switch with its locks and mid-turn refusal.
   const toggleCrewMode = () => {
-    // Before the chat exists the pick also rides the create, so an explicit
-    // "off" outranks a Settings default of "on".
-    if (!activeSlot) setPendingCrewMode(!crewModeOn)
     if (crewModeOn) void switchAgent(defaultAgent || 'kirocrew')
     else void switchAgent(CREW_MODE_AGENT, 'template')
   }
@@ -5575,7 +5574,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   newSlotMutation.mutate()
                   return
                 }
-                dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, agent_kind: pendingAgent ? pendingAgentKindRef.current : undefined, model: pendingModel || undefined, mode, crew_mode: pendingCrewMode }))
+                dispatch(createSlot({ ...(pendingAgent ? { agent: pendingAgent, agent_kind: pendingAgentKindRef.current } : mode ? { agent: defaultAgent || undefined } : newChatAgent(defaultAgent || undefined, defaultAgent)), model: pendingModel || undefined, mode }))
               }}
             >
               {i18nT('pages.chatPage.start_a_new_chat')}
@@ -5778,6 +5777,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.18 }}
               >
+                {/* Not a persistent element changing form: the user's own click
+                    on the Crew Mode chip (which stays put) asks for a different
+                    page, and CrewModeWelcome fades and pops in on its own. */}
                 {crewModeOn ? <CrewModeWelcome /> : <WelcomeView setInput={setInput} />}
               </motion.div>
             ) : (

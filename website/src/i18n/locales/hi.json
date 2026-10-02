@@ -9328,18 +9328,17 @@
     "crewMode": {
       "chip_off": "Crew Mode",
       "chip_on": "Crew Mode चालू",
-      "chip_hint_off": "Crew Mode चालू करें। तुम्हारा कंडक्टर हर काम को उसकी अपनी चैट में भेजता है।",
-      "chip_hint_on": "Crew Mode बंद करें और डिफ़ॉल्ट एजेंट पर लौटें।",
-      "eyebrow": "Crew Mode चालू",
+      "chip_hint_off": "Crew Mode चालू करो। तुम्हारा कंडक्टर हर काम को उसकी अपनी चैट में भेजता है।",
+      "chip_hint_on": "Crew Mode बंद करो और डिफ़ॉल्ट एजेंट पर लौटो।",
       "title": "Crew Mode",
       "tagline_lead": "तुम लक्ष्य तय करो।",
       "tagline_strong": "तुम्हारी टीम काम करती है।",
-      "does_new_chat": "नई चैट",
-      "does_pass_notes": "संदेश पहुँचाए",
-      "does_take_asks": "नए काम ले",
-      "does_check_in": "प्रगति देखे",
+      "does_new_chat": "चैट खोलता है",
+      "does_pass_notes": "अपडेट बाँटता है",
+      "does_take_asks": "अनुरोध लेता है",
+      "does_check_in": "प्रगति दिखाता है",
       "board_title": "तुम्हारी टीम",
-      "board_preview": "पूर्वावलोकन",
+      "board_preview": "उदाहरण",
       "sample_question": "तुम्हारे लिए कौन सा दिन ठीक है?",
       "sample_answer_a": "आज",
       "sample_answer_b": "कल",
@@ -17241,7 +17240,7 @@
       },
       "defaultCrewMode": {
         "description": "डिफ़ॉल्ट एजेंट की नई चैट Crew Mode में शुरू होती हैं: कंडक्टर काम करने के लिए अलग चैट खोलता है और यहाँ रिपोर्ट करता है। मौजूदा चैट नहीं बदलतीं।",
-        "label": "नए सत्रों के लिए Crew Mode डिफ़ॉल्ट रूप से चालू करें"
+        "label": "नए सत्रों के लिए Crew Mode डिफ़ॉल्ट रूप से चालू करो"
       }
     },
     "display": {

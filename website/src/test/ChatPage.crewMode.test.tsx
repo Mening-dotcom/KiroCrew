@@ -71,15 +71,15 @@ import ChatPage from '../pages/ChatPage'
 // sentence, which is what the unregistered-surface case below asserts.)
 import '../surfaces/builtins'
 
-type Slot = { messages: Msg[]; mode?: string; agent?: string; slotKeys?: string[] }
+type Slot = { messages: Msg[]; mode?: string; agent?: string; agentKind?: string; origin?: string; memoryMode?: string; slotKeys?: string[] }
 
-function makeStore({ messages, mode = '', agent = 'default', slotKeys = ['slot-a'] }: Slot) {
+function makeStore({ messages, mode = '', agent = 'default', agentKind = '', origin = 'user', memoryMode = 'persistent', slotKeys = ['slot-a'] }: Slot) {
   return configureStore({
     reducer: { dashboard: dashboardReducer, chat: chatReducer, notifications: notificationsReducer },
     preloadedState: {
       dashboard: {
         status: null,
-        slots: slotKeys.map(key => ({ key, messages: key === 'slot-a' ? messages.length : 0, running: false, mode: key === 'slot-a' ? mode : '', agent: key === 'slot-a' ? agent : 'default', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined })),
+        slots: slotKeys.map(key => ({ key, messages: key === 'slot-a' ? messages.length : 0, running: false, mode: key === 'slot-a' ? mode : '', agent: key === 'slot-a' ? agent : 'default', agent_kind: key === 'slot-a' ? agentKind : '', origin: key === 'slot-a' ? origin : 'user', memory_mode: key === 'slot-a' ? memoryMode : 'persistent', pending_approval: false, waiting_for_input: false, last_activity_ts: undefined })),
         unreadSlots: [], refreshTrigger: 0, approvalMode: 'normal',
         subagentRunning: {}, subagentDetails: {}, subagentText: {},
       } as unknown as RootState['dashboard'],
@@ -148,8 +148,39 @@ describe('Crew Mode on ChatPage', () => {
     await waitFor(() => expect(chatSlotAgent).toHaveBeenCalledWith('slot-a', 'default'))
   })
 
+  it('is offered when the default agent is the default member', async () => {
+    // A normal install's default chat is the `default` MEMBER, not a template.
+    await renderWith({ messages: [], agent: 'default', agentKind: 'member' })
+    expect(screen.getByTestId('crew-mode-chip')).toBeInTheDocument()
+  })
+
   it('is not offered on another agent or on a mode session', async () => {
     await renderWith({ messages: [], agent: 'custom-x' })
+    expect(screen.queryByTestId('crew-mode-chip')).toBeNull()
+  })
+
+  it('is not offered on a crew member that happens to be named kirocrew-conductor', async () => {
+    await renderWith({ messages: [], agent: 'kirocrew-conductor', agentKind: 'member' })
+    expect(screen.queryByTestId('crew-mode-chip')).toBeNull()
+  })
+
+  it('leaves the conductor when the chat switches to Incognito', async () => {
+    createChatSlot.mockClear()
+    createChatSlot.mockResolvedValueOnce({ key: 'slot-b', messages: 0, running: false, memory_mode: 'incognito' })
+    await renderWith({ messages: [], agent: 'kirocrew-conductor', agentKind: 'template' })
+    fireEvent.click(screen.getByText('Choose memory mode').closest('button')!)
+    fireEvent.click(screen.getByText('Incognito').closest('button')!)
+    await waitFor(() => expect(createChatSlot).toHaveBeenCalled())
+    expect(createChatSlot.mock.calls[0][1]).toBe('default')
+  })
+
+  it('is not offered on an Incognito or Temporary chat', async () => {
+    await renderWith({ messages: [], memoryMode: 'incognito' })
+    expect(screen.queryByTestId('crew-mode-chip')).toBeNull()
+  })
+
+  it('is not offered on an app-owned chat', async () => {
+    await renderWith({ messages: [], origin: 'app' })
     expect(screen.queryByTestId('crew-mode-chip')).toBeNull()
   })
 

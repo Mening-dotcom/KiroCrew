@@ -25,10 +25,6 @@ LITE_AGENT_FILENAME = "kirocrew-lite.json"
 # background helper (lite) may grow a tool one day without handing it to a guest.
 GUEST_AGENT_FILENAME = "kirocrew-guest.json"
 CONDUCTOR_AGENT_FILENAME = "kirocrew-conductor.json"
-# The agent a dashboard chat runs on while its Crew Mode switch is on. Crew Mode
-# is a UI over this existing conductor, not a spec of its own: turning it on is
-# an ordinary agent switch to this name, and turning it off switches back.
-CREW_MODE_AGENT_NAME = "kirocrew-conductor"
 PIPELINE_CONDUCTOR_AGENT_FILENAME = "kirocrew-pipeline-conductor.json"
 # The goal conductor's work-ledger variant, and a SEPARATE spec rather than a flag
 # on ``kirocrew-conductor``. The ledger flow inverts that agent's dispatch order

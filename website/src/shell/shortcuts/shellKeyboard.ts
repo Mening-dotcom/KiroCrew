@@ -1,3 +1,4 @@
+import { newChatAgent } from '../../lib/crewMode'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
@@ -47,7 +48,8 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
   // trigger + open state. Mounted once at the app shell (`App.tsx`).
   const commandPalette = useCommandPalette()
   const newChatMutation = useMutation({
-    mutationFn: () => dispatch(createSlot(undefined)).unwrap(),
+    // A person's New Chat gesture: Settings may start it in Crew Mode.
+    mutationFn: () => dispatch(createSlot(newChatAgent(undefined, undefined))).unwrap(),
     onSuccess: () => {
       navigate('/chat')
       // Unguarded on purpose: this mutation only fires from the new-chat
