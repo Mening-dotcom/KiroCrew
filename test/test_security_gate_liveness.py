@@ -164,12 +164,21 @@ def _url_payload_command(n: int) -> str:
 #: holds the canonical spelling and is off the event loop, so the anchors resolve
 #: inline. No new entry point, no target, no matching rule and no threshold moved.
 #:
+#: Raised again, from 28,412, for pass 3's macOS per-user directory exemption in
+#: ``redaction``: withholding this host's own ``confstr`` id from the bare-secret
+#: scan, so a macOS temp path (a computer-use screenshot among them) is not read
+#: as a key, costs the id lookup, its grammar, the per-id pattern, the reason
+#: only the host's own id is safe to withhold, and window classification with
+#: whole-run context that exempts only windows sharing ≥ 24 bytes with that id
+#: while every other positive window redacts each piece it touches. One
+#: mechanism, no new pass.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 28_412
+_PACKAGE_LINE_BUDGET = 28_525
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
