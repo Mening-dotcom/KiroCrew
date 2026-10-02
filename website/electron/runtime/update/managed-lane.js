@@ -233,20 +233,28 @@ function createManagedLane({
   // process still resolves its own files through that path, so it defers the
   // switch, and this is the moment the switch becomes safe.
   //
-  // `will-quit`, not `before-quit`: it fires only once every window has closed
-  // and the quit can no longer be cancelled, so a vetoed quit never runs the
-  // command. It does not fire for app.exit(), which is how the quit-time apply
-  // above ends; that path already ran updateCommand, so the upkeep is that
-  // command's to do.
+  // `will-quit`, not `before-quit`: it fires only once every window has closed.
+  // It is still cancellable (another handler may call preventDefault; nothing
+  // in this app does), and it fires for every app.quit(), including a
+  // relaunching one, and before the app's own children such as the gateway
+  // have finished exiting. So the command must not act on "the app is quitting"
+  // alone: it waits for KIROCREW_QUITTING_PID to exit and copes with a new
+  // instance appearing. It does not fire for app.exit(), which is how the
+  // quit-time apply above ends; that path already ran updateCommand, so the
+  // upkeep is that command's to do. An apply still in flight (managedInstalling)
+  // is the same: the quit command is skipped rather than run beside it.
   //
   // DETACHED and never awaited: quit must not wait on a package manager, and
   // the command's job is to act AFTER this process is gone. It gets this
   // process's pid as KIROCREW_QUITTING_PID (derived, like
-  // KIROCREW_MANAGED_ARGV0, never read from process.env) so it can wait for
-  // the exit itself. Same hardened shell, cwd and constructed environment as
-  // every other marker command; no timeout, because nothing is left to enforce
-  // one once this process exits.
+  // KIROCREW_MANAGED_ARGV0, never read from process.env). Same hardened shell,
+  // cwd and constructed environment as every other marker command; no timeout,
+  // because nothing is left to enforce one once this process exits.
   const runQuitCommand = () => {
+    if (managedInstalling) {
+      log.info("[update] managed apply in flight at quit — not starting the quit command");
+      return;
+    }
     try {
       const cp = require("child_process");
       // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process

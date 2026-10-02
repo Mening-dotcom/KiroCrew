@@ -1249,12 +1249,19 @@ version as an available update. With the app's update switch on, it then runs
 `quitCommand` is for upkeep that must not happen while the app is running, such
 as switching a launch path the running app still resolves its own files
 through. It runs only on the managed lane (a marker with `updateCommand`), on
-Electron's `will-quit`, so a cancelled quit never runs it and a quit that
-applies an update (which ends with `app.exit`) does not either. It starts
-detached and the app does not wait for it; it receives the quitting app's pid
-as `KIROCREW_QUITTING_PID` so it can wait for the exit itself. It runs under
-the same constructed environment as the other commands. It does not run when
-the app crashes.
+Electron's `will-quit`. It starts detached and the app does not wait for it; it
+receives the quitting app's pid as `KIROCREW_QUITTING_PID`, under the same
+constructed environment as the other commands.
+
+The command **must wait for `KIROCREW_QUITTING_PID` to exit before acting**, and
+must not act if it does not. `will-quit` fires while the app is still alive, it
+can be cancelled by another handler (nothing in the app cancels it today), it
+fires for a relaunching quit too, and the app's own child processes (the
+gateway) may still be exiting. So a correct command waits for the pid, bounds
+that wait, and re-checks that no instance of the app is running before it
+changes anything. It is not run when the quit applies an update (that ends with
+`app.exit`, and `updateCommand` already ran), while an update is still being
+applied, or when the app crashes.
 
 **A package manager's own update pause holds only if the check command honours
 it**: on this managed lane while the app's update switch is on, and on the

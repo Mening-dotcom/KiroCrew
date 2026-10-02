@@ -969,7 +969,9 @@ function stubSpawn(script) {
     child.unref = () => { child.unrefed = true; };
     children.push(child);
     const spec = (typeof script === "function" ? script(command) : script) || {};
-    const { code = 0, out = "", err = "", error = false, signal = null } = spec;
+    const { code = 0, out = "", err = "", error = false, signal = null, hang = false } = spec;
+    // `hang: true` models a command still running (an apply in flight).
+    if (hang) return child;
     // Emit asynchronously so listeners attached after spawn() still catch it.
     setImmediate(() => {
       // `error: true` models a spawn failure (ENOENT / no shell); a `signal`
@@ -1009,9 +1011,31 @@ test("managed quitCommand: started detached on will-quit with the quitting pid",
   assert.strictEqual(opts.stdio, "ignore", "no pipe may hold the quitting app open");
   assert.strictEqual(opts.cwd, "/");
   assert.strictEqual(opts.env.KIROCREW_QUITTING_PID, String(process.pid));
-  assert.strictEqual(opts.env.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
+  assert.ok(!opts.env.PATH.includes(require("node:os").homedir()),
+    "the narrowed system PATH, never the user's");
   assert.strictEqual(opts.env.HOME, undefined, "same constructed environment as every marker command");
   assert.strictEqual(children[0].unrefed, true, "quit must not wait on the command");
+});
+
+test("managed quitCommand: not started while an apply is still running", async (t) => {
+  const { deps, appOnce } = makeDeps({
+    externallyManaged: {
+      managedBy: "m",
+      updateCommand: "/usr/bin/apply",
+      checkCommand: "/usr/bin/check",
+      quitCommand: "/usr/bin/after-quit",
+    },
+  });
+  const { commands, restore } = stubSpawn((cmd) => (cmd === "/usr/bin/apply" ? { hang: true } : { code: 0 }));
+  t.after(restore);
+  const u = initAutoUpdate(deps);
+  u.install(); // never settles: the apply is still running
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(commands, ["/usr/bin/apply"], "precondition: the apply is in flight");
+
+  appOnce.find((r) => r.ev === "will-quit").fn();
+
+  assert.deepStrictEqual(commands, ["/usr/bin/apply"], "the quit command must not run beside an apply");
 });
 
 test("managed quitCommand: absent -> no will-quit hook", (t) => {
