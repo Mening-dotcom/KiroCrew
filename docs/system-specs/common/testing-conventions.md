@@ -2020,6 +2020,14 @@ about the code. Each is a hermeticity gap, and each has one fix:
   on the host that cannot hold it.
 - **`"python3"` is not on PATH on Windows.** Spawn the interpreter as `sys.executable`; a
   literal name fails with cmd's 9009 and every verdict downstream reads as a plain failure.
+- **`sys.executable` brings its own install of `kiro_crew`.** A child interpreter does not
+  inherit the parent's `sys.path`, and pytest's `pythonpath = src` never reaches it, so it
+  imports whatever checkout the venv's editable install points at. In CI that is the tree
+  under test; in a linked worktree sharing another checkout's venv it is a different
+  branch, and a fresh-interpreter test compares that branch's modules with this tree's
+  files. `test_issue_radar_http_routes_surface.py` read an empty owner list that way. Pin
+  the child to the tree the parent imported: put its `src/` first on the child's
+  `sys.path` (or `PYTHONPATH`), as `test_agent_lifecycle_cycle.py` does.
 - **The interpreter decides where recursion gives way.** A test that pinned "decode
   succeeds but encode fails" for a 2,000-deep JSON body met an interpreter that did both;
   assert the invariant across all three outcomes, and walk a deep structure iteratively

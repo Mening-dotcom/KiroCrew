@@ -31,12 +31,16 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
+import kiro_crew
 from kiro_crew.apps.builtins import issue_radar
 from kiro_crew.apps.builtins.issue_radar.backend import crew_routes, http_routes, routes
 
 LOGGER = "kirocrew.app.issue-radar"
 BACKEND = Path(inspect.getfile(routes)).parent
 HTTP_ROUTES = BACKEND / "http_routes"
+#: The ``src/`` this process imported. A child interpreter is pinned to it, because
+#: the venv's editable install may point at a different checkout.
+SRC = Path(inspect.getfile(kiro_crew)).parent.parent
 
 #: The route table ``register_routes`` builds, in registration order: this app's own
 #: routes, then the crew surface, then the pipeline dashboard. ``add_get`` also
@@ -455,9 +459,13 @@ def test_every_route_module_logs_to_the_app_logger():
 def test_the_package_import_loads_every_owner_but_defers_crew_routes(tmp_path):
     """Importing the app package (what the gateway does at boot) loads the facade
     and every owner module but NOT ``crew_routes``: that import stays inside
-    ``register_routes``, because ``crew_routes`` imports the facade back."""
+    ``register_routes``, because ``crew_routes`` imports the facade back.
+
+    The child puts :data:`SRC` first on ``sys.path`` so it measures the tree the
+    owner list below is globbed from, not whatever checkout the venv installed."""
     script = (
         "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
         "import kiro_crew.apps.builtins.issue_radar as ir\n"
         "prefix = 'kiro_crew.apps.builtins.issue_radar.backend.'\n"
         "assert prefix + 'crew_routes' not in sys.modules\n"
