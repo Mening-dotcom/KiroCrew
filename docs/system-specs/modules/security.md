@@ -108,6 +108,27 @@ fences that whole parent. The panel record reader uses flat `.json` names, so
 the marker subdirectory is outside its record namespace. Reusing this masked
 parent avoids adding another root-level leaf held only by its own mount name.
 
+The downloaded `models/` directory takes the same shape as `panel-templates/`.
+The speech-recognition and embedding weights are exposed READ-ONLY in the OS
+sandbox (`sandbox._CREW_READONLY_LEAVES`) and are additionally listed in
+`security._WRITE_PROTECTED_HOME_PATHS` rather than on the read-plus-write floor,
+so the directory is readable but no agent can rewrite it. It is readable because
+the settings surface and `kirocrew doctor` read the directory to report which
+models are installed, and the weights hold no secret. It is write-protected
+because the bytes are an INPUT TO A TRUST DECISION: each store verifies its file
+against a pinned sha256 and then hands the path to a native loader, so a writable
+directory leaves a window between the digest check and the loader's re-open in
+which the verified bytes can be swapped, and re-hashing cannot close it because
+the loader re-opens by name. The downloaders that write the weights (first-run
+fetch, re-download after a failed check, the embedding install) run gateway-side
+and open the path directly, so the seal costs no writer anything. The write is
+the threat and the read is not. The leaf is classified child-readable
+(`sandbox._CREW_CHILD_READABLE_LEAVES`) for completeness, like `subagents/` and
+`panel-templates/`: it was never on the read-gate floor, so the credential mask
+never covered it, and the only risk a foreign harness's child carries is the
+write already answered by the read-only seal. It is not a MASKED leaf and takes
+no no-alias refusal; this is a disposition record, not a wider fence.
+
 The MASKED leaves are a separate population with a separate pass.
 `sandbox._refuse_aliased_masked_leaves` refuses a SYMLINK at every entry in
 `_CREW_HIDDEN_LEAVES` except the ones in `_CREW_ALIAS_TOLERATED_LEAVES`, and it runs last

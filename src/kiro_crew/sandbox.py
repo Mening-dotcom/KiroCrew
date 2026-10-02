@@ -579,6 +579,22 @@ _CREW_READONLY_LEAVES: tuple[str, ...] = (
     # writer, an empty directory reads as "no host allowed", and a directory bind
     # shows the gateway's later writes live.
     "redaction-allow",
+    # The downloaded model weights (speech recognition and embeddings both land here).
+    # An INPUT TO A TRUST DECISION, the same class as the ceilings above reached through
+    # bytes rather than a grant: each store verifies its file against a pinned sha256 and
+    # then hands the PATH to a native loader, so a sandboxed WRITE opens a window between
+    # the digest check and the loader's re-open in which an agent can swap the verified
+    # bytes, and re-hashing cannot close it because the loader re-opens by name. The
+    # read-only mount removes the window outright, and it also stops an agent planting a
+    # link there in the first place. Only the gateway's own downloaders write the weights
+    # (first-run fetch, re-download after a failed check, the embedding install), and they
+    # run OUTSIDE the sandbox and open the path directly, so the seal costs no writer
+    # anything. READ stays open because the settings surface and ``kirocrew doctor`` read
+    # the directory to report which models are installed. Already file-tool WRITE-protected
+    # via ``security._WRITE_PROTECTED_HOME_PATHS`` (not on the read+write floor), so this
+    # seals the OTHER half -- a spawned shell's ``open(..., "w")`` the file-tool gate does
+    # not reach -- the two-layers treatment ``cloud.json`` / ``playwright-cli`` get.
+    "models",
     # Recorded consent to deliver a scanner-flagged file. Same class as
     # ``aws_service_consent.json``: a writable grant lets an auto-approved agent
     # consent, on the owner's behalf, to shipping the owner's secrets. This seal is
@@ -930,6 +946,14 @@ _CREW_CHILD_READABLE_LEAVES: tuple[str, ...] = (
     # Allowed hosts for the exfiltration check. Host names, not credentials; the
     # risk is a write, answered by the read-only seal.
     "redaction-allow",
+    # The downloaded model weights. No credential -- they are an input to a trust
+    # decision (sha256-verify-then-load), and the only risk is a WRITE that swaps the
+    # verified bytes, answered by the read-only seal above. Classified for completeness
+    # rather than for effect, like ``subagents`` / ``panel-templates``: the leaf is
+    # WRITE-protected only (``security.paths._WRITE_PROTECTED_HOME_PATHS``), not on the
+    # read-gate floor, so the credential mask never covered it and neither classification
+    # changes what any child can open.
+    "models",
     # The operator's cloud configuration and the launch record beside it. Neither holds
     # a credential (``CloudConfig`` documents the file as the operator's own, with none),
     # and in-sandbox code READS both: the provisioner selector resolves the Fargate block
