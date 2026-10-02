@@ -519,12 +519,12 @@ def test_the_gpt_pin_is_the_reviewers_not_its_adjudicators():
     make every local brief report drift and claim the GPT lane runs on Opus."""
     text = _gpt_text()
     scalars = local_review.block_scalars(text)
-    assert "--model us.anthropic.claude-opus-5" in text
-    assert local_review._extract_ci_model(text, scalars, prefer="cli") == "openai.gpt-5.6-sol"
+    assert "--model us.anthropic.claude-opus-5-5" in text
+    assert local_review._extract_ci_model(text, scalars, prefer="cli") == "openai.gpt-6.1-sol"
 
 
 def test_model_drift_is_reported_not_swallowed():
-    notes = local_review._model_note("openai.gpt-9.9-nova", "gpt-5.6-sol")
+    notes = local_review._model_note("openai.gpt-9.9-nova", "gpt-6.1-sol")
     assert notes and "MODEL DRIFT" in notes[0]
 
 
@@ -843,7 +843,7 @@ def test_model_drift_warns_on_a_truncated_local_pin():
     """CI ids gain provider prefixes, never trailing characters - so a prefix-
     tolerant test must still reject a local pin that stops short."""
     assert local_review._model_note("us.anthropic.claude-opus-4-8", "claude-opus-4.8") == []
-    assert local_review._model_note("openai.gpt-5.6-sol", "gpt-5.6-sol") == []
+    assert local_review._model_note("openai.gpt-6.1-sol", "gpt-6.1-sol") == []
     truncated = local_review._model_note("us.anthropic.claude-opus-4-8", "claude-opus-4")
     assert truncated and "MODEL DRIFT" in truncated[0]
 
@@ -851,7 +851,7 @@ def test_model_drift_warns_on_a_truncated_local_pin():
 @pytest.mark.parametrize("field", ["model", "model_tier"])
 @pytest.mark.parametrize(
     "bad",
-    [1, 0, 3.14, 0.0, True, False, ["gpt-5.6-sol"], {"id": "gpt-5.6-sol"}],
+    [1, 0, 3.14, 0.0, True, False, ["gpt-6.1-sol"], {"id": "gpt-6.1-sol"}],
     ids=["int", "zero", "float", "zero-float", "true", "false", "list", "dict"],
 )
 def test_non_string_model_is_a_parity_failure(field, bad):
@@ -887,7 +887,7 @@ def test_absent_model_keeps_the_no_model_path(absent):
 def test_a_string_model_survives_the_type_gate():
     """The gate must not normalise, strip or otherwise rewrite a legitimate pin:
     the brief quotes it verbatim and the drift note compares against it."""
-    assert local_review._profile_model("gpt-5.6-sol", "model", "gpt", "(absent)") == "gpt-5.6-sol"
+    assert local_review._profile_model("gpt-6.1-sol", "model", "gpt", "(absent)") == "gpt-6.1-sol"
 
 
 @pytest.mark.parametrize("field", ["model", "model_tier"])

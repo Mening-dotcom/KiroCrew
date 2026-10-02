@@ -228,8 +228,8 @@ def test_kirocrew_markers_load_bundled_profile(tmp_path):
     assert all("playwright install" not in gate for gate in prof["gates"])
     assert prof["readiness"]["status_context"] == "PR Readiness"
     models = {r["name"]: r["model"] for r in prof["reviewers"]}
-    assert models["gpt"] == "gpt-5.6-sol"
-    assert models["opus"] == "claude-opus-5"
+    assert models["gpt"] == "gpt-6.1-sol"
+    assert models["opus"] == "claude-opus-5.5"
 
 
 def test_opus_profile_model_matches_the_ci_workflow():
@@ -850,7 +850,7 @@ def test_toml_config_path(tmp_path):
         'rule_files = ["AGENTS.md"]\n\n'
         "[[review.reviewers]]\n"
         'name = "gpt"\n'
-        'model = "gpt-5.6-sol"\n'
+        'model = "gpt-6.1-sol"\n'
         "[readiness]\n"
         'status_context = "My Readiness"\n'
     )
@@ -860,7 +860,7 @@ def test_toml_config_path(tmp_path):
     assert prof["setup"] == ["make bootstrap"]
     assert prof["gates"] == ["make check"]
     assert prof["rule_files"] == ["AGENTS.md"]
-    assert prof["reviewers"][0]["model"] == "gpt-5.6-sol"
+    assert prof["reviewers"][0]["model"] == "gpt-6.1-sol"
     assert prof["readiness"]["status_context"] == "My Readiness"
 
 

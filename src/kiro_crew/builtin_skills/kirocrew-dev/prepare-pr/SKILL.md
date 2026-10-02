@@ -91,7 +91,7 @@ Phase 2's read-only local review:
 | Finding source | Repair preference, in order |
 |---|---|
 | Opus-family review lane | Fable 5.1 -> Fable 5 -> latest available Opus -> older Opus generations -> lower-capability available general model |
-| GPT 5.6 review lane | GPT 6 -> GPT 5.6 best available variant -> older capable GPT -> available general fallback |
+| GPT 6.1 review lane | GPT 6.1 best available variant -> older capable GPT -> available general fallback |
 
 1. Read current-head findings, settle whole-design concerns first, and apply the
    three questions above. Verify the originating lane; do not route by model names
