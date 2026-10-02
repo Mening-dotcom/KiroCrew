@@ -9198,6 +9198,33 @@
       "moreCols": "增加列",
       "fewerRows": "减少行",
       "moreRows": "增加行"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode 已开",
+      "chip_hint_off": "打开 Crew Mode。你的指挥台会把每个任务交给一个单独的聊天。",
+      "chip_hint_on": "关闭 Crew Mode，回到默认智能体。",
+      "eyebrow": "Crew Mode 已开",
+      "title": "Crew Mode",
+      "tagline_lead": "你定目标。",
+      "tagline_strong": "你的团队来干活。",
+      "does_new_chat": "新聊天",
+      "does_pass_notes": "传话",
+      "does_take_asks": "接新活",
+      "does_check_in": "查看进度",
+      "board_title": "你的团队",
+      "board_preview": "预览",
+      "sample_question": "哪天对你合适？",
+      "sample_answer_a": "今天",
+      "sample_answer_b": "明天",
+      "sample_email": "邮件",
+      "sample_layout": "排版",
+      "sample_room": "会议室",
+      "sample_screenshot": "截图",
+      "state_done": "完成",
+      "state_working": "进行中",
+      "state_needs_you": "需要你",
+      "state_waiting": "等待"
     }
   },
   "hooks": {
@@ -16964,6 +16991,10 @@
       "diffLayout": {
         "description": "分两栏显示旧代码和新代码；关闭则显示单栏统一视图。在这里或在任意差异上更改，都会应用到各处。",
         "label": "拆分（并排）差异"
+      },
+      "defaultCrewMode": {
+        "description": "默认智能体的新聊天会以 Crew Mode 开始：指挥台打开单独的聊天去做事，并在这里汇报。已有聊天不受影响。",
+        "label": "新会话默认打开 Crew Mode"
       }
     },
     "display": {

@@ -9324,6 +9324,33 @@
       "moreCols": "mehr Spalten",
       "fewerRows": "weniger Zeilen",
       "moreRows": "mehr Zeilen"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode an",
+      "chip_hint_off": "Crew Mode einschalten. Dein Dirigent schickt jede Aufgabe in einen eigenen Chat.",
+      "chip_hint_on": "Crew Mode ausschalten und zum Standard-Agenten zurückkehren.",
+      "eyebrow": "Crew Mode an",
+      "title": "Crew Mode",
+      "tagline_lead": "Du setzt das Ziel.",
+      "tagline_strong": "Deine Crew macht die Arbeit.",
+      "does_new_chat": "Neuer Chat",
+      "does_pass_notes": "Notizen weitergeben",
+      "does_take_asks": "Aufträge annehmen",
+      "does_check_in": "Nachsehen",
+      "board_title": "Deine Crew",
+      "board_preview": "Vorschau",
+      "sample_question": "Welcher Tag passt dir?",
+      "sample_answer_a": "Heute",
+      "sample_answer_b": "Morgen",
+      "sample_email": "E-Mail",
+      "sample_layout": "Layout",
+      "sample_room": "Raum",
+      "sample_screenshot": "Bildschirmfoto",
+      "state_done": "Fertig",
+      "state_working": "In Arbeit",
+      "state_needs_you": "Braucht dich",
+      "state_waiting": "Wartet"
     }
   },
   "hooks": {
@@ -17211,6 +17238,10 @@
       "diffLayout": {
         "description": "Zeigt alten und neuen Code in zwei Spalten; aus zeigt eine einzelne zusammengeführte Spalte. Hier oder an einem beliebigen Diff geändert, gilt es überall.",
         "label": "Geteilte Diffs (nebeneinander)"
+      },
+      "defaultCrewMode": {
+        "description": "Neue Chats mit dem Standard-Agenten starten im Crew Mode: Der Dirigent öffnet eigene Chats für die Arbeit und berichtet hier. Bestehende Chats bleiben unverändert.",
+        "label": "Crew Mode für neue Sitzungen standardmäßig einschalten"
       }
     },
     "display": {

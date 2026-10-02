@@ -26,6 +26,7 @@ from kiro_crew import members as members_mod
 from kiro_crew import model_registry
 from kiro_crew.acp.client import AcpModelUnavailable
 from kiro_crew.agent_discovery import cached_project_agent_names, warm_project_agent_names
+from kiro_crew.agent_files import CREW_MODE_AGENT_NAME
 from kiro_crew.agent_sdk.backends import ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS
 from kiro_crew.agent_sdk.capabilities import MODEL_NAMESPACE_ACP, capabilities_of
 from kiro_crew.agent_sdk.provider_identity import is_claude_code
@@ -3840,6 +3841,39 @@ _DEFERRED_PLAIN_CREATE_KNOWN_KEYS = frozenset(
 )
 
 
+def _crew_mode_applies_at_birth(
+    cfg: KiroCrewConfig,
+    *,
+    agent: str,
+    agent_kind: str,
+    mode: str,
+    crew_mode: bool | None,
+    remote: bool,
+    recreate: bool,
+    app: str,
+) -> bool:
+    """Whether a new chat should start on the Crew Mode agent.
+
+    Crew Mode is a UI over the existing ``kirocrew-conductor``: a chat with the
+    switch on simply runs on that agent. Only a NEW, local, plain dashboard chat
+    on the default agent qualifies. A member pick, another agent, a mode
+    session, a crew-bound (remote) session, an app's own session and a create
+    that addresses an existing slot all keep exactly what they asked for. Inside
+    that set, an explicit ``crew_mode`` from the composer switch wins, and an
+    absent one follows ``dashboard.default_crew_mode``.
+    """
+    if remote or recreate or mode or app or agent_kind == "member":
+        return False
+    default_names = {"", "kirocrew", cfg.default_agent}
+    if agent not in default_names:
+        return False
+    if crew_mode is not None:
+        return crew_mode
+    # ``is True``: the setting is a strict boolean, and anything else (a
+    # hand-edited string, a stand-in object) must read as off, never on.
+    return getattr(cfg.dashboard, "default_crew_mode", False) is True
+
+
 async def api_chat_slot_create(request: web.Request) -> web.Response:
     """POST /api/chat/slots — create a new chat slot."""
     state: DashboardState = request.app["state"]
@@ -3982,6 +4016,14 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     _mode = _coerce_requested_mode(body.get("mode", ""))
     if _mode not in _CREATABLE_MODES:
         return web.json_response({"error": "invalid mode", "code": "invalid_mode"}, status=400)
+    # Crew Mode at birth. An explicit boolean is the caller's own pick from the
+    # composer switch (``True`` turns it on, ``False`` keeps it off even when
+    # Settings defaults new chats to it); absent means "use the setting".
+    crew_mode = body.get("crew_mode")
+    if crew_mode is not None and not isinstance(crew_mode, bool):
+        return web.json_response(
+            {"error": "crew_mode must be a boolean", "code": "invalid_crew_mode"}, status=400
+        )
     # A crew-bound session runs PLAIN chat only. A non-plain mode
     # (design-critique) is not handled by the remote arm, which only replaces
     # the plain ``_run_chat`` dispatch. So a remote slot created with a mode
@@ -4192,6 +4234,18 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     # agent precisely so the peer keeps that choice.
     if cfg is not None and not agent and not instance_id:
         agent = cfg.default_agent or ""
+    if cfg is not None and _crew_mode_applies_at_birth(
+        cfg,
+        agent=agent,
+        agent_kind=agent_kind,
+        mode=_mode,
+        crew_mode=crew_mode,
+        remote=bool(instance_id),
+        recreate=existing_slot is not None,
+        app=request_app,
+    ):
+        agent = CREW_MODE_AGENT_NAME
+        agent_kind = "template"
     # Normalize an agent nothing will dispatch to the one that WILL answer.
     # Otherwise the name is stored verbatim and resolve_agent_bindings silently
     # falls back to the default agent: the sidebar advertises the requested agent

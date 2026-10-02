@@ -9324,6 +9324,33 @@
       "moreCols": "अधिक कॉलम",
       "fewerRows": "कम पंक्तियाँ",
       "moreRows": "अधिक पंक्तियाँ"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode चालू",
+      "chip_hint_off": "Crew Mode चालू करें। तुम्हारा कंडक्टर हर काम को उसकी अपनी चैट में भेजता है।",
+      "chip_hint_on": "Crew Mode बंद करें और डिफ़ॉल्ट एजेंट पर लौटें।",
+      "eyebrow": "Crew Mode चालू",
+      "title": "Crew Mode",
+      "tagline_lead": "तुम लक्ष्य तय करो।",
+      "tagline_strong": "तुम्हारी टीम काम करती है।",
+      "does_new_chat": "नई चैट",
+      "does_pass_notes": "संदेश पहुँचाए",
+      "does_take_asks": "नए काम ले",
+      "does_check_in": "प्रगति देखे",
+      "board_title": "तुम्हारी टीम",
+      "board_preview": "पूर्वावलोकन",
+      "sample_question": "तुम्हारे लिए कौन सा दिन ठीक है?",
+      "sample_answer_a": "आज",
+      "sample_answer_b": "कल",
+      "sample_email": "ईमेल",
+      "sample_layout": "लेआउट",
+      "sample_room": "कमरा",
+      "sample_screenshot": "स्क्रीनशॉट",
+      "state_done": "पूरा",
+      "state_working": "चल रहा है",
+      "state_needs_you": "तुम्हारी ज़रूरत",
+      "state_waiting": "प्रतीक्षा में"
     }
   },
   "hooks": {
@@ -17211,6 +17238,10 @@
       "diffLayout": {
         "description": "पुराने और नए कोड को दो कॉलम में दिखाता है; बंद होने पर एक यूनिफाइड कॉलम में। इसे यहाँ या किसी भी diff पर बदलने से हर जगह लागू हो जाता है।",
         "label": "स्प्लिट (अगल-बगल) diff"
+      },
+      "defaultCrewMode": {
+        "description": "डिफ़ॉल्ट एजेंट की नई चैट Crew Mode में शुरू होती हैं: कंडक्टर काम करने के लिए अलग चैट खोलता है और यहाँ रिपोर्ट करता है। मौजूदा चैट नहीं बदलतीं।",
+        "label": "नए सत्रों के लिए Crew Mode डिफ़ॉल्ट रूप से चालू करें"
       }
     },
     "display": {

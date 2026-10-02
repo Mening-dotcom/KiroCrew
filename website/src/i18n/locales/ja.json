@@ -9198,6 +9198,33 @@
       "moreCols": "列を増やす",
       "fewerRows": "行を減らす",
       "moreRows": "行を増やす"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode オン",
+      "chip_hint_off": "Crew Mode をオンにします。コンダクターが各タスクを別々のチャットに送ります。",
+      "chip_hint_on": "Crew Mode をオフにして、既定のエージェントに戻ります。",
+      "eyebrow": "Crew Mode オン",
+      "title": "Crew Mode",
+      "tagline_lead": "目標はあなたが決めます。",
+      "tagline_strong": "作業はクルーが行います。",
+      "does_new_chat": "新しいチャット",
+      "does_pass_notes": "伝言",
+      "does_take_asks": "依頼を受ける",
+      "does_check_in": "様子を見る",
+      "board_title": "あなたのクルー",
+      "board_preview": "プレビュー",
+      "sample_question": "どの日が都合がいいですか？",
+      "sample_answer_a": "今日",
+      "sample_answer_b": "明日",
+      "sample_email": "メール",
+      "sample_layout": "レイアウト",
+      "sample_room": "会議室",
+      "sample_screenshot": "スクリーンショット",
+      "state_done": "完了",
+      "state_working": "作業中",
+      "state_needs_you": "あなたの対応待ち",
+      "state_waiting": "待機中"
     }
   },
   "hooks": {
@@ -16964,6 +16991,10 @@
       "diffLayout": {
         "description": "旧コードと新コードを 2 列で表示します。オフのときは 1 列の統合表示になります。ここでも任意の差分でも変更すると、どこにでも適用されます。",
         "label": "分割（左右並べ）差分"
+      },
+      "defaultCrewMode": {
+        "description": "既定のエージェントの新しいチャットは Crew Mode で始まります。コンダクターが作業用に別のチャットを開き、ここで報告します。既存のチャットは変わりません。",
+        "label": "新しいセッションで Crew Mode を既定でオンにする"
       }
     },
     "display": {

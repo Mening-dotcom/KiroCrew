@@ -223,6 +223,8 @@ export { PREFILL_STORAGE_KEY } from '../utils/navIntent'
 import { PREFILL_STORAGE_KEY, writePrefill } from '../utils/navIntent'
 import WelcomeView from '../components/WelcomeView'
 import { MemoryModeChip, type MemoryMode } from '../components/MemoryModeChip'
+import { CrewModeChip, CREW_MODE_AGENT } from '../components/CrewModeChip'
+import CrewModeWelcome from '../components/CrewModeWelcome'
 import { openPanelView, claimAppAutoOpen } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { effortToCarry, filterInteractiveModels, legacyCodexEffort, shouldSeparateModelEffort, switchGroupedModel, useModelPickerConfigured, useModelPickerHiddenModelsQuery } from '../hooks/useInteractiveModels'
@@ -943,6 +945,15 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     pendingAgentRef.current = v
     pendingAgentKindRef.current = v ? kind : undefined
     _setPendingAgent(v)
+  }, [])
+  // The composer's Crew Mode pick for the chat that does not exist yet:
+  // undefined while untouched (Settings -> Chat's default then applies on the
+  // server), true / false once the user flips the switch. Rides the create.
+  const [pendingCrewMode, _setPendingCrewMode] = useState<boolean | undefined>(undefined)
+  const pendingCrewModeRef = useRef<boolean | undefined>(undefined)
+  const setPendingCrewMode = useCallback((v: boolean | undefined) => {
+    pendingCrewModeRef.current = v
+    _setPendingCrewMode(v)
   }, [])
   const [pendingModel, _setPendingModel] = useState('')  // model for next new slot
   const pendingModelRef = useRef('')
@@ -1948,7 +1959,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       // paste blocks and attachments, surface the failure, and bail.
       let created: { key: string } | null = null
       try {
-        created = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, agent_kind: pendingAgentRef.current ? pendingAgentKindRef.current : undefined, model: pendingModelRef.current || undefined, mode: modeRef.current })).unwrap()
+        created = await dispatch(createSlot({ agent: pendingAgentRef.current || defaultAgent || undefined, agent_kind: pendingAgentRef.current ? pendingAgentKindRef.current : undefined, model: pendingModelRef.current || undefined, mode: modeRef.current, crew_mode: pendingCrewModeRef.current })).unwrap()
       } catch (e: unknown) {
         sendingRef.current = false
         if (isolated) {
@@ -2119,7 +2130,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
         })
       }
     }
-    setPendingAgent(''); setPendingModel(''); setPendingProject('')
+    setPendingAgent(''); setPendingModel(''); setPendingProject(''); setPendingCrewMode(undefined)
     // Build meta for persistence (knowledge, files, pastes)
     const meta: Record<string, unknown> = {}
     if (filePaths.length) meta.files = filePaths
@@ -5110,6 +5121,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       model: old?.model || undefined,
       mode,
       memory_mode: newMode,
+      // The recreated chat keeps its Crew Mode state rather than re-reading
+      // the Settings default.
+      crew_mode: old?.agent === CREW_MODE_AGENT,
       folder_id: old?.folder_id ?? null,
       color_index: old?.color_index ?? null,
       color_hex: old?.color_hex ?? null,
@@ -5126,6 +5140,32 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   }
   // The welcome screen puts its memory chip directly above the composer.
   const showComposerMemoryChip = isWelcomeState
+
+  // Crew Mode (CrewModeChip): a UI over the existing conductor. A chat with the
+  // switch on runs on CREW_MODE_AGENT; flipping it is an ordinary agent switch.
+  // Offered only on a plain local chat whose agent is the default one (or
+  // already the conductor), the same set the server's birth rule accepts.
+  const { data: crewModeCfg } = useQuery<{ default_crew_mode?: boolean }>({ queryKey: ['dashboardConfig'], queryFn: () => api.dashboardConfig(), staleTime: 30_000 })
+  const isDefaultAgentName = (name: string) => name === '' || name === 'kirocrew' || name === defaultAgent
+  const pendingAgentName = pendingAgent || defaultAgent || ''
+  const crewModeEligible = activeSlot
+    ? !!currentSlot && !currentSlot.mode && !currentSlot.instance_id && currentSlot.agent_kind !== 'member'
+      && (currentSlot.agent === CREW_MODE_AGENT || isDefaultAgentName(currentSlot.agent ?? ''))
+    : !mode && (pendingAgent === CREW_MODE_AGENT || isDefaultAgentName(pendingAgentName))
+  const crewModeOn = crewModeEligible && (activeSlot
+    ? currentSlot?.agent === CREW_MODE_AGENT
+    : pendingAgent === CREW_MODE_AGENT
+      || (pendingCrewMode === undefined && !!crewModeCfg?.default_crew_mode && isDefaultAgentName(pendingAgentName)))
+  const toggleCrewMode = () => {
+    // Before the chat exists the pick also rides the create, so an explicit
+    // "off" outranks a Settings default of "on".
+    if (!activeSlot) setPendingCrewMode(!crewModeOn)
+    if (crewModeOn) void switchAgent(defaultAgent || 'kirocrew')
+    else void switchAgent(CREW_MODE_AGENT, 'template')
+  }
+  const crewModeChip = crewModeEligible
+    ? <CrewModeChip on={crewModeOn} onToggle={toggleCrewMode} disabled={!!currentSlot?.running} />
+    : null
 
   // The band ChatInput renders above the composer, and the session-control chips.
   const composerAbove = useComposerAboveBand({
@@ -5535,7 +5575,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   newSlotMutation.mutate()
                   return
                 }
-                dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, agent_kind: pendingAgent ? pendingAgentKindRef.current : undefined, model: pendingModel || undefined, mode }))
+                dispatch(createSlot({ agent: pendingAgent || defaultAgent || undefined, agent_kind: pendingAgent ? pendingAgentKindRef.current : undefined, model: pendingModel || undefined, mode, crew_mode: pendingCrewMode }))
               }}
             >
               {i18nT('pages.chatPage.start_a_new_chat')}
@@ -5738,7 +5778,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.18 }}
               >
-                <WelcomeView setInput={setInput} />
+                {crewModeOn ? <CrewModeWelcome /> : <WelcomeView setInput={setInput} />}
               </motion.div>
             ) : (
             <>
@@ -6130,12 +6170,16 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   />
                 </div>
               )}
-              {showComposerMemoryChip && (
+              {(showComposerMemoryChip || crewModeChip) && (
                 // No backdrop: the chip is glass and whatever scrolls under it is meant to show.
                 // `w-fit`, not a full-width flex row: the box is a `dock-inert` child, so
-                // it catches input, and it should be no wider than the chip it holds.
-                <div className="relative z-10 mx-auto w-fit px-4 pt-2 pb-2" data-testid="composer-memory-chip">
-                  <MemoryModeChip memoryMode={currentSlot?.memory_mode ?? 'persistent'} onSwitchMode={switchMemoryMode} />
+                // it catches input, and it should be no wider than the chips it holds.
+                // The Crew Mode chip sits right of the memory chip. Once the chat has
+                // messages the memory chip leaves and the SAME Crew Mode chip glides to
+                // the centre (`layout`), so the mode can still be turned off.
+                <div className="relative z-10 mx-auto w-fit px-4 pt-2 pb-2 flex items-center gap-2" data-testid="composer-memory-chip">
+                  {showComposerMemoryChip && <MemoryModeChip memoryMode={currentSlot?.memory_mode ?? 'persistent'} onSwitchMode={switchMemoryMode} />}
+                  {crewModeChip && <motion.span layout="position" className="inline-flex">{crewModeChip}</motion.span>}
                 </div>
               )}
               <Composer

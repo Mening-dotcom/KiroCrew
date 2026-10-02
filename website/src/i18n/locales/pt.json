@@ -9450,6 +9450,33 @@
       "moreCols": "mais colunas",
       "fewerRows": "menos linhas",
       "moreRows": "mais linhas"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode ativado",
+      "chip_hint_off": "Ative o Crew Mode. Seu maestro envia cada tarefa para um chat próprio.",
+      "chip_hint_on": "Desative o Crew Mode e volte ao agente padrão.",
+      "eyebrow": "Crew Mode ativado",
+      "title": "Crew Mode",
+      "tagline_lead": "Você define a meta.",
+      "tagline_strong": "Sua equipe faz o trabalho.",
+      "does_new_chat": "Novo chat",
+      "does_pass_notes": "Passar recados",
+      "does_take_asks": "Receber pedidos",
+      "does_check_in": "Acompanhar",
+      "board_title": "Sua equipe",
+      "board_preview": "Prévia",
+      "sample_question": "Qual dia é bom para você?",
+      "sample_answer_a": "Hoje",
+      "sample_answer_b": "Amanhã",
+      "sample_email": "E-mail",
+      "sample_layout": "Layout",
+      "sample_room": "Sala",
+      "sample_screenshot": "Captura",
+      "state_done": "Feito",
+      "state_working": "Em andamento",
+      "state_needs_you": "Precisa de você",
+      "state_waiting": "Aguardando"
     }
   },
   "hooks": {
@@ -17458,6 +17485,10 @@
       "diffLayout": {
         "description": "Mostra o código antigo e o novo em duas colunas; desativado mostra uma única coluna unificada. Alterá-lo aqui ou em qualquer diff aplica em todos os lugares.",
         "label": "Diffs divididos (lado a lado)"
+      },
+      "defaultCrewMode": {
+        "description": "Novos chats no agente padrão começam em Crew Mode: o maestro abre chats separados para fazer o trabalho e informa você aqui. Chats existentes não mudam.",
+        "label": "Ativar o Crew Mode por padrão em novas sessões"
       }
     },
     "display": {

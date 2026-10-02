@@ -3746,6 +3746,33 @@
     },
     "runInTerminalBtn": {
       "copied_paste_into_terminal": "Copied — paste it into the terminal"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode on",
+      "chip_hint_off": "Turn on Crew Mode. Your Conductor sends each task to its own chat.",
+      "chip_hint_on": "Turn off Crew Mode and go back to the default agent.",
+      "eyebrow": "Crew Mode on",
+      "title": "Crew Mode",
+      "tagline_lead": "You set the goal.",
+      "tagline_strong": "Your crew does the work.",
+      "does_new_chat": "New chat",
+      "does_pass_notes": "Pass notes",
+      "does_take_asks": "Take asks",
+      "does_check_in": "Check in",
+      "board_title": "Your crew",
+      "board_preview": "Preview",
+      "sample_question": "Which day works for you?",
+      "sample_answer_a": "Today",
+      "sample_answer_b": "Tomorrow",
+      "sample_email": "Email",
+      "sample_layout": "Layout",
+      "sample_room": "Room",
+      "sample_screenshot": "Screenshot",
+      "state_done": "Done",
+      "state_working": "Working",
+      "state_needs_you": "Needs you",
+      "state_waiting": "Waiting"
     }
   },
   "hooks": {
@@ -7816,6 +7843,10 @@
       "diffLayout": {
         "description": "Show old and new code in two columns; off shows one unified column. Changing it here or on any diff sets it everywhere.",
         "label": "Split (side-by-side) diffs"
+      },
+      "defaultCrewMode": {
+        "description": "New chats on the default agent start in Crew Mode: the Conductor opens separate chats to do the work and reports back here. Existing chats are not changed.",
+        "label": "Turn on Crew Mode for new sessions by default"
       }
     },
     "display": {

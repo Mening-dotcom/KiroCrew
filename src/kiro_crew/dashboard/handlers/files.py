@@ -6900,7 +6900,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             )
             return body_err
         assert body is not None  # read_bounded_json returns (dict, None) on success
-        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "default_memory_mode", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "link_previews", "link_patterns", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links", "model_picker_hidden_models_add", "model_picker_hidden_models_remove"}
+        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "default_memory_mode", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "default_crew_mode", "link_previews", "link_patterns", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links", "model_picker_hidden_models_add", "model_picker_hidden_models_remove"}
         # One-release backward-compat shim for removed key; delete after all clients update.
         deprecated_ignored_keys = {"tail_fork_head_handling"}
         # Read-only keys the GET exposes: both settings surfaces save with
@@ -7136,6 +7136,20 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     {"error": "tail_fork_enabled must be a boolean"}, status=400
                 )
             updates["tail_fork_enabled"] = val
+        if "default_crew_mode" in body:
+            val = body["default_crew_mode"]
+            if not isinstance(val, bool):
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return web.json_response(
+                    {
+                        "error": "default_crew_mode must be a boolean",
+                        "code": "invalid_default_crew_mode",
+                    },
+                    status=400,
+                )
+            updates["default_crew_mode"] = val
         if "folder_suggestions_enabled" in body:
             val = body["folder_suggestions_enabled"]
             if not isinstance(val, bool):
@@ -7402,6 +7416,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "auto_open_git_panel": cfg.dashboard.auto_open_git_panel,
             "session_card_source_links": cfg.dashboard.session_card_source_links,
             "tail_fork_enabled": cfg.dashboard.tail_fork_enabled,
+            "default_crew_mode": cfg.dashboard.default_crew_mode,
             "link_previews": cfg.dashboard.link_previews,
             "folder_suggestions_enabled": cfg.dashboard.folder_suggestions_enabled,
             "model_picker_hidden_models": list(cfg.dashboard.model_picker_hidden_models),

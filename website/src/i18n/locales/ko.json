@@ -9198,6 +9198,33 @@
       "moreCols": "열 늘리기",
       "fewerRows": "행 줄이기",
       "moreRows": "행 늘리기"
+    },
+    "crewMode": {
+      "chip_off": "Crew Mode",
+      "chip_on": "Crew Mode 켜짐",
+      "chip_hint_off": "Crew Mode를 켭니다. 지휘자가 각 작업을 별도의 채팅으로 보냅니다.",
+      "chip_hint_on": "Crew Mode를 끄고 기본 에이전트로 돌아갑니다.",
+      "eyebrow": "Crew Mode 켜짐",
+      "title": "Crew Mode",
+      "tagline_lead": "목표는 당신이 정하고,",
+      "tagline_strong": "일은 크루가 합니다.",
+      "does_new_chat": "새 채팅",
+      "does_pass_notes": "메시지 전달",
+      "does_take_asks": "요청 받기",
+      "does_check_in": "진행 확인",
+      "board_title": "당신의 크루",
+      "board_preview": "미리 보기",
+      "sample_question": "어느 날이 좋으세요?",
+      "sample_answer_a": "오늘",
+      "sample_answer_b": "내일",
+      "sample_email": "이메일",
+      "sample_layout": "레이아웃",
+      "sample_room": "회의실",
+      "sample_screenshot": "스크린샷",
+      "state_done": "완료",
+      "state_working": "진행 중",
+      "state_needs_you": "확인 필요",
+      "state_waiting": "대기 중"
     }
   },
   "hooks": {
@@ -16964,6 +16991,10 @@
       "diffLayout": {
         "description": "이전 코드와 새 코드를 두 열로 표시합니다. 끄면 한 열의 통합 뷰로 표시합니다. 여기서 바꾸든 diff에서 바꾸든 어디에나 적용됩니다.",
         "label": "분할(좌우 나란히) diff"
+      },
+      "defaultCrewMode": {
+        "description": "기본 에이전트의 새 채팅은 Crew Mode로 시작합니다. 지휘자가 작업용 채팅을 따로 열고 여기에서 보고합니다. 기존 채팅은 바뀌지 않습니다.",
+        "label": "새 세션에서 Crew Mode를 기본으로 켜기"
       }
     },
     "display": {

@@ -1425,6 +1425,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.turn-on-crew-mode-for-new-sessions-by-default",
+    "label": "Turn on Crew Mode for new sessions by default",
+    "labelKey": "settings.chat.defaultCrewMode.label",
+    "description": "New chats on the default agent start in Crew Mode: the Conductor opens separate chats to do the work and reports back here. Existing chats are not changed.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "sessions"
+    },
+    "configKey": "dashboard.default_crew_mode"
+  },
+  {
     "id": "chat.what-enter-does-while-the-agent-is-working",
     "label": "What Enter does while the agent is working",
     "labelKey": "pages.settings.chatPanel.what_enter_does_while_the_agent_is_working",
