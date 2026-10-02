@@ -1,6 +1,6 @@
 ---
 title: Dashboard chrome shell — one continuous surface with a fixed desktop rail
-status: draft
+status: accepted
 author: krewworker
 created: 2026-10-02
 last-audited: 2026-10-02
@@ -14,7 +14,13 @@ superseded-by: []
 
 # RFC: Dashboard chrome shell — one continuous surface with a fixed desktop rail
 
-- Status: draft — nothing implemented on main. The implementation is
+> **Status:** `accepted` on 2026-10-02 by maintainer dodgeblaster (see
+> Acceptance). Nothing is on main yet; the document lands first because the
+> fixed-collapsed desktop rail removes a user-facing capability and the First
+> Principles review lane reads that decision off the base branch. The
+> implementation is [#16052](https://github.com/kirodotdev/KiroCrew/pull/16052).
+
+- Status: accepted — nothing implemented on main yet. The implementation is
   [#16052](https://github.com/kirodotdev/KiroCrew/pull/16052).
 - Author: krewworker
 - Related: `website/docs/page-layout.md` (the shell/panel layout this reshapes),
@@ -120,7 +126,12 @@ role/aria assertions). No backend, agent, or data change.
 
 ## Acceptance
 
-Pending a maintainer's decision on the product-shape change (item 3, the
-fixed-collapsed desktop rail). This document records the decision so the First
-Principles review lane can read it off the base branch; the status flips to
-`accepted` when a maintainer records it here.
+**Decided 2026-10-02 by dodgeblaster (maintainer): this design is accepted.**
+The desktop nav rail is fixed to the collapsed icon rail for every user (expand
+stays mobile-only), the brand toggle is replaced by the crew identity switcher,
+the installed theme's rail logo gives way to the favicon, and Report-a-problem
+leaves the rail (kept at Settings › About › Support and the top-bar feedback
+pill). This document records the decision so the First Principles review lane can
+read it off the base branch. The implementation is
+[#16052](https://github.com/kirodotdev/KiroCrew/pull/16052).
+
