@@ -957,6 +957,7 @@ function stubSpawn(script) {
   // Spawn OPTIONS per call, so a test can assert the hardened environment the
   // marker's command runs in and not only which command ran.
   const optsList = [];
+  const children = [];
   const orig = cpModule.spawn;
   const { EventEmitter } = require("node:events");
   cpModule.spawn = (command, opts) => {
@@ -965,6 +966,8 @@ function stubSpawn(script) {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
+    child.unref = () => { child.unrefed = true; };
+    children.push(child);
     const spec = (typeof script === "function" ? script(command) : script) || {};
     const { code = 0, out = "", err = "", error = false, signal = null } = spec;
     // Emit asynchronously so listeners attached after spawn() still catch it.
@@ -979,8 +982,56 @@ function stubSpawn(script) {
     });
     return child;
   };
-  return { commands, optsList, restore: () => { cpModule.spawn = orig; } };
+  return { commands, optsList, children, restore: () => { cpModule.spawn = orig; } };
 }
+
+test("managed quitCommand: started detached on will-quit with the quitting pid", (t) => {
+  const { deps, appOnce } = makeDeps({
+    externallyManaged: {
+      managedBy: "m",
+      updateCommand: "/usr/bin/apply",
+      checkCommand: "/usr/bin/check",
+      quitCommand: "/usr/bin/after-quit",
+    },
+  });
+  const { commands, optsList, children, restore } = stubSpawn({ code: 0 });
+  t.after(restore);
+  initAutoUpdate(deps);
+  const hooks = appOnce.filter((r) => r.ev === "will-quit");
+  assert.strictEqual(hooks.length, 1, "a marker with a quitCommand arms exactly one will-quit hook");
+  assert.deepStrictEqual(commands, [], "nothing runs before the app quits");
+
+  hooks[0].fn();
+
+  assert.deepStrictEqual(commands, ["/usr/bin/after-quit"]);
+  const opts = optsList[0];
+  assert.strictEqual(opts.detached, true, "the command must outlive the app");
+  assert.strictEqual(opts.stdio, "ignore", "no pipe may hold the quitting app open");
+  assert.strictEqual(opts.cwd, "/");
+  assert.strictEqual(opts.env.KIROCREW_QUITTING_PID, String(process.pid));
+  assert.strictEqual(opts.env.PATH, "/usr/bin:/bin:/usr/sbin:/sbin");
+  assert.strictEqual(opts.env.HOME, undefined, "same constructed environment as every marker command");
+  assert.strictEqual(children[0].unrefed, true, "quit must not wait on the command");
+});
+
+test("managed quitCommand: absent -> no will-quit hook", (t) => {
+  const { deps, appOnce } = makeDeps({
+    externallyManaged: { managedBy: "m", updateCommand: "/usr/bin/apply", checkCommand: "/usr/bin/check" },
+  });
+  const { restore } = stubSpawn({ code: 0 });
+  t.after(restore);
+  initAutoUpdate(deps);
+  assert.strictEqual(appOnce.filter((r) => r.ev === "will-quit").length, 0);
+});
+
+test("managed quitCommand: a marker with no updateCommand runs nothing at quit", () => {
+  const { deps, appOnce } = makeDeps({
+    externallyManaged: { managedBy: "m", updateCommand: "", checkCommand: "", quitCommand: "/usr/bin/after-quit" },
+  });
+  assert.strictEqual(initAutoUpdate(deps).disabled, "externally-managed");
+  assert.strictEqual(appOnce.filter((r) => r.ev === "will-quit").length, 0,
+    "a bare marker keeps the historical no-op behavior");
+});
 
 test("managed check() with updateCommand+checkCommand emits found with the printed version", async (t) => {
   const { deps, states } = makeDeps({
@@ -1295,6 +1346,7 @@ test("readExternallyManaged: JSON marker carries metadata", (t) => {
     managedBy: "internal-registry",
     updateCommand: "pkgtool update kirocrew",
     checkCommand: "",
+    quitCommand: "",
   });
 });
 
@@ -1309,6 +1361,7 @@ test("readExternallyManaged: bare/unparsable marker still means managed", (t) =>
     managedBy: "",
     updateCommand: "",
     checkCommand: "",
+    quitCommand: "",
   });
 });
 
@@ -1324,6 +1377,7 @@ test("readExternallyManaged: degenerate markers (oversized, symlink, directory) 
     managedBy: "",
     updateCommand: "",
     checkCommand: "",
+    quitCommand: "",
   });
   // Symlink (even dangling): lstat'ed, never followed — a link into a FIFO or
   // device must not be able to stall this startup-path read.
@@ -1335,6 +1389,7 @@ test("readExternallyManaged: degenerate markers (oversized, symlink, directory) 
       managedBy: "",
       updateCommand: "",
       checkCommand: "",
+      quitCommand: "",
     });
   } catch (err) {
     // Ordinary Windows accounts may lack SeCreateSymbolicLinkPrivilege. Keep
@@ -1353,6 +1408,7 @@ test("readExternallyManaged: degenerate markers (oversized, symlink, directory) 
     managedBy: "",
     updateCommand: "",
     checkCommand: "",
+    quitCommand: "",
   });
 });
 
@@ -1364,7 +1420,12 @@ test("readExternallyManaged: metadata fields are length-capped", (t) => {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.writeFileSync(
     path.join(dir, "EXTERNALLY-MANAGED"),
-    JSON.stringify({ managedBy: "m".repeat(500), updateCommand: "c".repeat(2000), checkCommand: "k".repeat(2000) }),
+    JSON.stringify({
+      managedBy: "m".repeat(500),
+      updateCommand: "c".repeat(2000),
+      checkCommand: "k".repeat(2000),
+      quitCommand: "q".repeat(2000),
+    }),
   );
   const got = readExternallyManaged({
     env: {},
@@ -1374,6 +1435,7 @@ test("readExternallyManaged: metadata fields are length-capped", (t) => {
   assert.strictEqual(got.managedBy.length, 128);
   assert.strictEqual(got.updateCommand.length, 512);
   assert.strictEqual(got.checkCommand.length, 512);
+  assert.strictEqual(got.quitCommand.length, 512);
 });
 
 test("readExternallyManaged: env override points at a marker file", (t) => {
@@ -1389,7 +1451,7 @@ test("readExternallyManaged: env override points at a marker file", (t) => {
     resourcesPath: "/nonexistent",
     probeMarkerRewritable: () => false,
   });
-  assert.deepStrictEqual(got, { managedBy: "harness", updateCommand: "", checkCommand: "" });
+  assert.deepStrictEqual(got, { managedBy: "harness", updateCommand: "", checkCommand: "", quitCommand: "" });
 });
 
 // ---------------------------------------------------------------------------
@@ -1440,6 +1502,7 @@ test("readExternallyManaged: a marker in a USER-WRITABLE dir yields NO metadata"
       managedBy: "attacker",
       updateCommand: "/bin/sh -c 'touch /tmp/pwned'",
       checkCommand: "/bin/sh -c 'touch /tmp/pwned'",
+      quitCommand: "/bin/sh -c 'touch /tmp/pwned'",
     }),
   );
   // Still MANAGED (the updater stays off) but the commands are refused: this is
@@ -1448,6 +1511,7 @@ test("readExternallyManaged: a marker in a USER-WRITABLE dir yields NO metadata"
     managedBy: "",
     updateCommand: "",
     checkCommand: "",
+    quitCommand: "",
   });
 });
 
@@ -1479,6 +1543,7 @@ test("readExternallyManaged: chmod 0400 on an OWNED marker does not buy trust", 
     managedBy: "",
     updateCommand: "",
     checkCommand: "",
+    quitCommand: "",
   });
 });
 
@@ -1524,6 +1589,7 @@ test("baked marker: trusted as code -- the ownership probe is never consulted", 
     managedBy: "Builder Toolbox",
     updateCommand: "/opt/toolbox/bin/toolbox update kirocrew",
     checkCommand: "/opt/toolbox/bin/kirocrew-update-check",
+    quitCommand: "",
   });
   assert.strictEqual(probed, 0, "a baked marker is not subject to the loose-marker provenance probe");
 });
@@ -1546,7 +1612,7 @@ test("baked marker: read on a PACKAGED build only -- a dev checkout's source dir
   assert.deepStrictEqual(readExternallyManaged({
     env: {}, resourcesPath: resources, bakedMarkerPath: baked, isPackaged: false,
     probeMarkerRewritable: () => false,
-  }), { managedBy: "loose", updateCommand: "", checkCommand: "" }, "unpackaged: the loose path is what is read");
+  }), { managedBy: "loose", updateCommand: "", checkCommand: "", quitCommand: "" }, "unpackaged: the loose path is what is read");
 });
 
 test("baked marker: honored with the REAL probe on a user-owned tree (the Windows/Toolbox shape)", (t) => {
@@ -1561,7 +1627,7 @@ test("baked marker: honored with the REAL probe on a user-owned tree (the Window
   assert.strictEqual(canRewriteMarker(baked), true, "precondition: the probe WOULD refuse this file");
   assert.deepStrictEqual(readExternallyManaged({
     env: {}, resourcesPath: resources, bakedMarkerPath: baked, isPackaged: true,
-  }), { managedBy: "pkgtool", updateCommand: "/usr/bin/pkgtool update", checkCommand: "" });
+  }), { managedBy: "pkgtool", updateCommand: "/usr/bin/pkgtool update", checkCommand: "", quitCommand: "" });
 });
 
 test("baked marker: outranks a loose marker when both exist", (t) => {
@@ -1579,7 +1645,7 @@ test("baked marker: outranks a loose marker when both exist", (t) => {
   assert.deepStrictEqual(readExternallyManaged({
     env: {}, resourcesPath: resources, bakedMarkerPath: baked, isPackaged: true,
     probeMarkerRewritable: () => false, // even a loose marker that WOULD pass
-  }), { managedBy: "edition", updateCommand: "/usr/bin/edition-update", checkCommand: "" });
+  }), { managedBy: "edition", updateCommand: "/usr/bin/edition-update", checkCommand: "", quitCommand: "" });
 });
 
 test("baked marker: absent -> the loose marker keeps its gated behavior", (t) => {
@@ -1597,10 +1663,10 @@ test("baked marker: absent -> the loose marker keeps its gated behavior", (t) =>
   }));
   assert.deepStrictEqual(readExternallyManaged({
     env: {}, resourcesPath: resources, bakedMarkerPath: baked, isPackaged: true, probeMarkerRewritable: () => true,
-  }), { managedBy: "", updateCommand: "", checkCommand: "" }, "rewritable loose marker: bare");
+  }), { managedBy: "", updateCommand: "", checkCommand: "", quitCommand: "" }, "rewritable loose marker: bare");
   assert.deepStrictEqual(readExternallyManaged({
     env: {}, resourcesPath: resources, bakedMarkerPath: baked, isPackaged: true, probeMarkerRewritable: () => false,
-  }), { managedBy: "loose", updateCommand: "/usr/bin/loose-update", checkCommand: "" }, "trusted loose marker: metadata");
+  }), { managedBy: "loose", updateCommand: "/usr/bin/loose-update", checkCommand: "", quitCommand: "" }, "trusted loose marker: metadata");
 });
 
 test("baked marker: degenerate bodies still mean managed, with nothing to run", (t) => {
@@ -1608,7 +1674,7 @@ test("baked marker: degenerate bodies still mean managed, with nothing to run", 
   // over-cap or not a regular file leaves the updater OFF and yields no command.
   // A build that mis-writes its marker must not fall back to self-updating.
   const fs = require("node:fs");
-  const bare = { managedBy: "", updateCommand: "", checkCommand: "" };
+  const bare = { managedBy: "", updateCommand: "", checkCommand: "", quitCommand: "" };
   for (const body of ["", "not json", "[1,2]", "x".repeat(8193)]) {
     const { baked, resources } = bakedFixture(t, body);
     assert.deepStrictEqual(readExternallyManaged({
@@ -1638,7 +1704,7 @@ test("baked marker: the dev/test env seam still wins, and stays a LOOSE read", (
     resourcesPath: resources,
     bakedMarkerPath: baked,
     probeMarkerRewritable: (p) => { probedPath = p; return false; },
-  }), { managedBy: "env", updateCommand: "/usr/bin/x", checkCommand: "" });
+  }), { managedBy: "env", updateCommand: "/usr/bin/x", checkCommand: "", quitCommand: "" });
   assert.strictEqual(probedPath, envMarker);
 });
 
@@ -1748,7 +1814,7 @@ test("readExternallyManaged: a PACKAGED app ignores KIROCREW_EXTERNALLY_MANAGED"
       isPackaged: false,
       probeMarkerRewritable: () => false,
     }),
-    { managedBy: "env", updateCommand: "/bin/false", checkCommand: "" },
+    { managedBy: "env", updateCommand: "/bin/false", checkCommand: "", quitCommand: "" },
   );
 });
 

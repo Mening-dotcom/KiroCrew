@@ -146,6 +146,7 @@ const EXTERNALLY_MANAGED_MAX_BYTES = 8192;
 const MANAGED_BY_MAX_CHARS = 128;
 const UPDATE_COMMAND_MAX_CHARS = 512;
 const CHECK_COMMAND_MAX_CHARS = 512;
+const QUIT_COMMAND_MAX_CHARS = 512;
 
 /**
  * Is this install's update lifecycle owned by an external package manager?
@@ -174,11 +175,14 @@ const CHECK_COMMAND_MAX_CHARS = 512;
  * statement than a file dropped next to it afterwards. On macOS the baked
  * marker is additionally sealed by codesign for free.
  *
- * The marker body is optional JSON `{managedBy, updateCommand, checkCommand}`:
+ * The marker body is optional JSON
+ * `{managedBy, updateCommand, checkCommand, quitCommand}`:
  * `managedBy` names the owning system for the About panel, `updateCommand` is
  * the command the panel offers to copy AND (when the managed auto-update path
- * is active) the command run to apply an update, and `checkCommand` is the
- * optional command run to discover whether an update is available. Every
+ * is active) the command run to apply an update, `checkCommand` is the
+ * optional command run to discover whether an update is available, and
+ * `quitCommand` is the optional command started, detached, as the app quits
+ * (see createManagedLane). Every
  * degenerate marker — empty, unparsable,
  * over-cap, a directory, a symlink, a dangling symlink — still means MANAGED:
  * an operator who dropped SOMETHING at that name gets the safe behavior
@@ -188,7 +192,7 @@ const CHECK_COMMAND_MAX_CHARS = 512;
  *
  * INTEGRITY (loose marker only): the metadata is only parsed when neither the
  * marker nor its directory is OWNED by this euid or writable by group/other (see
- * canRewriteMarker) — `updateCommand`/`checkCommand` are SHELLED, so a marker
+ * canRewriteMarker) — every command field is SHELLED, so a marker
  * anything running as this user could rewrite is a marker that names arbitrary
  * code to run. A rewritable marker still means MANAGED, just with no metadata:
  * the same degenerate shape as an empty body, which leaves the updater off and
@@ -202,7 +206,7 @@ const CHECK_COMMAND_MAX_CHARS = 512;
  * @param {(p:string)=>boolean} [o.probeMarkerRewritable=canRewriteMarker]
  * @param {string} [o.bakedMarkerPath]  where the in-code marker lives; defaults
  *   to `EXTERNALLY-MANAGED` beside this module (inside app.asar when packaged)
- * @returns {{managedBy:string, updateCommand:string, checkCommand:string}|null} null when not managed
+ * @returns {{managedBy:string, updateCommand:string, checkCommand:string, quitCommand:string}|null} null when not managed
  */
 function readExternallyManaged({
   env = process.env,
@@ -294,6 +298,7 @@ function readExternallyManaged({
   let managedBy = "";
   let updateCommand = "";
   let checkCommand = "";
+  let quitCommand = "";
   try {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
@@ -306,11 +311,14 @@ function readExternallyManaged({
       if (typeof parsed.checkCommand === "string") {
         checkCommand = parsed.checkCommand.trim().slice(0, CHECK_COMMAND_MAX_CHARS);
       }
+      if (typeof parsed.quitCommand === "string") {
+        quitCommand = parsed.quitCommand.trim().slice(0, QUIT_COMMAND_MAX_CHARS);
+      }
     }
   } catch {
     // Presence alone is the signal; a bare marker means managed, no metadata.
   }
-  return { managedBy, updateCommand, checkCommand };
+  return { managedBy, updateCommand, checkCommand, quitCommand };
 }
 
 // Can THIS process rewrite the externally-managed marker?

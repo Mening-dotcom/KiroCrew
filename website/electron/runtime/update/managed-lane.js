@@ -7,7 +7,8 @@
  * The marker already passed readExternallyManaged's provenance test (in
  * auto-update.js) before this lane is created. This module owns what that
  * trust is spent on: the hardened command executor, the check / download /
- * install state, the quit-time auto-apply and the background schedule.
+ * install state, the quit-time auto-apply, the quit command and the background
+ * schedule.
  *
  * @returns {{check: Function, download: Function, install: Function, getInfo: Function}}
  */
@@ -224,6 +225,47 @@ function createManagedLane({
   // The command run to APPLY an update, on quit and on explicit install.
   // Bounded by a ceiling timeout so a wedged package manager cannot hang quit.
   const runUpdateCommand = () => runManagedCommand(managed.updateCommand, { timeout: MANAGED_APPLY_TIMEOUT_MS });
+
+  // QUIT COMMAND: the marker's optional `quitCommand`, started as the app
+  // quits, for upkeep that must not happen while the app is running. The case
+  // that needs it: a package manager that installs the next version in the
+  // background cannot switch the app's launch path over to it while this
+  // process still resolves its own files through that path, so it defers the
+  // switch, and this is the moment the switch becomes safe.
+  //
+  // `will-quit`, not `before-quit`: it fires only once every window has closed
+  // and the quit can no longer be cancelled, so a vetoed quit never runs the
+  // command. It does not fire for app.exit(), which is how the quit-time apply
+  // above ends; that path already ran updateCommand, so the upkeep is that
+  // command's to do.
+  //
+  // DETACHED and never awaited: quit must not wait on a package manager, and
+  // the command's job is to act AFTER this process is gone. It gets this
+  // process's pid as KIROCREW_QUITTING_PID (derived, like
+  // KIROCREW_MANAGED_ARGV0, never read from process.env) so it can wait for
+  // the exit itself. Same hardened shell, cwd and constructed environment as
+  // every other marker command; no timeout, because nothing is left to enforce
+  // one once this process exits.
+  const runQuitCommand = () => {
+    try {
+      const cp = require("child_process");
+      // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process
+      const child = cp.spawn(managed.quitCommand, { // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process
+        shell: managedShell(),
+        cwd: "/",
+        env: { ...managedEnv(), KIROCREW_QUITTING_PID: String(process.pid) },
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.on("error", (err) => log.error("[update] managed quit command error", err));
+      child.unref();
+      log.info("[update] managed quit command started");
+    } catch (err) {
+      log.error("[update] managed quit command spawn threw", err);
+    }
+  };
+  if (managed.quitCommand) app.once("will-quit", runQuitCommand);
 
   // Fresh-read the auto-download preference; a throwing reader fails toward
   // NOT auto-installing (same direction as the feed path's deferred handler).

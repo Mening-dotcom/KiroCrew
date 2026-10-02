@@ -933,13 +933,14 @@ if [ -n "${KIROCREW_MANAGED_INSTALL_MARKER:-}" ]; then
     let parsed;
     try { parsed = JSON.parse(buf.toString("utf8")); } catch (e) { console.error(`marker is not JSON: ${e.message}`); process.exit(1); }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { console.error("marker must be a JSON object"); process.exit(1); }
-    const allowed = ["managedBy", "updateCommand", "checkCommand"];
+    const allowed = ["managedBy", "updateCommand", "checkCommand", "quitCommand"];
     // The reader TRIMS each field and slices it to a cap (auto-update.js:
-    // MANAGED_BY_MAX_CHARS / UPDATE_COMMAND_MAX_CHARS / CHECK_COMMAND_MAX_CHARS).
+    // MANAGED_BY_MAX_CHARS / UPDATE_COMMAND_MAX_CHARS / CHECK_COMMAND_MAX_CHARS /
+    // QUIT_COMMAND_MAX_CHARS).
     // Validate the value the reader will actually see: a whitespace-only
     // command would trim to nothing and turn the marker bare, and an over-cap
     // one would be truncated into a DIFFERENT command. Both are refused here.
-    const caps = { managedBy: 128, updateCommand: 512, checkCommand: 512 };
+    const caps = { managedBy: 128, updateCommand: 512, checkCommand: 512, quitCommand: 512 };
     for (const k of Object.keys(parsed)) {
       if (!allowed.includes(k)) { console.error(`marker has unknown field "${k}" (allowed: ${allowed.join(", ")})`); process.exit(1); }
       if (typeof parsed[k] !== "string") { console.error(`marker field "${k}" must be a string`); process.exit(1); }

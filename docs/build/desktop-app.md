@@ -1216,7 +1216,8 @@ ones the packager never reads). The body is optional JSON:
 {
   "managedBy": "your package manager's name",
   "checkCommand": "the command that prints an available version",
-  "updateCommand": "the command that applies it"
+  "updateCommand": "the command that applies it",
+  "quitCommand": "optional: a command started, detached, as the app quits"
 }
 ```
 
@@ -1244,6 +1245,16 @@ commands honored must install the resources directory root-owned.
 On the managed path the app treats a `checkCommand` that exits 0 and prints a
 version as an available update. With the app's update switch on, it then runs
 `updateCommand` on the next quit.
+
+`quitCommand` is for upkeep that must not happen while the app is running, such
+as switching a launch path the running app still resolves its own files
+through. It runs only on the managed lane (a marker with `updateCommand`), on
+Electron's `will-quit`, so a cancelled quit never runs it and a quit that
+applies an update (which ends with `app.exit`) does not either. It starts
+detached and the app does not wait for it; it receives the quitting app's pid
+as `KIROCREW_QUITTING_PID` so it can wait for the exit itself. It runs under
+the same constructed environment as the other commands. It does not run when
+the app crashes.
 
 **A package manager's own update pause holds only if the check command honours
 it**: on this managed lane while the app's update switch is on, and on the
@@ -1275,7 +1286,7 @@ KIROCREW_MANAGED_INSTALL_MARKER=/path/to/marker.json bash packaging/build-deskto
 ```
 
 `build-desktop.sh` validates the file (a JSON object of string fields
-`managedBy` / `updateCommand` / `checkCommand`, under 8 KiB, with an
+`managedBy` / `updateCommand` / `checkCommand` / `quitCommand`, under 8 KiB, with an
 `updateCommand` — a marker that disables updates while offering none fails the
 build rather than shipping silently) and copies it to
 `website/electron/EXTERNALLY-MANAGED`, which electron-builder packs **into

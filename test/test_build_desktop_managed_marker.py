@@ -98,6 +98,7 @@ VALID = {
     "managedBy": "Builder Toolbox",
     "updateCommand": "/opt/toolbox/bin/toolbox update kirocrew",
     "checkCommand": "/opt/toolbox/bin/kirocrew-update-check",
+    "quitCommand": "/opt/toolbox/bin/kirocrew-desktop --after-quit",
 }
 
 
@@ -150,6 +151,7 @@ def test_empty_value_means_unset(tmp_path: Path) -> None:
         (json.dumps({**VALID, "checkCommand": " /usr/bin/x"}), "leading/trailing whitespace"),
         (json.dumps({**VALID, "updateCommand": "/usr/bin/" + "x" * 513}), "caps at 512"),
         (json.dumps({**VALID, "managedBy": "m" * 129}), "caps at 128"),
+        (json.dumps({**VALID, "quitCommand": "/usr/bin/" + "x" * 513}), "caps at 512"),
     ],
     ids=[
         "not-json",
@@ -162,6 +164,7 @@ def test_empty_value_means_unset(tmp_path: Path) -> None:
         "padded-command",
         "command-over-512",
         "managedBy-over-128",
+        "quitCommand-over-512",
     ],
 )
 def test_malformed_marker_fails_the_build(tmp_path: Path, body: str, reason: str) -> None:
@@ -217,7 +220,7 @@ def test_step_caps_match_the_readers_constants() -> None:
 
     step = SCRIPT.read_text(encoding="utf-8")
     m = re.search(
-        r"const caps = \{ managedBy: (\d+), updateCommand: (\d+), checkCommand: (\d+) \};",
+        r"const caps = \{ managedBy: (\d+), updateCommand: (\d+), checkCommand: (\d+), quitCommand: (\d+) \};",
         step,
     )
     assert m, "step 3b caps literal not found"
@@ -225,6 +228,7 @@ def test_step_caps_match_the_readers_constants() -> None:
         const("MANAGED_BY_MAX_CHARS"),
         const("UPDATE_COMMAND_MAX_CHARS"),
         const("CHECK_COMMAND_MAX_CHARS"),
+        const("QUIT_COMMAND_MAX_CHARS"),
     )
     m = re.search(r"buf\.length > (\d+)", step)
     assert m and int(m.group(1)) == const("EXTERNALLY_MANAGED_MAX_BYTES")
