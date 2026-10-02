@@ -59,13 +59,13 @@ describe('SessionActionsMenu Duplicate item', () => {
   it('renders Duplicate when the row passes a handler, and selecting it calls the handler', async () => {
     const onDuplicate = vi.fn()
     renderMenu(onDuplicate)
-    fireEvent.click(await screen.findByText('Duplicate'))
+    fireEvent.click(await screen.findByText('Fork chat'))
     expect(onDuplicate).toHaveBeenCalledTimes(1)
   })
 
   it('renders no Duplicate item when no handler is passed', async () => {
     renderMenu()
     expect(await screen.findByText('Pin')).toBeTruthy()
-    expect(screen.queryByText('Duplicate')).toBeNull()
+    expect(screen.queryByText('Fork chat')).toBeNull()
   })
 })
