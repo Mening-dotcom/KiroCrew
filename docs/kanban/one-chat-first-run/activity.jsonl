@@ -502,3 +502,4 @@
 {"timestamp":"2026-10-02T17:41:02.870658178Z","action":"release","task_id":131,"detail":"UX.3 After privacy: get started with tips, or a more detailed setup"}
 {"timestamp":"2026-10-02T17:41:02.914414477Z","action":"edit","task_id":138,"detail":"Q19: Modals or in-chat cards for the pre-chat steps"}
 {"timestamp":"2026-10-02T17:41:02.948527699Z","action":"move","task_id":138,"detail":"todo -\u003e done"}
+{"timestamp":"2026-10-02T18:20:34.631573708Z","action":"create","task_id":140,"detail":"PN.27 The connect card on a harness other than Kiro"}
