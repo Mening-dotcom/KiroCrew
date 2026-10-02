@@ -67,8 +67,6 @@ surface:
   also moved the layout.
 - The sessions sidebar floats as a rounded card with a visible gap below its
   "Older Sessions" footer, not docked into the frame.
-- The top bar's readout capsule and Request-a-Feature pill carry raised
-  liquid-glass, which reads as floating cards on what should be a flat chrome bar.
 
 ## Decision
 
@@ -84,8 +82,9 @@ Adopt the chrome shell as the desktop default:
    and a nav click (or a Web-Preview teardown) never widens it.
 4. **The sessions sidebar docks flush** inside the surface: square resting
    corners, no bottom gap, keeping its right-edge divider.
-5. **The flat top bar's glass pills are flattened** onto the chrome (readout
-   capsule and Request-a-Feature); the search trigger is unchanged.
+5. **The top bar's glass pills keep their liquid-glass.** The readout capsule
+   and Request-a-Feature pill wear the same Liquid Glass as the search trigger,
+   so the three top-bar pills read as one consistent set on the chrome bar.
 
 The product-shape part that needs a recorded decision is **3** — it removes a
 user-facing capability (expanding the desktop rail). The rail's expand/collapse
@@ -131,7 +130,10 @@ The desktop nav rail is fixed to the collapsed icon rail for every user (expand
 stays mobile-only), the brand toggle is replaced by the crew identity switcher,
 the installed theme's rail logo gives way to the favicon, and Report-a-problem
 leaves the rail (kept at Settings › About › Support and the top-bar feedback
-pill). This document records the decision so the First Principles review lane can
+pill). The top bar's readout capsule and Request-a-Feature pill keep their
+Liquid Glass (decision 5) — reversing an earlier development iteration that
+flattened them — so all three top-bar pills wear one material. This document
+records the decision so the First Principles review lane can
 read it off the base branch. The implementation is
 [#16052](https://github.com/kirodotdev/KiroCrew/pull/16052).
 
