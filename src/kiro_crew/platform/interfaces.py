@@ -89,6 +89,17 @@ class ProviderRegistry(Protocol):
         """
         ...
 
+    def agent_runtime_policy(self, engine_identity: str) -> dict[str, Any] | None:
+        """Return advisory catalog metadata, or None in the public edition.
+
+        The key is the agent the member RUNS: its ``kiro_agent`` through
+        ``config.loader.dispatch_kiro_agent``, so a row that recorded an agent's
+        file name keys on the name that file declares, falling back to its
+        roster alias when the binding is empty. Only owner-visible member rows
+        request this metadata.
+        """
+        ...
+
     def register_acp_backends(self) -> None:
         """Register any extra ACP backends (no-op in the public edition).
 
