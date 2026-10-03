@@ -1368,10 +1368,10 @@ def redact_exfiltration_urls_with_records(
     the live platform read (``_exfil_exempt_hosts``) and the scoped override
     (``scoped_exempt_hosts``) this call would otherwise take itself. A caller
     that keys a cache on the host set passes the set it keyed on, so the stored
-    entry was computed under exactly that set; the platform read can move
-    between two reads (a companion loads, a policy tightens, one read fails and
-    degrades to the empty set), and two independent reads stored one set's output
-    under another set's key (#13482). ``None``, the default, is the live read.
+    entry is computed under exactly that set; the platform read can move between
+    two reads (a companion loads, a policy tightens, one read fails and degrades
+    to the empty set), and two independent reads would store one set's output
+    under another set's key. ``None``, the default, is the live read.
     ``extra_exempt_hosts`` joins either way.
 
     Returns ``(cleaned_text, warnings, records)``. The redaction and the records

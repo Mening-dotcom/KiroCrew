@@ -1,13 +1,13 @@
-"""The display-redaction cache keys an entry on the host set the battery judged under.
+"""The display-redaction cache keys an entry on the host set the battery judges under.
 
 ``_redact_for_display`` memoizes the exfiltration + credential battery, keyed on
 the text and the exempt-host set. The set is read from the active
 ``PlatformContext`` and can move between two reads: a companion loads, a policy
 tightens, or one read fails and degrades to the empty set. Reading it once for
-the key and again inside the battery stored output computed under one set under
-another set's key (#13482). These tests pin the fix: ONE snapshot, taken through
-``_exfil_exempt_hosts`` (the accessor the battery itself reads), feeds both the
-key and the battery, and the battery performs no live read of its own.
+the key and again inside the battery would store output computed under one set
+under another set's key. These tests pin the contract: ONE snapshot, taken
+through ``_exfil_exempt_hosts`` (the accessor the battery itself reads), feeds
+both the key and the battery, and the battery performs no live read of its own.
 """
 
 from __future__ import annotations

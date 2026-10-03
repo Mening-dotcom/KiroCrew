@@ -154,13 +154,13 @@ def _url_payload_command(n: int) -> str:
 #: there is pending, and the ssh self-target refusal note says so.
 #:
 #: Re-pinned from 28,399 for the host-set snapshot on
-#: ``exfil.redact_exfiltration_urls_with_records`` and its two-tuple wrapper
-#: (#13482): one optional ``exempt_hosts`` keyword that REPLACES the live platform
-#: read and the scoped override when a caller supplies the set it keyed a cache
-#: on, so the display cache stores output computed under exactly the set its key
-#: names. Seventeen lines: the keyword on both signatures, a two-branch read, and
-#: the docstrings saying why. No rule widened or narrowed; the default path is the
-#: live read as before.
+#: ``exfil.redact_exfiltration_urls_with_records`` and its two-tuple wrapper:
+#: one optional ``exempt_hosts`` keyword that REPLACES the live platform read and
+#: the scoped override when a caller supplies the set it keyed a cache on, so the
+#: display cache stores output computed under exactly the set its key names.
+#: Seventeen lines: the keyword on both signatures, a two-branch read, and the
+#: docstrings saying why. No rule widened or narrowed; the default path is the
+#: live read.
 #:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line

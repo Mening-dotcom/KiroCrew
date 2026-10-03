@@ -2297,8 +2297,8 @@ def _redact_meta_for_role(role: str, meta: dict) -> dict:
 # battery. Two independent reads -- one for the key, one inside the battery --
 # can see different sets: the platform read can move between them, and it
 # degrades every failure to the empty set, so a transient failure on the
-# battery's read alone stored maximally-redacted output under the full set's
-# key, and every later hit served it until eviction (#13482).
+# battery's read alone would store maximally-redacted output under the full
+# set's key, and every later hit would serve it until eviction.
 #
 # The entry cap counts individual STRINGS, and a rendered row costs several --
 # ``_prepare_messages`` redacts the content plus every meta string (a row's
@@ -2331,23 +2331,23 @@ _display_redaction_cache_lock = RLock()
 
 
 def _display_redaction_cache_key(
-    text: str, hosts: frozenset[str]
+    text: str, exempt_hosts: frozenset[str]
 ) -> tuple[_DisplayRedactionKey, int]:
     """Digest the exact string entering the battery together with the exempt-host set it judges under.
 
-    ``hosts`` is the caller's one snapshot of that set -- the same object it hands
-    the battery -- so the key names the set the stored output was computed under;
-    this function reads no host set of its own. The key is fixed-size: a 32-byte
-    digest and the input byte length. The host set is sorted and folded into the
-    MAC input behind a NUL separator (a host never contains NUL), so a changed set
-    yields a different key while no per-entry container is retained. The length
-    component constrains a digest collision. The digest is an HMAC under the
-    per-process ``_DISPLAY_REDACTION_SALT``: one hash per lookup, so the cache
-    stays cheaper than the battery it fronts.
+    ``exempt_hosts`` is the caller's one snapshot of that set -- the same object it
+    hands the battery -- so the key names the set the stored output is computed
+    under; this function reads no host set of its own. The key is fixed-size: a
+    32-byte digest and the input byte length. The host set is sorted and folded
+    into the MAC input behind a NUL separator (a host never contains NUL), so a
+    changed set yields a different key while no per-entry container is retained.
+    The length component constrains a digest collision. The digest is an HMAC
+    under the per-process ``_DISPLAY_REDACTION_SALT``: one hash per lookup, so the
+    cache stays cheaper than the battery it fronts.
     """
     raw = text.encode("utf-8", errors="surrogatepass")
-    joined = "\0".join(sorted(hosts)).encode("utf-8", errors="surrogatepass")
-    digest = hmac.new(_DISPLAY_REDACTION_SALT, raw + b"\0" + joined, hashlib.sha256).digest()
+    hosts = "\0".join(sorted(exempt_hosts)).encode("utf-8", errors="surrogatepass")
+    digest = hmac.new(_DISPLAY_REDACTION_SALT, raw + b"\0" + hosts, hashlib.sha256).digest()
     return (digest, len(raw)), len(raw)
 
 
@@ -2372,8 +2372,8 @@ def _redact_for_display(text: str) -> str:
     accessor the battery itself reads, joined with the scoped override in effect
     -- and that one snapshot is both folded into the key and handed to the
     battery. A second read inside the battery could see a different set (the
-    platform read moves mid-process and degrades every failure to the empty set),
-    which stored one set's output under another set's key (#13482).
+    platform read moves mid-process and degrades every failure to the empty set)
+    and would store one set's output under another set's key.
     """
     global _display_redaction_cache_bytes
     hosts = _exfil_exempt_hosts() | current_scoped_exempt_hosts()
