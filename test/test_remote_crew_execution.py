@@ -2799,10 +2799,18 @@ class TestRemotePicksAreSerialised:
 # ── One authorization chokepoint for every peer-directed operation ─────────────
 
 
-#: The three functions in this diff that actually reach the bound peer. Anything
-#: that can call one of them can spend the owner's tunnel credential on the
-#: owner's connected machine, so each needs an owner identity behind it.
-_PEER_SINKS = frozenset({"relay_remote_turn", "forward_peer_stop", "forward_peer_selection"})
+#: The functions that actually reach the bound peer. Anything that can call one
+#: of them can spend the owner's tunnel credential on the owner's connected
+#: machine, so each needs an owner identity behind it.
+_PEER_SINKS = frozenset(
+    {
+        "relay_remote_turn",
+        "forward_peer_stop",
+        "forward_peer_selection",
+        "forward_peer_approval",
+        "forward_peer_mode",
+    }
+)
 
 _OWNER_GATE = "deny_non_owner_remote_operation"
 

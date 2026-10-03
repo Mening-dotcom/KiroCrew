@@ -126,6 +126,24 @@ describe('ChatInput approval flow', () => {
     expect(items.some(x => x.startsWith('Reject all'))).toBe(true)
   })
 
+  it('Allow once on a remote-bound chat names the row it showed', async () => {
+    // The peer decides it; a bare id could reach a later request reusing it.
+    const base = stateWithApproval()
+    const row = (base.chat as unknown as { messages: { meta?: Record<string, unknown> }[] }).messages[1]
+    row.meta = { ...row.meta, mid: 'mid-1' }
+    const dashboard = base.dashboard as unknown as { slots: Record<string, unknown>[] }
+    dashboard.slots[0] = { ...dashboard.slots[0], executor: 'remote' }
+    const store = createTestStore(base)
+    renderWithProviders(<ChatInput {...defaultProps} />, { store })
+    fireEvent.click(screen.getByText('Allow once'))
+    await waitFor(() => {
+      expect(api.approveChatSlot).toHaveBeenCalledWith(
+        'slot-1', 'approved', { request_id: 'ap-123', request_mid: 'mid-1', origin: 'native' },
+      )
+    })
+    expect(api.resolveApproval).not.toHaveBeenCalled()
+  })
+
   it('Allow once calls resolveApproval with approve', async () => {
     const store = createTestStore(stateWithApproval())
     renderWithProviders(<ChatInput {...defaultProps} />, { store })

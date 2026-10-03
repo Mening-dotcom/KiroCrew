@@ -156,12 +156,15 @@ from kiro_crew.dashboard.remote_relay import (
     RemoteTurnError,
     create_peer_slot,
     ensure_version_parity,
+    forward_peer_approval,
+    forward_peer_mode,
     forward_peer_selection,
     forward_peer_stop,
     peer_is_connected,
     redact_peer_text,
     relay_remote_turn,
     remote_bound_refusal,
+    settle_relayed_approval,
 )
 from kiro_crew.dashboard.request_priority import owner_start_priority
 from kiro_crew.dashboard.slot_buffers import (
@@ -14217,6 +14220,14 @@ async def api_chat_mode(request: web.Request) -> web.Response:
                 status=404,
             )
 
+    # ``yolo`` skipped the slot lookup above because it is global HERE; for a
+    # remote-bound slot it is still that slot's peer that has to arm it.
+    bound = slot
+    if mode == "yolo" and isinstance(raw_slot, str) and raw_slot:
+        bound = state._slots.get(raw_slot)
+    if bound is not None and bound.executor == "remote":
+        return await _apply_remote_mode(request, state, bound, mode, audit_caller("dashboard:mode"))
+
     # The safety override (YOLO) is PROCESS-GLOBAL while an approval mode is
     # per-slot, so revoking it on behalf of a request that named ONE slot drops
     # every OTHER slot out of YOLO too. That is how a programmatic per-slot
@@ -14292,6 +14303,9 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         else:
             await _end_trust_scopes(list(state._slots.values()), audit_caller)
             for s in state._slots.values():
+                if s.executor == "remote":
+                    # Its mode lives on its peer, which this change never reaches.
+                    continue
                 s._trust = False
                 s._trust_reads = True
                 s._trust_scope = ""
@@ -14324,6 +14338,9 @@ async def api_chat_mode(request: web.Request) -> web.Response:
                 mgr._channels[linked_ch]._save()
         else:
             for s in state._slots.values():
+                if s.executor == "remote":
+                    # Its mode lives on its peer, which this change never reaches.
+                    continue
                 s._trust = True
                 state.sessions.set_approval_policy(effective_session_key(s), "auto")
             if mgr:
@@ -14415,6 +14432,11 @@ async def api_chat_mode(request: web.Request) -> web.Response:
         for _slot in state._slots.values():
             if scoped and effective_session_key(_slot) != _target_key:
                 continue
+            # A remote-bound slot's pending approvals wait on its PEER, which this
+            # mode change never reached; settling them here would hide cards the
+            # peer is still waiting on. See ``_apply_remote_mode``.
+            if _slot.executor == "remote":
+                continue
             for aid, fut in list(_slot._approval_futures.items()):
                 if not fut.done():
                     fut.set_result("approved")
@@ -14495,6 +14517,143 @@ async def api_chat_mode(request: web.Request) -> web.Response:
 
     state.push_slots_update()
     return web.json_response({"ok": True, "mode": mode})
+
+
+def _remote_binding_incomplete() -> web.Response:
+    return web.json_response(
+        {"error": "this session's crew binding is incomplete", "code": "remote_binding_incomplete"},
+        status=409,
+    )
+
+
+async def _apply_remote_mode(
+    request: web.Request, state: DashboardState, slot: _ChatSlot, mode: str, caller: str
+) -> web.Response:
+    """Apply an approval-mode change for a remote-bound session on its peer.
+
+    The peer runs this session's tools, so its mode is the only one that can
+    approve them. The peer applies the change under its own governance policy,
+    and this side writes no mode state at all: it cannot verify the peer's
+    resulting mode (a slot-scoped Trust leaves the peer's YOLO armed, and a
+    grant can expire there), so the picker shows the interactive floor rather
+    than claim a looser mode than it can prove. This gateway's process-wide
+    YOLO override is left alone in both directions: arming it would
+    auto-approve every LOCAL session for a pick made in a peer's chat, and a
+    ``normal`` here must not end it.
+    """
+    if not slot.is_remote:
+        return _remote_binding_incomplete()
+    denied = deny_non_owner_remote_operation(request, slot, "chat_mode")
+    if denied is not None:
+        return denied
+    try:
+        await forward_peer_mode(state, slot, mode)
+    except RemoteTurnError as exc:
+        return web.json_response(
+            {"ok": False, "error": str(exc), "code": "remote_mode_failed"}, status=502
+        )
+    state.push_slots_update()
+    try:
+        sel().log_api_access(
+            caller=caller,
+            operation=f"mode_change:{mode}",
+            outcome="forwarded",
+            resources=slot.key,
+        )
+    except Exception:
+        logger.warning("SEL audit failed for remote mode change", exc_info=True)
+    return web.json_response({"ok": True, "mode": mode})
+
+
+async def _approve_on_peer(
+    request: web.Request,
+    state: DashboardState,
+    slot: _ChatSlot,
+    body: dict[str, Any],
+    request_id: Any,
+    caller: str,
+) -> web.Response:
+    """Answer a relayed peer approval by forwarding the decision to the peer.
+
+    The peer validates the action against its own permission row and policy
+    (trust grants, ``yolo``) and applies it; this side changes nothing until the
+    peer accepts, and then only retires its placeholder card. No trust flag,
+    pattern or YOLO grant is written here: none of them could approve a tool
+    that runs on the peer. A refusal leaves the card pending, so it can be
+    retried; a lost reply is reconciled by the peer's ``approval_resolved``
+    frame on the relayed stream.
+    """
+    if not slot.is_remote:
+        return _remote_binding_incomplete()
+    denied = deny_non_owner_remote_operation(request, slot, "chat_slot_approve")
+    if denied is not None:
+        return denied
+    if not request_id:
+        pending = [k for k, f in slot._approval_futures.items() if not f.done()]
+        if len(pending) > 1:
+            return web.json_response(
+                {
+                    "error": "multiple approvals pending, specify request_id",
+                    "code": "approval_target_ambiguous",
+                    "pending": pending,
+                },
+                status=400,
+            )
+        request_id = pending[0] if pending else ""
+    future = slot._approval_futures.get(request_id) if isinstance(request_id, str) else None
+    local_mid = slot.approval_instance(request_id) if future is not None else None
+    row = next((m for m in slot.messages if local_mid and row_mid(m) == local_mid), None)
+    peer_mid = (parse_cls_meta(row.get("cls") or "") or {}).get("peer_request_mid") if row else None
+    if future is None or future.done() or not isinstance(peer_mid, str) or not peer_mid:
+        return web.json_response(
+            {"error": "no pending approval", "code": "approval_not_pending"}, status=404
+        )
+    action = body.get("action", "rejected")
+    peer_body: dict[str, Any] = {"action": action, "request_id": request_id}
+    if action in ("approved", "rejected", "rejected_once"):
+        # The peer's native check binds a one-shot decision to the row this
+        # card showed, so a request reusing the id is never decided by it.
+        peer_body.update(origin="native", request_mid=peer_mid)
+    if isinstance(body.get("pattern"), str):
+        peer_body["pattern"] = body["pattern"]
+    try:
+        await forward_peer_approval(state, slot, peer_body)
+    except RemoteTurnError as exc:
+        return web.json_response({"error": str(exc), "code": "remote_approval_failed"}, status=502)
+    if action in ("approved", "trust", "trust_command", "trust_base", "yolo"):
+        resolved = "approved"
+    elif action == "trust_reads":
+        resolved = "approved_trust_reads"
+    elif action == "rejected_once":
+        resolved = "rejected_once"
+    else:
+        resolved = "rejected"
+    settle_relayed_approval(
+        state,
+        slot,
+        request_id,
+        action if action in ("trust", "trust_reads") else resolved,
+        future=future,
+        row=row,
+    )
+    state.broadcast_ws(
+        "approval_resolved",
+        {
+            "id": request_id,
+            "approved": resolved in ("approved", "approved_trust_reads"),
+            "slot": slot.key,
+        },
+    )
+    try:
+        sel().log_api_access(
+            caller=caller,
+            operation=f"tool_approval:{action}",
+            outcome=f"forwarded:{resolved}",
+            resources=request_id,
+        )
+    except Exception:
+        logger.warning("SEL audit failed for approval %s", request_id, exc_info=True)
+    return web.json_response({"ok": True})
 
 
 def _get_pattern_from_pending(slot: _ChatSlot, request_id: str, field: str) -> str:
@@ -14625,6 +14784,9 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
             return web.json_response(
                 {"error": "no pending approval", "code": "approval_not_pending"}, status=404
             )
+    if slot.executor == "remote":
+        # The tool waiting on this decision runs on the peer; see ``_approve_on_peer``.
+        return await _approve_on_peer(request, state, slot, body, request_id, audit_caller())
     # Locate the slot that OWNS the pending approval future. It is usually the
     # addressed slot, but under session-sharing or a rehydrated/replaced slot the
     # future can live on a different slot object under a different key. All

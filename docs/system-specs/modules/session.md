@@ -132,6 +132,27 @@ path reads the field. Every control in `remote_relay._PEER_CONTROL_SEGMENTS` is
 classified in `remote_adopt.ADOPT_SEEDED_CONTROLS` / `ADOPT_UNSEEDED_CONTROLS`,
 and a structural test fails for a new forwardable control until it is placed.
 
+Tool approvals and the approval mode of a remote-bound slot belong to the peer,
+because the peer runs its tools. The relay gives each pending peer `permission`
+row that names the peer row's own instance (`request_mid`) a local placeholder
+future, so the card is projected and answerable here; a row without it stays a
+plain transcript line.
+`api_chat_slot_approve` forwards the decision through
+`remote_relay.forward_peer_approval()` and retires the placeholder only after the
+peer accepts; the peer's own `approval_resolved` frame, or the end of the relayed
+turn, retires it otherwise. A slot-scoped `POST /api/chat/mode`, `yolo` included,
+is applied on the peer through `forward_peer_mode()` and writes no mode state
+here: this gateway's process-wide YOLO override is never armed or ended for it.
+A remote `yolo` arms the PEER's process-wide override, as picking YOLO on the
+peer's own dashboard does, so every session on that peer is auto-approved until
+it expires. Only this gateway's dashboard owner can send it
+(`deny_non_owner_remote_operation`), over the owner's own instance tunnel, and
+the peer's `approval_modes` policy decides whether YOLO may arm at all. This gateway cannot verify the peer's resulting mode, so a
+remote-bound slot's picker shows the interactive floor rather than a looser mode
+it cannot prove. Resolvers that never reach the peer
+(`ApprovalCoordinator.resolve`, the all-sessions trust sweep) skip remote-bound
+slots.
+
 Cross-boundary calls that were observable on `SessionManager` route back through
 the facade, and patchable module dependencies are resolved through injected
 call-time functions. Persistence remains owned by the existing `SessionMap`

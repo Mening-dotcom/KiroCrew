@@ -65,6 +65,7 @@ from kiro_crew.apps.version import versions_compatible
 from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
 from kiro_crew.dashboard.chat_utils import _redact_deep, chunk_generation
 from kiro_crew.dashboard.remote_mirror import MIRROR_CLS_PREFIX
+from kiro_crew.dashboard.state import _mark_permission_resolved
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -323,6 +324,15 @@ def _replay_mirrored_frame(
         # transcript row, so the user sees that the crew reset ITS context — what
         # they keep is their own record of the conversation.
         return
+    if event == "approval_resolved":
+        # The peer decided (its own dashboard, its timeout, a trust sweep), so
+        # the card here must stop offering a decision the peer is not awaiting.
+        approval_id = data.get("id")
+        if isinstance(approval_id, str) and approval_id:
+            decision = data.get("decision")
+            if decision not in ("approved", "rejected", "rejected_once"):
+                decision = "approved" if data.get("approved") is True else "rejected"
+            settle_relayed_approval(state, slot, approval_id, decision, only_if_pending=True)
     state.broadcast_ws(event, data)
 
 
@@ -375,6 +385,8 @@ def _apply_row(
     # text would have.
     cls = _redact_relayed(cls) if isinstance(cls, str) else ""
     meta = row.get("meta")
+    if role == "permission":
+        cls = _with_peer_request_mid(cls, row.get("request_mid"))
     if isinstance(meta, dict):
         meta = _redact_deep(meta)
         # Keep the durable tool correlation (tool name, input, output, call id)
@@ -434,7 +446,9 @@ def _apply_row(
     # appended row from the queue exactly as it would for a local turn.
     if role == "assistant":
         _finalize_streamed_segment(slot)
-    slot.append(role, content, cls, meta=meta)
+    appended = slot.append(role, content, cls, meta=meta)
+    if role == "permission":
+        _register_relayed_permission(state, slot, appended)
 
 
 async def _require_manager(state: "DashboardState") -> Any:
@@ -639,13 +653,24 @@ async def forward_peer_selection(
     segment = _PEER_CONTROL_SEGMENTS.get(control)
     if segment is None:
         raise ValueError(f"not a forwardable peer control: {control!r}")
+    return await _post_to_peer(
+        state, slot, f"api/chat/slots/{slot.remote_slot}/{segment}", body, control
+    )
+
+
+async def _post_to_peer(
+    state: "DashboardState", slot: "_ChatSlot", path: str, body: dict[str, Any], label: str
+) -> dict[str, Any]:
+    """POST one control request to *slot*'s peer, with the reply contract of
+    :func:`forward_peer_selection`: the decoded success body, or a
+    ``RemoteTurnError`` carrying the peer's own refusal."""
     mgr = await _require_manager(state)
     await ensure_version_parity(mgr, slot.instance_id)
     try:
         async with mgr.proxy_request(
             slot.instance_id,
             "POST",
-            f"api/chat/slots/{slot.remote_slot}/{segment}",
+            path,
             data=json.dumps(body).encode(),
             content_type="application/json",
         ) as upstream:
@@ -655,8 +680,8 @@ async def forward_peer_selection(
         raise
     except Exception as e:
         logger.info(
-            "Peer %s pick for slot %s on %s failed (%s)",
-            control,
+            "Peer %s request for slot %s on %s failed (%s)",
+            label,
             slot.key,
             slot.instance_id,
             type(e).__name__,
@@ -694,6 +719,140 @@ async def forward_peer_selection(
             # RemoteTurnError and lands in an error row the user reads.
             detail = _redact_relayed(payload["error"])[:200]
     raise RemoteTurnError(detail or f"The crew refused the change (HTTP {status}).")
+
+
+async def forward_peer_approval(
+    state: "DashboardState", slot: "_ChatSlot", body: dict[str, Any]
+) -> None:
+    """Send one approval decision to the peer slot whose tool is waiting on it.
+
+    The peer checks and applies it exactly as if its own dashboard had sent it:
+    a trust grant is validated against ITS permission row and a ``yolo`` is
+    governed by ITS approval policy, so nothing on this side is widened.
+    """
+    await _post_to_peer(state, slot, f"api/chat/slots/{slot.remote_slot}/approve", body, "approval")
+
+
+async def forward_peer_mode(state: "DashboardState", slot: "_ChatSlot", mode: str) -> None:
+    """Apply an approval-mode change on the peer that runs *slot*'s tools.
+
+    Scoped to the peer's own slot, so the peer applies it under its own
+    governance policy. ``yolo`` arms the PEER's process-wide override, exactly
+    as picking YOLO on the peer's own dashboard does: every session on that
+    peer is auto-approved until it expires or a mode change ends it.
+    """
+    await _post_to_peer(
+        state, slot, "api/chat/mode", {"mode": mode, "slot": slot.remote_slot}, "mode"
+    )
+
+
+def _with_peer_request_mid(cls: str, peer_mid: Any) -> str:
+    """*cls* with the peer row's ``request_mid`` recorded as ``peer_request_mid``.
+
+    The peer binds a one-shot decision to that exact row (its ``request_mid``
+    check), so a forwarded decision can never land on a later request that
+    reuses the same connection-scoped id.
+    """
+    if not isinstance(peer_mid, str) or not peer_mid:
+        return cls
+    try:
+        data = json.loads(cls)
+    except ValueError:
+        return cls
+    if not isinstance(data, dict):
+        return cls
+    data["peer_request_mid"] = peer_mid
+    return json.dumps(data)
+
+
+def _register_relayed_permission(
+    state: "DashboardState", slot: "_ChatSlot", row: dict[str, Any]
+) -> None:
+    """Make a peer's pending permission row answerable on this gateway.
+
+    The approval card is projected from ``slot._approval_futures``, so the row
+    alone renders nothing. A remote-bound slot runs no local turn, so nothing
+    awaits this future: it is a placeholder that marks the request as pending
+    here. It is settled by the forwarded decision (``api_chat_slot_approve``),
+    by the peer's own ``approval_resolved`` frame, or when the relayed turn ends.
+    """
+    try:
+        meta = json.loads(row.get("cls") or "")
+    except ValueError:
+        return
+    if not isinstance(meta, dict) or meta.get("resolved"):
+        return
+    # Without the peer row's instance a decision cannot be bound to it, so the
+    # row stays a plain transcript line rather than a card that cannot answer.
+    if not meta.get("peer_request_mid"):
+        return
+    request_id = meta.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return
+    previous = slot._approval_futures.get(request_id)
+    if previous is not None and not previous.done():
+        previous.cancel()
+    slot.register_approval(request_id, asyncio.get_running_loop().create_future(), row)
+    state.push_slots_update()
+
+
+def settle_relayed_approval(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    request_id: str,
+    decision: str,
+    *,
+    only_if_pending: bool = False,
+    future: "asyncio.Future[str] | None" = None,
+    row: dict[str, Any] | None = None,
+) -> None:
+    """Retire the placeholder for a peer approval and record *decision* on its row.
+
+    Idempotent: the forwarded decision and the peer's ``approval_resolved``
+    frame both arrive for one click, in either order. *only_if_pending* keeps a
+    richer decision already recorded (``trust``) from being flattened. *future*
+    and *row* pin one request instance, so a later request reusing the id is
+    left pending.
+    """
+    current = slot._approval_futures.get(request_id)
+    if future is None or current is future:
+        if current is not None:
+            if not current.done():
+                current.set_result(decision)
+            slot.unregister_approval(request_id, current)
+    if _mark_permission_resolved(
+        slot.messages if row is None else [row],
+        request_id,
+        decision,
+        only_if_pending=only_if_pending,
+    ):
+        slot._dirty = True
+    state.push_slots_update()
+
+
+def _retire_relayed_approvals(
+    state: "DashboardState", slot: "_ChatSlot", *, turn_finished: bool
+) -> None:
+    """The relay is over, so no reader is left to carry a decision's outcome.
+
+    *turn_finished* means the peer sent its terminator: its turn has ended, so
+    no peer tool waits on these cards and each is recorded as rejected, as the
+    peer's own turn end does. Otherwise (truncation, error, cancellation) the
+    peer may still be waiting, so only the placeholder is dropped and the row is
+    left unresolved rather than recording a rejection the peer never received.
+    """
+    for request_id, future in list(slot._approval_futures.items()):
+        if future.done():
+            continue
+        if turn_finished:
+            settle_relayed_approval(state, slot, request_id, "rejected", only_if_pending=True)
+            state.broadcast_ws(
+                "approval_resolved", {"id": request_id, "approved": False, "slot": slot.key}
+            )
+        else:
+            future.cancel()
+            slot.unregister_approval(request_id, future)
+            state.push_slots_update()
 
 
 def _drop_unsent_user_row(slot: "_ChatSlot", message: str) -> None:
@@ -737,15 +896,11 @@ async def relay_remote_turn(
     same shape a failed local turn takes, so the composer unblocks and the
     session stays usable rather than appearing to hang.
 
-    KNOWN GAP — a tool the peer wants approved stalls the turn there. The
-    approval card is rendered from the SLOT PROJECTION (``pending_approval`` /
-    ``approval_id``), not from a streamed frame, so it is built from local slot
-    state that a relayed turn never populates: the card does not appear here, and
-    ``api_chat_slot_approve`` would find no local future to resolve. Closing it
-    needs the peer's pending approval mirrored onto this slot's projection and the
-    decision forwarded back — a second mechanism, deferred with resume-attach
-    rather than half-built. Until then, run peer-bound sessions on a crew whose
-    approval policy does not stop for the tools you expect to use.
+    A tool the peer wants approved becomes an actionable card here. The card is
+    projected from ``slot._approval_futures``, so each pending peer ``permission``
+    row gets a local placeholder future (:func:`_register_relayed_permission`);
+    the decision travels back through :func:`forward_peer_approval`, and the
+    peer's own ``approval_resolved`` frame, or the end of this turn, retires it.
     """
     sequencer = _ChunkSequencer(slot)
     # Mark the turn in-flight and persist that BEFORE any streaming, so a gateway
@@ -777,11 +932,11 @@ async def relay_remote_turn(
     # peer accepted — including when a 2xx response closes before emitting a single
     # byte.
     peer_reached = False
+    saw_terminator = False
     try:
         if chunks is None:
             chunks = _peer_turn_chunks(state, slot, message)
         buffer = bytearray()
-        saw_terminator = False
         async for chunk in chunks:
             peer_reached = True
             for record in iter_sse_records(buffer, chunk):
@@ -848,6 +1003,7 @@ async def relay_remote_turn(
         # above propagates — the turn is not finished, so the composer must not be
         # unblocked and a reload must still recover the interruption. A terminal
         # outcome (success / truncation / error) takes the branch below.
+        _retire_relayed_approvals(state, slot, turn_finished=saw_terminator)
         if not cancelled:
             # Clear the in-flight marker FIRST, so the save records a turn that
             # finished: whether it completed, truncated or errored, the tail is now

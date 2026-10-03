@@ -404,6 +404,15 @@ def _build_stream_chunk(msg: dict, *, include_row_meta: bool = False) -> str:
         cls_val, _ = redact_credentials(cls_val)
     else:
         cls_val = _redact_deep(cls_val)
+    # A relayed permission row names its own instance, so the relay reader can
+    # bind a forwarded decision to exactly this row (the approve route's
+    # ``request_mid`` check). The meta slot above carries the parsed ``cls``
+    # for permission rows, not the row meta that holds the mid.
+    row_meta = msg.get("meta")
+    request_mid = row_meta.get("mid") if isinstance(row_meta, dict) else None
+    relay_mid = (
+        include_row_meta and msg.get("role") == "permission" and isinstance(request_mid, str)
+    )
     return json.dumps(
         {
             "type": msg.get("role", ""),
@@ -411,6 +420,7 @@ def _build_stream_chunk(msg: dict, *, include_row_meta: bool = False) -> str:
             "ts": msg.get("ts", ""),
             "cls": cls_val,
             **({"meta": meta} if meta else {}),
+            **({"request_mid": request_mid} if relay_mid else {}),
         }
     )
 

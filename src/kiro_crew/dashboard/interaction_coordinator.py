@@ -218,6 +218,10 @@ class ApprovalCoordinator:
                 )
             return True
         for slot in state._slots.values():
+            # A remote-bound slot's futures are placeholders for approvals its
+            # PEER waits on; only the slot approve route forwards a decision there.
+            if getattr(slot, "executor", "") == "remote":
+                continue
             future = slot._approval_futures.get(approval_id)
             if future and not future.done():
                 future.set_result(decision)

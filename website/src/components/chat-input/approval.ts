@@ -99,6 +99,11 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
   const activeSlot = slotId
   const approvalMeta = pendingApproval?.meta as Record<string, unknown> | undefined
   const approvalId = approvalMeta?.approval_id as string | undefined
+  // A remote-bound slot's card is decided on its peer, so the click names the
+  // exact row it showed (slot route, native binding): a bare id could reach a
+  // later request reusing it.
+  const approvalMid = typeof approvalMeta?.mid === 'string' ? approvalMeta.mid : ''
+  const slotIsRemote = useAppSelector(s => s.dashboard.slots.find(x => x.key === slotId)?.executor === 'remote')
   const approvalToolInput = (approvalMeta?.tool_input as string) || ''
   const approvalIsReadOnly = !!(approvalMeta?.is_read_only)
   const approvalFullCommand = (approvalMeta?.full_command as string) || ''
@@ -266,10 +271,12 @@ export function useToolApproval({ slotId, slotApprovalChrome, approvalMode, disp
       const extra: Record<string, string> = { request_id: approvalId }
       if (pattern) extra.pattern = pattern
       api.approveChatSlot(activeSlot, decision, extra).then(finish).catch(fail)
+    } else if (slotIsRemote && activeSlot) {
+      api.approveChatSlot(activeSlot, decision, { request_id: approvalId, request_mid: approvalMid, origin: 'native' }).then(finish).catch(fail)
     } else {
       api.resolveApproval(approvalId, toApiDecision(decision)).then(finish).catch(fail)
     }
-  }, [approvalId, activeSlot, approvalIsUnattended, approvalSource, approvalMode, dispatch])
+  }, [approvalId, approvalMid, slotIsRemote, activeSlot, approvalIsUnattended, approvalSource, approvalMode, dispatch])
 
   return {
     pendingApproval, hasApproval, approvalId, approvalSubmitting, approvalPickerSignal, setApprovalPickerSignal,
