@@ -2515,6 +2515,13 @@ off the loop and falling back to today's gate when unreadable:
 Both are served to non-owners too (they name no host state), and a gateway older
 than the fields keeps today's gate.
 
+When the status request itself is refused as an auth denial (403 with
+`X-Auth-Required`, an `ApiError` with `authRequired`), there is no status and so
+no `applies`: the gate renders the app, and the session-expired banner owns the
+recovery. Its "We could not check Kiro CLI." retry screen is for a gateway that
+answered and could not tell, never for a session the gateway refused; drawing it
+there told a crew on Claude Code to install Kiro CLI.
+
 **Kiro Crew performs neither setup step, and there is no code path that could.**
 Both belong to Kiro CLI. Deleted for install: the installer download
 (`https://cli.kiro.dev/install`), its pinned SHA-256 pair, the bash/PowerShell

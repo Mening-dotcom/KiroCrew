@@ -149,6 +149,7 @@
       "reauth_command": "kirocrew token",
       "run_kirocrew_token_then_paste_sign_in_url": "Führe kirocrew token in einem Terminal aus, füge die Anmelde-URL unten ein und drücke die Eingabetaste.",
       "session_expired": "Sitzung abgelaufen.",
+      "sign_in_link_expired": "Dieser Anmeldelink funktioniert nicht mehr. Anmeldelinks laufen wenige Minuten nach ihrer Erstellung ab.",
       "session_expired_sign_in_again": "Die Sitzung ist abgelaufen. Führen Sie kirocrew token in einem Terminal aus und fügen Sie die Anmelde-URL in das Banner oben auf dieser Seite ein, um sich erneut anzumelden.",
       "stale_owner_session": "Diese Sitzung stammt aus der Zeit vor dem konfigurierten Besitzer. Melden Sie sich erneut an.",
       "stale_owner_session_sign_in_again": "Diese Sitzung stammt aus der Zeit vor dem konfigurierten Besitzer (die Anmeldung erfolgte, bevor KIROCREW_OWNER_ID gesetzt wurde). Führen Sie kirocrew token in einem Terminal aus und fügen Sie die Anmelde-URL in das Banner oben auf dieser Seite ein, um sich erneut anzumelden.",

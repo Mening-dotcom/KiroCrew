@@ -148,6 +148,7 @@
       "reauth_command": "kirocrew token",
       "run_kirocrew_token_then_paste_sign_in_url": "ターミナルで kirocrew token を実行し、下にサインイン URL を貼り付けて Enter を押してください。",
       "session_expired": "セッションの有効期限が切れました。",
+      "sign_in_link_expired": "このサインインリンクはもう使えません。サインインリンクは作成から数分で期限切れになります。",
       "session_expired_sign_in_again": "セッションの有効期限が切れました。ターミナルで kirocrew token を実行し、このページ上部のバナーにサインイン URL を貼り付けて再度サインインしてください。",
       "stale_owner_session": "このセッションはオーナー設定前のものです。再度サインインしてください。",
       "stale_owner_session_sign_in_again": "このセッションはオーナー設定前のものです（KIROCREW_OWNER_ID の設定前にサインインされました）。ターミナルで kirocrew token を実行し、このページ上部のバナーにサインイン URL を貼り付けて再度サインインしてください。",

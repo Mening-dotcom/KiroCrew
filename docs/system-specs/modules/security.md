@@ -1923,6 +1923,7 @@ permission-time refusal can reach it. Details: [messaging](messaging.md).
 - `!dashboard` and `/kirocrew dashboard` available to owner and allowed users; link always sent via DM (never in channel)
 - First use: validates `exp` (5-min window), binds IP, marks consumed, sets `mc_token_{port}` cookie with `max_age` from `session_exp`
 - Subsequent requests: validates `session_exp` via cookie
+- A link opened after its 5-minute window is refused on the document load, which then serves the app shell with no cookie (SEL `shell_unauth_invalid_token`, reason `token expired`), so every `/api` call is a 403 `X-Auth-Required`. The dashboard's re-auth banner (`api/client.ts` `showSessionExpiredBanner`) then leads with "This sign-in link no longer works…" rather than "Session expired.": the document was opened with `?token=` and nothing has authenticated in it since. An endpoint answered without a session (`/api/theme/boot`, one of `_BYPASS_EXACT`) proves nothing about that, so the client parses it with `jPublic`, outside the banner's bookkeeping. A later lapse in a document that did authenticate keeps "Session expired."
 - `parse_duration()` caps at 20 hours max (MAX_SESSION_TTL_SECS = 72000)
 - Loopback is not exempt: gated requests require a token in both bind modes; internal CLI/MCP callers authenticate via loopback + the `X-Internal-Secret` local secret
 - `token_auth_middleware(local_only)` — single boolean controls all auth behavior

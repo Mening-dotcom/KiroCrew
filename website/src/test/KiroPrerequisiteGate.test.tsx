@@ -17,11 +17,13 @@ vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {
     status: number
     body: string
+    authRequired: boolean
 
-    constructor(status: number, message: string, body = '') {
+    constructor(status: number, message: string, body = '', authRequired = false) {
       super(message)
       this.status = status
       this.body = body
+      this.authRequired = authRequired
     }
   },
   api: {
@@ -964,6 +966,36 @@ describe('KiroPrerequisiteGate', () => {
     expect(screen.getByText(/Probe failed/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled()
     expect(screen.queryByText('Dashboard loaded')).not.toBeInTheDocument()
+  })
+
+  it('steps aside, with no Kiro CLI screen, when the gateway refuses the session itself', async () => {
+    // A sign-in link past its click window: the status GET is refused with
+    // 403 + X-Auth-Required, so `applies` is unknown (a crew on Claude Code
+    // reaches this too). The session-expired banner owns the recovery; a
+    // fresh browser remembers no completed setup.
+    vi.mocked(api.kiroPrerequisite).mockRejectedValue(
+      new ApiError(403, 'Session expired.', '{"error":"Token required"}', true),
+    )
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+
+    await waitFor(() => expect(api.kiroPrerequisite).toHaveBeenCalled())
+    expect(await screen.findByText('Dashboard loaded')).toBeInTheDocument()
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    expect(screen.queryByText('We could not check Kiro CLI.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Install Kiro CLI/)).not.toBeInTheDocument()
+  })
+
+  it('still offers the retry screen for a 403 that is not an auth denial', async () => {
+    vi.mocked(api.kiroPrerequisite).mockRejectedValue(new ApiError(403, 'Forbidden by policy'))
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+
+    expect(await screen.findByText('We could not check Kiro CLI.')).toBeInTheDocument()
   })
 
   it('shows the probe diagnostic when the backend backstop degrades a probe exception to 200', async () => {

@@ -150,6 +150,7 @@
       "reauth_command": "kirocrew token",
       "run_kirocrew_token_then_paste_sign_in_url": "Lance kirocrew token dans un terminal, colle l’URL de connexion ci-dessous, puis appuie sur Entrée.",
       "session_expired": "Session expirée.",
+      "sign_in_link_expired": "Ce lien de connexion ne fonctionne plus. Les liens de connexion expirent quelques minutes après leur création.",
       "session_expired_sign_in_again": "Session expirée. Exécutez kirocrew token dans un terminal, puis collez l'URL de connexion dans la bannière en haut de cette page pour vous reconnecter.",
       "stale_owner_session": "Cette session est antérieure au propriétaire configuré. Reconnectez-vous.",
       "stale_owner_session_sign_in_again": "Cette session est antérieure au propriétaire configuré (elle a été ouverte avant la définition de KIROCREW_OWNER_ID). Exécutez kirocrew token dans un terminal, puis collez l'URL de connexion dans la bannière en haut de cette page pour vous reconnecter.",

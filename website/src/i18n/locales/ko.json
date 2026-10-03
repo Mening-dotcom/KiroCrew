@@ -148,6 +148,7 @@
       "reauth_command": "kirocrew token",
       "run_kirocrew_token_then_paste_sign_in_url": "터미널에서 kirocrew token 을 실행한 다음 아래에 로그인 URL을 붙여넣고 Enter를 누르세요.",
       "session_expired": "세션이 만료되었습니다.",
+      "sign_in_link_expired": "이 로그인 링크는 더 이상 작동하지 않습니다. 로그인 링크는 만든 지 몇 분 후에 만료됩니다.",
       "session_expired_sign_in_again": "세션이 만료되었습니다. 터미널에서 kirocrew token 을 실행한 뒤 이 페이지 상단 배너에 로그인 URL을 붙여넣어 다시 로그인하세요.",
       "stale_owner_session": "이 세션은 소유자 설정 이전에 만들어졌습니다. 다시 로그인하세요.",
       "stale_owner_session_sign_in_again": "이 세션은 소유자 설정 이전에 만들어졌습니다(KIROCREW_OWNER_ID 설정 전에 로그인됨). 터미널에서 kirocrew token 을 실행한 뒤 이 페이지 상단 배너에 로그인 URL을 붙여넣어 다시 로그인하세요.",

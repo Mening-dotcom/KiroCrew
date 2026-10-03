@@ -1059,6 +1059,18 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
   ) {
     return <>{children}</>
   }
+  // The gateway refused the session, not the check: the status itself is what
+  // was denied, so whether this install even runs kiro-cli (`applies`) is
+  // unknown. Nothing here can help until the user signs in again, and the
+  // session-expired banner owns that; a "We could not check Kiro CLI" screen
+  // would send a crew on another engine to install Kiro CLI.
+  if (
+    !prerequisite
+    && statusQuery.error instanceof ApiError
+    && statusQuery.error.authRequired
+  ) {
+    return <>{children}</>
+  }
   // No usable status: either a live gateway error or an unusable body. Both are
   // "we cannot tell". A RETURNING user keeps their dashboard, fully usable —
   // an unreachable status check is not evidence the CLI is broken, and the turn

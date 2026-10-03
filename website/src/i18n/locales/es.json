@@ -150,6 +150,7 @@
       "reauth_command": "kirocrew token",
       "run_kirocrew_token_then_paste_sign_in_url": "Ejecuta kirocrew token en una terminal, pega abajo la URL de inicio de sesión y pulsa Intro.",
       "session_expired": "La sesión ha caducado.",
+      "sign_in_link_expired": "Este enlace de inicio de sesión ya no funciona. Los enlaces de inicio de sesión caducan pocos minutos después de crearse.",
       "session_expired_sign_in_again": "La sesión ha caducado. Ejecuta kirocrew token en una terminal y pega la URL de inicio de sesión en el banner de la parte superior de esta página para volver a iniciar sesión.",
       "stale_owner_session": "Esta sesión es anterior al propietario configurado. Vuelve a iniciar sesión.",
       "stale_owner_session_sign_in_again": "Esta sesión es anterior al propietario configurado (se inició antes de establecer KIROCREW_OWNER_ID). Ejecuta kirocrew token en una terminal y pega la URL de inicio de sesión en el banner de la parte superior de esta página para volver a iniciar sesión.",

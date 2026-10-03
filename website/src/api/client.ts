@@ -1557,6 +1557,29 @@ let _sessionExpiredShown = false
 let _staleOwnerBanner = false
 
 /**
+ * Whether this document was opened with a sign-in link (`?token=`), read once at
+ * load: the address bar keeps the parameter afterwards, so a later read cannot
+ * tell the link this document arrived with from one it kept.
+ */
+const _openedWithSignInLink = typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('token')
+
+/**
+ * Set by the first response that proves this document's session works (every
+ * caller of `removeAuthBanner` is gated on a 2xx or an accepted exchange). A
+ * document opened with a link that is refused before this is ever set was let
+ * in by no credential at all, which is the link failing, not a session lapsing.
+ */
+let _authenticatedHere = false
+
+/** The banner's lead when no caller names one: what actually stopped working. */
+function defaultAuthLead(): string {
+  return _openedWithSignInLink && !_authenticatedHere
+    ? i18nT('api.client.sign_in_link_expired')
+    : i18nT('api.client.session_expired')
+}
+
+/**
  * Synchronous getter so React components can read the auth-banner state on
  * mount (e.g. when the banner was already injected before the component
  * subscribed to the `mc-auth-required` / `mc-auth-cleared` events).
@@ -1598,6 +1621,7 @@ function _emitAuthEvent(
  * Idempotent: safe to call on every response.
  */
 export function removeAuthBanner(): void {
+  _authenticatedHere = true
   // A 2xx means auth works again — clear the terminal-refresh latch so a later
   // lapse retries silently instead of going straight to the banner.
   _silentRefreshExhausted = false
@@ -1666,6 +1690,7 @@ export function attemptSilentRefresh(): Promise<boolean> {
 
 /** Test-only: reset module auth-recovery state between cases. */
 export function __resetAuthRecoveryStateForTests(): void {
+  _authenticatedHere = false
   _silentRefreshExhausted = false
   _embeddedHandoffPosted = false
   _sessionExpiredShown = false
@@ -1790,7 +1815,7 @@ function showSessionExpiredBanner(lead?: string): void {
     'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b91c1c;color:#fff;' +
     'padding:12px 20px;text-align:center;font:14px/1.5 system-ui;'
   const b = document.createElement('b')
-  b.textContent = lead ?? i18nT('api.client.session_expired')
+  b.textContent = lead ?? defaultAuthLead()
   const input = document.createElement('input')
   input.type = 'text'
   input.placeholder = i18nT('api.client.paste_token_url_or_raw_token')
@@ -2129,6 +2154,20 @@ function sendResponseAuthRecovery(r: Response): Response {
 const j = async (r: Response) => {
   checkSessionExpired(r)
   if (r.ok) removeAuthBanner()
+  if (!r.ok) {
+    const errText = await r.text()
+    throw apiFailure(r, errText)
+  }
+  return r.json()
+}
+
+/**
+ * `j` for an endpoint the gateway answers without a session (the
+ * `token_auth._BYPASS_EXACT` paths). Its 2xx proves nothing about this
+ * document's session, so it neither clears the session-expired banner nor
+ * counts as having authenticated here.
+ */
+const jPublic = async (r: Response) => {
   if (!r.ok) {
     const errText = await r.text()
     throw apiFailure(r, errText)
@@ -5164,7 +5203,7 @@ export const api = {
   deleteTheme: (slug: string) => del('/api/themes/' + encodeURIComponent(slug)).then(j),
   themeDetail: (slug: string) => fetch('/api/themes/' + encodeURIComponent(slug)).then(j),
   // Workspace theme config (server-authoritative)
-  themeBoot: () => fetch('/api/theme/boot').then(j),
+  themeBoot: () => fetch('/api/theme/boot').then(jPublic),
   updateThemeConfig: (body: {
     mode?: string
     color?: string
