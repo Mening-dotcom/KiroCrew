@@ -6893,6 +6893,7 @@ class TestParentEndCancelsItsChildren:
             def __init__(self):
                 self._agents = {info.id: info}
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers = {info.id: watcher}
                 self._followup_watcher_parents = {info.id: parent}
@@ -7226,6 +7227,7 @@ class TestParentEndCancelsItsChildren:
                     "ordinary": _run("ordinary", awaiting=False, started=123.0),
                 }
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers: dict = {}
 
@@ -7296,6 +7298,7 @@ class TestParentEndCancelsItsChildren:
                     "delivered": _run("delivered", done=True, reported=True),
                 }
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers: dict = {}
 
@@ -7490,6 +7493,7 @@ class TestParentEndCancelsItsChildren:
                 self._admission = _Admission()
                 self._agents = {}
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers: dict = {}
 
@@ -7624,6 +7628,7 @@ class TestParentEndCancelsItsChildren:
                 self._admission = _Admission()
                 self._agents = {}
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers: dict = {}
 
@@ -7697,6 +7702,7 @@ class TestParentEndCancelsItsChildren:
                     )
                 }
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers: dict = {}
 
@@ -7768,6 +7774,7 @@ class TestParentEndCancelsItsChildren:
                     )
                 }
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers: dict = {}
 
@@ -8017,6 +8024,7 @@ class TestParentEndCancelsItsChildren:
             def __init__(self):
                 self._agents = {"run-delivered": delivered}
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers = {"run-delivered": watcher}
 
@@ -8080,6 +8088,7 @@ class TestParentEndCancelsItsChildren:
                     )
                 }
                 self._queue = []
+                self._undurable_in_dispatch = {}
                 self._teardown_cancelled_ids = set()
                 self._followup_watchers = {"run-1": watcher}
 

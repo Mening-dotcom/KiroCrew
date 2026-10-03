@@ -363,6 +363,10 @@ class CancellationCoordinator(ManagerComponent):
                     agent_id,
                 )
             break
+        if row is None:
+            # A non-durable row the coroutine pump has popped and is still
+            # dispatching: taking it here is what makes the pump drop it.
+            row = self._manager._undurable_in_dispatch.pop(agent_id, None)
         return row
 
     def _report_queued_stop_impl(self, params: dict) -> None:
@@ -495,7 +499,7 @@ class CancellationCoordinator(ManagerComponent):
         undelivered = [info.id for info in mine if info.done and delivery_is_parked(info)]
         queued = [
             str(params.get("_preassigned_id") or "")
-            for params in self._manager._queue
+            for params in [*self._manager._queue, *self._manager._undurable_in_dispatch.values()]
             if params.get("parent_session_key", "") == parent_session_key
             and not params.get("_resume_id")
         ]
@@ -810,7 +814,10 @@ class CancellationCoordinator(ManagerComponent):
             queued_stopped = self._stop_queued(
                 [
                     str(params.get("_preassigned_id") or "")
-                    for params in self._manager._queue
+                    for params in [
+                        *self._manager._queue,
+                        *self._manager._undurable_in_dispatch.values(),
+                    ]
                     if params.get("parent_session_key", "") == parent_session_key
                     and not params.get("_resume_id")
                 ]
@@ -1009,6 +1016,15 @@ class CancellationCoordinator(ManagerComponent):
                 continue
             dropped_rows.append(self._manager._queue.pop(index))
             by_id.pop(agent_id, None)
+        # A non-durable row of this scope the coroutine pump is dispatching has
+        # no store row to cancel; taking it here keeps the pump from starting it.
+        in_dispatch = self._manager._undurable_in_dispatch
+        for agent_id, params in list(in_dispatch.items()):
+            if self._manager._boundary_scope_matches(
+                params, parent_session_key, boundary_owner
+            ) and (settled or agent_id in by_id):
+                dropped_rows.append(in_dispatch.pop(agent_id))
+                by_id.pop(agent_id, None)
         stopped_rows = [
             *reversed(dropped_rows),
             *(
