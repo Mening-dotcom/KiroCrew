@@ -872,6 +872,44 @@ def _shell_quote_removal(word: str) -> str:
     return "".join(out)
 
 
+def _iter_unquoted_words(
+    text: str, states: list[str | None], escaped: list[bool], base: int
+) -> Iterator[tuple[int, str]]:
+    """Yield ``(offset, word)`` for each word delimited by unquoted whitespace.
+
+    Used exclusively by ``_prefix_reference_with_unknown_value``.
+    """
+    word_start: int | None = None
+    for index, ch in enumerate(text):
+        at = base + index
+        unquoted_space = (
+            ch in _BASH_WORD_BREAKING_WHITESPACE and not escaped[at] and states[at] is None
+        )
+        if unquoted_space:
+            if word_start is not None:
+                yield word_start, text[word_start:index]
+                word_start = None
+        elif word_start is None:
+            word_start = index
+    if word_start is not None:
+        yield word_start, text[word_start:]
+
+
+def _expand_known_references(text: str, env: dict[str, str]) -> str:
+    """Replace every ``$NAME`` / ``${NAME}`` known to *env*, longest name first.
+
+    Longest-first so ``$AB`` is never matched by the rule for ``$A``.
+    A callable replacement avoids re.sub treating backslashes in string
+    replacements as escapes (which would raise re.error on hostile input).
+    """
+    for name in sorted(env, key=len, reverse=True):
+        literal = env[name]
+        repl = lambda _m, v=literal: v  # noqa: E731
+        text = re.sub(r"\$\{" + re.escape(name) + r"\}", repl, text)
+        text = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", repl, text)
+    return text
+
+
 def _substitute_local_assignments(command: str) -> str:
     """Return *command* with any locally-assigned ``$var``/``${var}`` expanded.
 
@@ -885,22 +923,8 @@ def _substitute_local_assignments(command: str) -> str:
     match a literal .ssh / .aws / .netrc etc. AT VET TIME, which is the point).
     """
 
-    def _expand(text: str, env: dict[str, str]) -> str:
-        """Replace every ``$NAME`` / ``${NAME}`` known to *env*, longest name first.
-
-        Longest-first so ``$AB`` is never matched by the rule for ``$A``.
-        """
-        for name in sorted(env, key=len, reverse=True):
-            # A CALLABLE replacement, never the string: re.sub reads backslashes
-            # in a string replacement as escapes, so a value like `\q` raises
-            # re.error ("bad escape") and would abort the whole cron_add MCP call
-            # — a vetting gate that crashes on hostile input is worse than one
-            # that misses it. A callable is substituted literally.
-            literal = env[name]
-            repl = lambda _m, v=literal: v  # noqa: E731 - one-line literal repl
-            text = re.sub(r"\$\{" + re.escape(name) + r"\}", repl, text)
-            text = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", repl, text)
-        return text
+    # Use the module-level _expand_known_references.
+    _expand = _expand_known_references
 
     # Resolve SEQUENTIALLY, in source order, expanding each value against the
     # state at that point — which is what sh does. A name/value map plus a
@@ -956,6 +980,183 @@ def _substitute_local_assignments(command: str) -> str:
                 env[name] = value[:_CRON_MAX_EXPANDED_VALUE]
         out.append(_expand(segment, env) + separator)
     return "".join(out)
+
+
+def _expand_as_nested_shell_sees(command: str) -> str:
+    """Expand what the OUTER shell expands; empty what only a nested shell sees.
+
+    A reference unquoted or double-quoted is expanded by the outer shell; a
+    reference inside single quotes, or with the `$` backslash-escaped, is left
+    for the nested shell which never received the assignment — it sees EMPTY.
+    """
+    states, escaped = _quote_states(command)
+
+    # Shares the module-level _expand_known_references (same logic as
+    # _substitute_local_assignments; not duplicated).
+    env: dict[str, str] = {}
+    out: list[str] = []
+    offset = 0
+    for segment, separator in _split_segments(command):
+        # Build env same as _substitute_local_assignments
+        for nm, val in _iter_local_assignments(segment):
+            wholly_sq = len(val) >= 2 and val[0] == val[-1] == "'" and "'" not in val[1:-1]
+            val = _shell_quote_removal(val)
+            if not wholly_sq:
+                val = _expand_known_references(val, env)
+            if len(env) < _CRON_MAX_ASSIGNMENTS or nm in env:
+                env[nm] = val[:_CRON_MAX_EXPANDED_VALUE]
+        # Produce nested-shell view: unquoted/dquoted refs expand; single-quoted
+        # or \$-escaped refs become empty (the nested shell gets empty for those).
+        index = 0
+        length = len(segment)
+        seg_out: list[str] = []
+        while index < length:
+            if segment[index] == "$":
+                m = _CRON_VAR_REF_RE.match(segment, index)
+                if m is not None and m.group(1) in env:
+                    at = offset + index
+                    if escaped[at]:
+                        if seg_out and seg_out[-1] == "\\":
+                            seg_out.pop()
+                        seg_out.append("")
+                    elif states[at] == "'":
+                        seg_out.append("")
+                    else:
+                        seg_out.append(env[m.group(1)])
+                    index = m.end()
+                    continue
+            seg_out.append(segment[index])
+            index += 1
+        out.append("".join(seg_out) + separator)
+        offset += length + len(separator)
+    return "".join(out)
+
+
+def _redirect_token(word: str) -> tuple[bool, bool]:
+    """Return (is_redirect, needs_separate_operand) for word.
+
+    Shell redirections (``</dev/null``, ``>``, ``2>``) may appear before
+    assignment prefixes in a command. If not recognised, the prefix scanner
+    terminates early and misses the real assignment. A bare operator like
+    ``<`` or ``2>`` takes its operand as the next word, so we flag that too.
+    """
+    if not word:
+        return False, False
+    ch = word[0]
+    # Starts with < or > or [digit]< or [digit]>
+    if ch not in "<>" and not (ch.isdigit() and len(word) > 1 and word[1] in "<>"):
+        return False, False
+    # Find how many chars form the operator itself (digits + < > &)
+    i = 0
+    while i < len(word) and (word[i].isdigit() or word[i] in "<>&"):
+        i += 1
+    # If the operator exhausts the word, the operand is the next word.
+    return True, (i == len(word))
+
+
+def _prefix_reference_with_unknown_value(command: str) -> str | None:
+    """Return a name whose value at expansion time this gate cannot know.
+
+    A command word referencing a name assigned by its OWN segment's prefix reads
+    the inherited environment value, not the prefix value. This is refused.
+    Shell redirections (``</dev/null A=s cmd``) are skipped so they cannot
+    hide prefix assignments from the scan.
+    """
+    states, escaped = _quote_states(command)
+    offset = 0
+    for segment, separator in _split_segments(command):
+        prefix_names: set[str] = set()
+        in_prefix = True
+        skip_operand = False
+        for start, word in _iter_unquoted_words(segment, states, escaped, offset):
+            if skip_operand:
+                skip_operand = False
+                continue
+            nm, assign, _v = word.partition("=")
+            if in_prefix and assign and nm.isascii() and nm.isidentifier():
+                prefix_names.add(nm)
+                continue
+            if in_prefix:
+                is_redir, needs_next = _redirect_token(word)
+                if is_redir:
+                    skip_operand = needs_next
+                    continue
+            in_prefix = False
+            if not prefix_names:
+                break
+            for ref in _CRON_VAR_REF_RE.finditer(word):
+                at = offset + start + ref.start()
+                if escaped[at] or states[at] == "'":
+                    continue
+                if ref.group(1) in prefix_names:
+                    return ref.group(1)
+        offset += len(segment) + len(separator)
+    return None
+
+
+def _value_synthesizing_shell_syntax(command: str) -> str | None:
+    """Return the first assignment name whose value stores a literal `$` reference.
+
+    Two shapes:
+    - ``\\$NAME`` / ``\\$1`` / ``\\$@`` etc. in the RAW value (before quote
+      removal): the outer shell removes the backslash, storing the literal text
+      ``$NAME`` that a nested shell then expands. Detected from the raw value.
+    - A bare ``$`` (no following identifier) at end of value or before ``{``/
+      name-start: the value can be concatenated into a credential path by a
+      nested shell. Checked after quote removal.
+    """
+    for segment, _separator in _split_segments(command):
+        for name, raw in _iter_local_assignments(segment):
+            # Check 0: wholly-single-quoted value containing $NAME.
+            # A single-quoted value is passed to the outer shell verbatim;
+            # the outer shell stores the literal text (e.g. `$B`) which a
+            # nested sh -c then expands. LONG='$B'; sh -c "cat ~/.ssh${LONG}/id_rsa"
+            # is the verified shape: LONG stores `$B`, outer shell passes it
+            # through ${LONG}, inner sh expands $B to empty and reads the key.
+            if len(raw) >= 2 and raw[0] == raw[-1] == "'" and "'" not in raw[1:-1]:
+                inner = raw[1:-1]
+                for sq_m in re.finditer(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\.?|\$([0-9@*#])", inner):
+                    ref = sq_m.group(1) or sq_m.group(2)
+                    if ref and ref.rstrip("}") in _CRON_VAR_REF_ALLOWED:
+                        continue
+                    return name
+                continue  # no synthesis-capable $ in single-quoted value
+
+            # Check 1: escaped dollar in RAW value.
+            # Find $ preceded by an ODD number of consecutive backslashes.
+            for m in re.finditer(r"\$", raw):
+                pos = m.start()
+                n_back = 0
+                while pos - 1 - n_back >= 0 and raw[pos - 1 - n_back] == "\\":
+                    n_back += 1
+                if n_back % 2 == 0:
+                    continue  # even (or 0): $ expands normally, not synthesis
+                # Odd: $ is literal. Synthesis when followed by a name char,
+                # digit, @, *, #, {, or end of string.
+                after = raw[pos + 1 : pos + 2]
+                if (
+                    not after
+                    or after[0].isalpha()
+                    or after[0] == "_"
+                    or after[0].isdigit()
+                    or after[0] in ("@", "*", "#", "{")
+                ):
+                    return name
+            # Check 2: bare $ after quote removal (no preceding backslash).
+            value = _shell_quote_removal(raw)
+            for match in re.finditer(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)?", value):
+                referenced = match.group(1)
+                if referenced in _CRON_VAR_REF_ALLOWED:
+                    continue
+                if referenced is not None:
+                    continue  # plain $NAME: leftover check handles it
+                # Bare $: synthesis only when it could construct a reference.
+                # A $ used as a regex anchor (e.g. `s/$/,/`) is followed by
+                # non-name chars and is NOT synthesis.
+                next_char = value[match.end() : match.end() + 1]
+                if not next_char or next_char in ("{", "_") or next_char.isalpha():
+                    return name
+    return None
 
 
 def _audit_governance_deny(session_key: str, tool_name: str, scope: str, decision: object) -> None:
@@ -1310,6 +1511,28 @@ def _vet_shell_command(command: str, *, governance_checked: bool = False) -> str
     # a refusal on `'.ss\h'` is a false positive the vet accepts.
     unquoted = _unquote(command)
     unescaped = _BACKSLASH_ESCAPE_RE.sub(r"\1", unquoted)
+    # Nested-shell view: a local assignment is NOT exported, so the inner sh
+    # expands its references to EMPTY while the outer resolver expands them to
+    # the assigned value. Scanning both views catches both directions.
+    nested = _expand_as_nested_shell_sees(command)
+    # Prefix-command reference: a command word naming its own prefix assignment
+    # reads the INHERITED env value, which this gate cannot know.
+    inherited = _prefix_reference_with_unknown_value(command)
+    if inherited is not None:
+        return (
+            "Error: cron command blocked: a command word references a name its own "
+            f"assignment prefix sets ({inherited}). The shell expands the word before "
+            "applying the prefix, so the value comes from the inherited environment "
+            "and cannot be resolved here."
+        )
+    # Synthesis: a value carrying \\$ stores a literal $ reference for a nested shell.
+    synthesizing = _value_synthesizing_shell_syntax(command)
+    if synthesizing is not None:
+        return (
+            "Error: cron command blocked: assignment value carries shell syntax "
+            f"({synthesizing}). A `$` inside a value synthesizes a reference that "
+            "a nested shell expands, so the path it builds cannot be resolved here."
+        )
     variants = (
         command,
         resolved,
@@ -1318,6 +1541,12 @@ def _vet_shell_command(command: str, *, governance_checked: bool = False) -> str
         _substitute_local_assignments(unquoted),
         unescaped,
         _substitute_local_assignments(unescaped),
+        # Nested-shell view: outer-shell references expanded, inner-shell
+        # (single-quoted or \\$-escaped) emptied.
+        nested,
+        _unquote(nested),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", nested),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", _unquote(nested)),
     )
     for variant in variants:
         if (matched := _matched_sensitive_name(variant)) is not None:

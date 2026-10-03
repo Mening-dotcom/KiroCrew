@@ -306,6 +306,44 @@ MALICIOUS_COMMANDS = [
     # at the first `}` regardless of the separator reads this as separator-free.
     "cat ~/.a{w},w}s/credentials",
     "cp ~/.ss{h},h}/id_rsa /tmp/k",
+    # A local assignment is NOT exported, so a nested `sh -c` expands the
+    # same reference to EMPTY (the nested shell never received the assignment)
+    # while the resolver expands it to the assigned value. The literal `.ssh`
+    # is right there in the command text — resolution is what hides it.
+    # Verified against real sh: `A=s sh -c 'echo [$A]'` prints `[]`.
+    "A=s; sh -c 'cat ~/.ssh$A/id_rsa'",
+    "A=s; bash -c 'cat ~/.ssh$A/id_rsa'",
+    "A=ws; sh -c 'cat ~/.aws$A/credentials'",
+    # The same inversion with the fragment split across two locals.
+    "A=h; B=s; sh -c 'cat ~/.ssh$B${A}/id_rsa'",
+    # A value keeps its backslashes; the resolved view carries `.s\\sh` which
+    # no credential scan matches while the shell's word expansion reads `.ssh`.
+    r'A="\s"h; cat ~/.s${A}/id_rsa',
+    r'A="\a"ws; cat ~/.$A/credentials',
+    # Both inversions: ${A} expanded by outer shell (to `\sh`), \$A emptied
+    # by nested shell.
+    r'A="\s"h; sh -c "cat ~/.s\$A${A}/id_rsa"',
+    # A command word referencing a name assigned by its OWN prefix: sh expands
+    # the word before `A=s` is applied, so the value is INHERITED.
+    # Verified: `A=zzz echo "[$A]"` prints the inherited value.
+    "A=s cat ~/.ssh$A/id_rsa",
+    "A=w cat ~/.aws$A/credentials",
+    # A LEADING REDIRECTION hides the prefix assignment from the scan.
+    # `</dev/null A=s cat ~/.ss$A/id_rsa` — with A=h in env, sh reads .ssh/id_rsa.
+    # Verified against real sh.
+    "A=h; </dev/null A=s cat ~/.ss$A/id_rsa",
+    "A=h; < /dev/null A=s cat ~/.ss$A/id_rsa",
+    # A SINGLE-QUOTED value storing $NAME passes the literal text to a nested
+    # shell which then expands it. B=s; LONG='$B'; sh -c "cat ~/.ssh${LONG}/id_rsa"
+    # — outer sh stores $B in LONG, inner sh expands it to empty → reads .ssh.
+    # Verified against real sh.
+    "B=s; LONG='$B'; sh -c \"cat ~/.ssh${LONG}/id_rsa\"",
+    # A value carrying a bare `$` synthesizes a reference: `DOLLAR=\$` stores
+    # literal `$`, which a nested shell then expands.
+    r'DOLLAR=\$; A=s; sh -c "cat ~/.ssh${DOLLAR}A/id_rsa"',
+    r"A=\$; sh -c 'cat ~/.ssh$A/id_rsa'",
+    # `\$NAME` in a value stores the literal text `$NAME` for a nested shell.
+    r"A=\$B; sh -c 'cat ~/.ssh${A}/id_rsa'",
 ]
 
 # Shapes that LOOK like the smuggling patterns above but cannot actually reach a
@@ -352,6 +390,12 @@ BENIGN_LOOKALIKE_COMMANDS = [
     # A glob in a MIDDLE segment of an ordinary path composes nothing sensitive —
     # resolving `..` and matching segment-wise must not start flagging these.
     "tar czf /tmp/a.tgz ~/projects/*/dist",
+    # Prefix command exporting to a child: the nested shell DOES receive the
+    # prefix assignment, so this is safe (no credential path assembled).
+    r'A=1 sh -c "echo \$A"',
+    r'A=1; eval "echo \$A"',
+    # An outer-shell reference that resolves to a harmless path.
+    "A=s; cat ~/.ssh$A/id_rsa",  # .sshs, not .ssh
 ]
 
 BENIGN_COMMANDS = [
@@ -1999,3 +2043,59 @@ def test_assignment_values_get_the_shells_quote_removal(word, value):
     """A resolved value keeps exactly the backslashes the shell keeps."""
 
     assert _shell_quote_removal(word) == value
+
+
+def test_nested_shell_sees_a_local_reference_as_empty():
+    """A local assignment is out of scope one shell level down.
+
+    `sh -c '...'` is single-quoted, so the outer shell expands nothing inside
+    it. The nested shell never received A and expands `$A` to empty, opening
+    `~/.ssh/id_rsa`. The resolved view (where `$A` = `s`) scans a harmless
+    `.sshs/id_rsa` and misses it.
+    """
+    assert _vet_shell_command("A=s; sh -c 'cat ~/.ssh$A/id_rsa'") is not None
+    assert _vet_shell_command("A=ws; sh -c 'cat ~/.aws$A/credentials'") is not None
+    # Outer-shell reference in the nested command is safe: without nesting the
+    # outer shell expands `$A` to `s`, so the path is `.sshs` — harmless.
+    assert _vet_shell_command("A=s; cat ~/.ssh$A/id_rsa") is None
+
+
+def test_backslash_in_value_is_caught_by_unescape_after_resolve():
+    r"""A value keeping its backslash hides `.ssh` from the resolved scan.
+
+    `A="\s"h` stores `\sh` (a backslash followed by `sh`). The resolved view
+    carries `.s\sh` — a name the credential scan cannot match — while the
+    shell's word expansion drops the backslash and reads `.ssh`. The
+    unescape-after-resolve view applies unescaping AFTER resolving, so it
+    sees `.ssh` and refuses.
+    """
+    assert _vet_shell_command(r'A="\s"h; cat ~/.s${A}/id_rsa') is not None
+    assert _vet_shell_command(r'A="\a"ws; cat ~/.$A/credentials') is not None
+
+
+def test_a_command_word_naming_its_own_prefix_is_refused():
+    r"""The value such a word sees is inherited, so no view can model it.
+
+    `A=s cat ~/.ss$A/id_rsa` expands `$A` before `A=s` is applied: sh expands
+    the command's words first and applies the assignment to the child's env
+    after. So `$A` comes from whatever the gateway process inherited; with
+    `A=h` present this opens `.ssh`.
+    """
+    err = _vet_shell_command("A=s cat ~/.ss$A/id_rsa")
+    assert err is not None and "inherited environment" in err
+    assert _vet_shell_command("A=w cat ~/.aw$A/credentials") is not None
+    # A separator-terminated assignment is in scope for what follows.
+    assert _vet_shell_command("A=s; cat ~/.ssh$A/id_rsa") is None
+
+
+def test_a_value_carrying_a_bare_dollar_is_refused():
+    r"""A `$` in a VALUE synthesizes a reference no single view can model.
+
+    `DOLLAR=\$` stores the literal text `$` in DOLLAR. `${DOLLAR}A` in a nested
+    shell produces `$A`, which the nested shell expands while every static view
+    sees only a backslash plus text.
+    """
+    assert _vet_shell_command(r'DOLLAR=\$; A=s; sh -c "cat ~/.ssh${DOLLAR}A/id_rsa"') is not None
+    assert _vet_shell_command(r"A=\$B; sh -c 'cat ~/.ssh${A}/id_rsa'") is not None
+    # Chaining to an earlier assignment is not synthesis.
+    assert _vet_shell_command("A=logs; B=$A; tar czf /tmp/x.tgz ~/$B") is None
