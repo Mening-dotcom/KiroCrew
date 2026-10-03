@@ -1,5 +1,5 @@
 """``nothing_to_do``: the deliberate quiet end of a turn, and the structured
-terminal-turn signal it rides on (issue #16392, the structured half of #9324).
+terminal-turn signal it rides on.
 
 The turn-end contract: after its tool calls a turn ends with a closing text or
 with ``nothing_to_do`` — never by stopping bare after an ordinary tool. These
@@ -33,6 +33,7 @@ from kiro_crew.acp.types import (
 )
 from kiro_crew.dashboard import session_directive_apply as sda
 from kiro_crew.dashboard.chat_turn.directives import _DIRECTIVE_NOT_APPLIED_OUTCOMES
+from kiro_crew.dashboard.chat_utils import EMPTY_TURN_NOTICE_KIND
 from kiro_crew.mcp_tools import control
 from kiro_crew.messaging import TransportCapabilities, TurnDriver
 from kiro_crew.messaging.renderer import Renderer
@@ -284,6 +285,27 @@ class TestChannelDriverHonoursTheSignal:
         assert driver.terminal_directive_applied is False
         assert driver.empty_turn_notice != ""
 
+    @pytest.mark.parametrize("stop_reason", ["refusal", "error:tool_stall", "error:other"])
+    def test_a_fault_terminal_after_the_quiet_end_keeps_its_notice(self, stop_reason):
+        """The quiet end silences only a CLEAN close. A refusal or an error
+        terminal after the directive is a fault the thread must still hear."""
+
+        async def _consumer(kind, args):
+            return True
+
+        marker = session_directive.encode("nothing_to_do", {}, "Quiet end requested.")
+        events = [
+            _core_call("nothing_to_do"),
+            _result(marker),
+            AcpEvent(kind=EVENT_COMPLETE, stop_reason=stop_reason),
+        ]
+        driver = TurnDriver(
+            _ScriptedProvider(events), _NullRenderer(), directive_consumer=_consumer
+        )
+        asyncio.run(driver.run("patrol"))
+        assert driver.terminal_directive_applied is True
+        assert driver.empty_turn_notice != ""
+
     def test_the_flag_resets_per_run(self):
         async def _consumer(kind, args):
             return True
@@ -355,7 +377,7 @@ async def _drive_turn(state, slot, events, monkeypatch):
 class TestDashboardRunnerHonoursTheSignal:
     @pytest.mark.asyncio
     async def test_quiet_end_skips_the_empty_response_ladder(self, tmp_path, monkeypatch):
-        """The acceptance of #16392: a tool-only turn that ends on
+        """The acceptance: a tool-only turn that ends on
         ``nothing_to_do`` gets no notice card, no synthetic continuation and no
         recovery budget spent — the quiet step on the tool card is the record."""
         state = _stub_state(tmp_path)
@@ -425,6 +447,13 @@ class TestDashboardRunnerHonoursTheSignal:
         queue_calls = await _drive_turn(state, slot, events, monkeypatch)
         assert queue_calls, "the bare tool stop was not recovered"
         assert slot._empty_response_retries > 0
+        # Every recovery card the ladder writes is tagged, so the Crewmate chat
+        # can drop it by the tag rather than by matching its words.
+        notices = [m for m in slot.messages if m.get("role") == "notice"]
+        assert notices, "the recovery rung wrote no card"
+        assert all(
+            (m.get("meta") or {}).get("kind") == EMPTY_TURN_NOTICE_KIND for m in notices
+        ), notices
 
     @pytest.mark.asyncio
     async def test_activity_after_the_quiet_end_is_a_logged_violation_not_a_notice(

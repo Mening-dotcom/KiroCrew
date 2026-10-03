@@ -340,10 +340,8 @@ from kiro_crew.dashboard.handlers.usage import (
     read_effective_agent,
     read_turn_model,
 )
-from kiro_crew.dashboard.session_directive_apply import (  # noqa: F401
-    QUESTION_CARD_SHOWN_PREFIX,
+from kiro_crew.dashboard.session_directive_apply import (
     DirectiveOutcome,
-    apply_session_directive,
     apply_session_directive_outcome,
 )
 from kiro_crew.dashboard.slot_queue_repository import RESTORED_QUEUE_KEY
@@ -609,6 +607,7 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: E402, F401
     EMPTY_RUNG_CONTINUE,
     EMPTY_RUNG_GIVE_UP,
     EMPTY_RUNG_REPLAY,
+    EMPTY_TURN_NOTICE_KIND,
     FALSE_TOOL_BLOCKER_REPLAY_KIND,
     MCP_APP_MESSAGE_KIND,
     MODEL_UNENTITLED_KIND,
@@ -14959,6 +14958,7 @@ async def _run_chat(
                 "ℹ️ The context was compacted mid-turn and the response stopped "
                 "there — continuing automatically.",
                 "msg msg-info",
+                meta={"kind": EMPTY_TURN_NOTICE_KIND},
             )
             _queue_recovery(
                 0,
@@ -15099,6 +15099,7 @@ async def _run_chat(
                             f"(recovery {_continue_no} of {_max_continues})."
                         ),
                         "msg msg-info",
+                        meta={"kind": EMPTY_TURN_NOTICE_KIND},
                     )
                     _empty_continue_msg = _ACTIVITY_NO_REPLY_CONTINUE_MSG
                 else:
@@ -15111,6 +15112,7 @@ async def _run_chat(
                             f"(recovery {_continue_no} of {_max_continues})."
                         ),
                         "msg msg-info",
+                        meta={"kind": EMPTY_TURN_NOTICE_KIND},
                     )
                     _empty_continue_msg = _EMPTY_AUTO_CONTINUE_MSG
                 _queue_recovery(
@@ -15148,7 +15150,9 @@ async def _run_chat(
                     _empty_msg = EMPTY_TURN_NOTICE_AFTER_RECOVERY
                 else:
                     _empty_msg = EMPTY_TURN_NOTICE
-                slot.append("notice", _empty_msg, "msg msg-info")
+                slot.append(
+                    "notice", _empty_msg, "msg msg-info", meta={"kind": EMPTY_TURN_NOTICE_KIND}
+                )
             # ONE warning per empty verdict, emitted AFTER the rung is chosen so
             # the log line carries the decision rather than only the symptom. The
             # predecessor logged just "Empty model response (attempt N)", which
