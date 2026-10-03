@@ -292,8 +292,10 @@ git push --force-with-lease origin <feature-branch>
    triage has already read, on a line of its own in the description: `Closes #N`
    closes the issue when the PR merges; `Part of #N` leaves it open for the
    rest of the work. The `Issue Gate` check enforces it. No issue yet? Open one
-   and let triage run first -- see
+   first -- see
    [Reporting Bugs and Requesting Features](#reporting-bugs-and-requesting-features).
+   You need not wait for triage to open the PR: the gate stays red until the
+   issue gets its verdict label, then re-runs by itself.
 4. **Make your change** and add tests (new functions/components should be tested).
 5. **Run the [gate before you commit](AGENTS.md#the-gate-before-you-commit)**
    before opening a PR; its test step is:

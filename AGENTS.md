@@ -241,6 +241,11 @@ verbatim and fill in the `**Goal:**` line. PR Hygiene fails a body missing the
 required sections; check it before opening with
 `out="$(mktemp)"; PR_BODY="$(cat <file>)" GITHUB_OUTPUT="$out" bash .github/scripts/pr-description-check.sh; cat "$out"`.
 
+### Issue first
+
+Every PR must trace to an issue: see
+[CONTRIBUTING.md step 3](CONTRIBUTING.md#pull-request-workflow).
+
 ### PR goal is frozen
 
 The `**Goal:**` line, `## Why it matters` and `## Not a goal` are written once,
