@@ -242,7 +242,9 @@ _CRON_POSITIONAL_PARAM_RE = re.compile(r"\$[0-9@*#]|\$\{[0-9@*#]")
 # start-of-command / after a separator / after `do`/`then` and word-bounded, so
 # `git log --format=for` (keyword as an argument) and a quoted `'while ...'` are
 # NOT matched. `case` is included because its patterns compose the same way.
-_CRON_SHELL_KEYWORD_RE = re.compile(r"(?:^|[;&|]|\bdo\b|\bthen\b)\s*\b(?:for|while|until|case)\b")
+_CRON_SHELL_KEYWORD_RE = re.compile(
+    r"(?:^|[;&|\n]|\bdo\b|\bthen\b)\s*\b(?:for|while|until|case|if)\b"
+)
 # Pathname expansion (globbing) is a FOURTH way to compose a sensitive path that
 # never appears literally: ``cat ~/.s?h/id_rsa`` reads ``~/.ssh/id_rsa`` (verified
 # against real sh, all three metacharacters). Blanket-refusing ``*``/``?``/``[``
@@ -323,7 +325,7 @@ def _split_segments(command: str) -> list[tuple[str, str]]:
     """
     parts: list[tuple[str, str]] = []
     pos = 0
-    for m in re.finditer(r"[;&|]+", command):
+    for m in re.finditer(r"[;&|\n]+", command):
         parts.append((command[pos : m.start()], m.group(0)))
         pos = m.end()
     parts.append((command[pos:], ""))
@@ -832,58 +834,161 @@ def _shell_quote_removal(word: str) -> str:
     return "".join(out)
 
 
-def _substitute_local_assignments(command: str) -> str:
-    """Return *command* with any locally-assigned ``$var``/``${var}`` expanded.
+def _expand_known_references(text: str, env: dict[str, str]) -> str:
+    """Replace every ``$NAME`` / ``${NAME}`` known to *env*, longest name first.
 
-    Cron `command` values are executed by ``sh -c``, so a shell assignment
-    earlier in the string (``A=.ssh; ...``) is visible to later ``$A`` /
-    ``${A}`` references in the same command. The static credential-path scan
-    can't see the assembled path unless we perform the same substitution here
-    before scanning. Only LOCAL assignments in this command are resolved —
-    unknown vars are left as-is, so a scan that follows must not treat an
-    unresolved ``$var`` as innocuous (they simply cannot make the path checker
-    match a literal .ssh / .aws / .netrc etc. AT VET TIME, which is the point).
+    Longest-first so ``$AB`` is never matched by the rule for ``$A``.
     """
+    for name in sorted(env, key=len, reverse=True):
+        # A CALLABLE replacement, never the string: re.sub reads backslashes
+        # in a string replacement as escapes, so a value like `\q` raises
+        # re.error ("bad escape") and would abort the whole cron_add MCP call
+        # — a vetting gate that crashes on hostile input is worse than one
+        # that misses it. A callable is substituted literally.
+        literal = env[name]
+        repl = lambda _m, v=literal: v  # noqa: E731 - one-line literal repl
+        text = re.sub(r"\$\{" + re.escape(name) + r"\}", repl, text)
+        text = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", repl, text)
+    return text
 
-    def _expand(text: str, env: dict[str, str]) -> str:
-        """Replace every ``$NAME`` / ``${NAME}`` known to *env*, longest name first.
 
-        Longest-first so ``$AB`` is never matched by the rule for ``$A``.
-        """
-        for name in sorted(env, key=len, reverse=True):
-            # A CALLABLE replacement, never the string: re.sub reads backslashes
-            # in a string replacement as escapes, so a value like `\q` raises
-            # re.error ("bad escape") and would abort the whole cron_add MCP call
-            # — a vetting gate that crashes on hostile input is worse than one
-            # that misses it. A callable is substituted literally.
-            literal = env[name]
-            repl = lambda _m, v=literal: v  # noqa: E731 - one-line literal repl
-            text = re.sub(r"\$\{" + re.escape(name) + r"\}", repl, text)
-            text = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", repl, text)
-        return text
+def _iter_unquoted_words(
+    text: str, states: list[str | None], escaped: list[bool], base: int
+) -> Iterator[tuple[int, str]]:
+    """Yield ``(offset, word)`` splitting *text* on UNQUOTED, unescaped whitespace.
 
-    # Resolve SEQUENTIALLY, in source order, expanding each value against the
-    # state at that point — which is what sh does. A name/value map plus a
-    # fixpoint cannot model this, because it keeps only the LAST value per name
-    # and so loses the intermediate one a later variable captured:
-    #
-    #   A=.s; B=$A; A=x; C=sh; cp ~/${B}${C}/id_rsa
-    #
-    # `B` captures `.s` BEFORE `A` is reassigned, so sh reads `.ssh` (verified),
-    # while a last-value map resolves B to `x` and scans a harmless `~/xsh/`.
-    # Sequential resolution also removes the need for a fixpoint loop and its
-    # cycle cap: a value can only ever reference names already assigned, so one
-    # left-to-right pass is complete by construction.
-    # Each SEGMENT is expanded with the environment as it stands at that segment,
-    # then the expanded segments are rejoined. Expanding the whole command with
-    # the FINAL environment would let a trailing reassignment hide an earlier
-    # read — `A=.ssh; cp ~/$A/id_rsa /tmp/key; A=safe` scans as `~/safe/id_rsa`
-    # while sh copies the key, because sh evaluates `$A` when it reaches that
-    # command, not after the last one.
+    `X='foo bar' A=s cat …` is three words, not four: a plain whitespace split ends
+    the assignment prefix inside the quoted value, so a later word that references
+    `A` is never checked against the prefix. The quote state comes from
+    `_quote_states`, the module's existing adapter.
+    """
+    word_start: int | None = None
+    for index, character in enumerate(text):
+        at = base + index
+        unquoted_space = (
+            character in _BASH_WORD_BREAKING_WHITESPACE and not escaped[at] and states[at] is None
+        )
+        if unquoted_space:
+            if word_start is not None:
+                yield word_start, text[word_start:index]
+                word_start = None
+        elif word_start is None:
+            word_start = index
+    if word_start is not None:
+        yield word_start, text[word_start:]
+
+
+#: POSIX shell keywords that INTRODUCE assignment words. ``export A=v`` and
+#: ``readonly A=v`` assign in the current shell and credit the name to later
+#: segments. ``declare``, ``typeset`` and ``local`` are deliberately NOT
+#: included: they are not POSIX builtins and are not commands in dash/ash, so
+#: ``declare A=s; cat ~/.ssh$A/id_rsa`` leaves ``$A`` unset on that shell
+#: family while the walk would credit ``s`` and scan a harmless path.
+_SHELL_ASSIGNMENT_KEYWORDS = frozenset({"export", "readonly"})
+
+
+def _only_assignment_words(
+    segment: str, states: list[str | None], escaped: list[bool], base: int
+) -> bool:
+    """True when every unquoted word in *segment* is an assignment.
+
+    `A=s` assigns for what follows. `A=s true` and `echo A=x` do not: the first
+    applies `A=s` to `true`'s environment only, and the second passes `A=x` to
+    `echo` as an ARGUMENT -- `_iter_local_assignments` is deliberately
+    conservative and yields a pair for both, which is safe for a scan of the
+    segment itself and wrong for anything after it.
+    """
+    for _offset, word in _iter_unquoted_words(segment, states, escaped, base):
+        if word in _SHELL_ASSIGNMENT_KEYWORDS:
+            continue
+        name, assign, _value = word.partition("=")
+        if not (assign and name.isascii() and name.isidentifier()):
+            return False
+    return True
+
+
+def _is_foreground_sep(sep: str) -> bool:
+    """True when *sep* does not background or pipeline a command.
+
+    ``;`` and newline (and runs of them) are sequential foreground separators.
+    ``&&`` and ``||`` are conditional foreground separators. A lone ``&`` or
+    ``|`` is not foreground: it backgrounds or pipelines the next command
+    into a subshell where the parent's assigned names are not set.
+    """
+    if not sep:
+        return True
+    # Strip all `;` and newlines: what remains must be `&&`, `||`, or empty.
+    remainder = sep.replace(";", "").replace("\n", "")
+    return remainder == "" or remainder in ("&&", "||")
+
+
+def _is_unconditional_sep(sep: str) -> bool:
+    """True when *sep* guarantees the next segment runs unconditionally.
+
+    Only ``;`` and newline (and runs of them) are unconditional. ``&&`` and
+    ``||`` are CONDITIONAL: ``A=h; false && A=x`` leaves ``$A`` as ``h``
+    because ``A=x`` did not run. An assignment entered via ``&&`` or ``||``
+    cannot be trusted to have executed.
+    """
+    if not sep:
+        return True
+    stripped = sep.replace(";", "").replace("\n", "")
+    return stripped == ""
+
+
+#: Shell keywords that open compound commands. Once any appears in an unquoted
+#: word position, subsequent segments cannot be proven to have run and their
+#: assignments make assigned names UNKNOWN. ``for``/``while``/``until``/``case``
+#: are already refused by ``_CRON_SHELL_KEYWORD_RE``; these survive that check.
+_COMPOUND_SYNTAX_WORDS = frozenset({"if", "then", "else", "elif", "fi", "do", "done"})
+
+
+def _iter_segment_environments(
+    command: str,
+) -> Iterator[tuple[str, str, dict[str, str], dict[str, str]]]:
+    """Yield ``(segment, separator, entry_env, env)`` around each segment's assignments.
+
+    ``entry_env`` is the state BEFORE this segment assigns anything, which is what
+    sh expands a command's ARGUMENTS against when the assignment is a prefix
+    (``A=s cat ~/.ssh$A/id_rsa`` opens `.ssh`, because `$A` is expanded before
+    `A=s` is applied). ``env`` is the state after, which is what a LATER segment
+    sees.
+
+    THE assignment walk for this module: every view that resolves a local
+    reference reads it from here, so there is one place that decides what a name
+    holds. A second copy would diverge on the next edit, and both copies guard
+    the same credential scan.
+
+    Resolve SEQUENTIALLY, in source order, expanding each value against the
+    state at that point — which is what sh does. A name/value map plus a
+    fixpoint cannot model this, because it keeps only the LAST value per name
+    and so loses the intermediate one a later variable captured:
+
+      A=.s; B=$A; A=x; C=sh; cp ~/${B}${C}/id_rsa
+
+    `B` captures `.s` BEFORE `A` is reassigned, so sh reads `.ssh` (verified),
+    while a last-value map resolves B to `x` and scans a harmless `~/xsh/`.
+    Sequential resolution also removes the need for a fixpoint loop and its
+    cycle cap: a value can only ever reference names already assigned, so one
+    left-to-right pass is complete by construction.
+
+    The env is yielded PER SEGMENT for the same reason. Expanding the whole
+    command with the FINAL environment would let a trailing reassignment hide an
+    earlier read — `A=.ssh; cp ~/$A/id_rsa /tmp/key; A=safe` scans as
+    `~/safe/id_rsa` while sh copies the key, because sh evaluates `$A` when it
+    reaches that command, not after the last one.
+    """
+    states, escaped = _quote_states(command)
     env: dict[str, str] = {}
-    out: list[str] = []
+    offset = 0
+    entry_separator = ""
+    compound_syntax_seen = False
     for segment, separator in _split_segments(command):
+        entry_env = dict(env)
+        segment_env = dict(env)
+        prop_env: dict[str, str] = dict(entry_env)
         for name, value in _iter_local_assignments(segment):
+            raw_value_for_prop = value  # saved for prop_env (before quote removal)
             # Quote removal deletes EVERY quote character in the word, not just a
             # surrounding pair: sh reads `A=.s''sh` as `.ssh` (verified), and an
             # INTERNAL empty pair is the cheapest way to split a credential
@@ -903,7 +1008,10 @@ def _substitute_local_assignments(command: str) -> str:
             value = _shell_quote_removal(value)
             if not wholly_single_quoted:
                 # A single-quoted value is not subject to parameter expansion.
-                value = _expand(value, env)
+                # Sequential expansion for segment_env: `A=1 B=$A cmd` gives
+                # B=1 in segment_env, keeping `_substitute_local_assignments`
+                # (the view used for scanning) consistent with prior behaviour.
+                value = _expand_known_references(value, segment_env)
             # Bound the stored value. Each assignment can reference earlier ones,
             # so `A0=ab; A1=$A0$A0; A2=$A1$A1; ...` DOUBLES per assignment —
             # measured 67 MB at 24 assignments, and the `command` field allows
@@ -912,10 +1020,228 @@ def _substitute_local_assignments(command: str) -> str:
             # REFUSE hostile input, and it happens before the credential scan
             # runs at all. Truncating can only narrow what the scan sees, never
             # widen it, and no legitimate value exceeds the field's own cap.
-            if len(env) < _CRON_MAX_ASSIGNMENTS or name in env:
-                env[name] = value[:_CRON_MAX_EXPANDED_VALUE]
-        out.append(_expand(segment, env) + separator)
+            if len(segment_env) < _CRON_MAX_ASSIGNMENTS or name in segment_env:
+                segment_env[name] = value[:_CRON_MAX_EXPANDED_VALUE]
+            # prop_env uses ENTRY-env expansion. In sh, all words in a command
+            # are evaluated before any assignment in that command takes effect,
+            # so `export A=x B=.ss$A` expands $A to the OLD value (entry_env).
+            # This is the env propagated to the NEXT segment; it differs from
+            # segment_env only inside export/readonly chains like the above.
+            if not wholly_single_quoted:
+                prop_value = _expand_known_references(
+                    _shell_quote_removal(raw_value_for_prop), entry_env
+                )
+            else:
+                prop_value = _shell_quote_removal(raw_value_for_prop)
+            if len(prop_env) < _CRON_MAX_ASSIGNMENTS or name in prop_env:
+                prop_env[name] = prop_value[:_CRON_MAX_EXPANDED_VALUE]
+        yield segment, separator, entry_env, segment_env
+        # A name reaches the NEXT segment only when every condition below can be
+        # PROVEN. `_split_segments` is quote-blind and `_iter_local_assignments` is
+        # deliberately conservative, so anything less than proof is not credited --
+        # and an uncredited name leaves `$A` unresolved, which the leftover-
+        # reference refusal already turns into a refusal. Failing closed here is
+        # what keeps a construct this walk cannot model from inverting the scan.
+        # Detect compound syntax keywords in this segment.
+        seg_words = {word for _, word in _iter_unquoted_words(segment, states, escaped, offset)}
+        if seg_words & _COMPOUND_SYNTAX_WORDS:
+            compound_syntax_seen = True
+        # Credit a name forward only when ALL hold:
+        #   1. Entry separator is UNCONDITIONAL: `;`, newline, or start.
+        #      `&&`/`||` are conditional (`false && A=x` leaves $A unset).
+        #   2. No compound syntax (if/while/...) has appeared yet.
+        #   3. Segment contains ONLY assignments and export/readonly keywords.
+        #   4. Both split points are outside quotes and unescaped.
+        #   5. Exit separator is foreground (not bare & or |).
+        # Anything less: UNKNOWN -- remove the name from env so `$A` stays
+        # unresolved and the existing leftover-reference refusal fires.
+        entry_is_unconditional = _is_unconditional_sep(entry_separator)
+        # A separator inside quotes is text, not a separator.
+        # An ESCAPED separator is not a real separator (B2 fix).
+        split_points_are_unquoted = (
+            offset == 0 or (states[offset - 1] is None and not escaped[offset - 1])
+        ) and (
+            not separator
+            or (states[offset + len(segment)] is None and not escaped[offset + len(segment)])
+        )
+        if (
+            entry_is_unconditional
+            and not compound_syntax_seen
+            and _is_foreground_sep(separator)
+            and split_points_are_unquoted
+            and _only_assignment_words(segment, states, escaped, offset)
+        ):
+            # Use prop_env (entry-env-based) for propagation: sh evaluates all
+            # words against the env BEFORE the segment's assignments take effect,
+            # so `export A=x B=.ss$A` propagates B=.ssh (old A), not B=.ssx.
+            env = prop_env
+        else:
+            # Cannot prove execution. Any name this segment assigns (new or
+            # re-assigned) is UNKNOWN: removed so `$NAME` stays unresolved.
+            for name, val in prop_env.items():
+                if name not in entry_env or val != entry_env.get(name):
+                    env.pop(name, None)
+        offset += len(segment) + len(separator)
+        entry_separator = separator
+
+
+def _substitute_local_assignments(command: str) -> str:
+    """Return *command* with any locally-assigned ``$var``/``${var}`` expanded.
+
+    Cron `command` values are executed by ``sh -c``, so a shell assignment
+    earlier in the string (``A=.ssh; ...``) is visible to later ``$A`` /
+    ``${A}`` references in the same command. The static credential-path scan
+    can't see the assembled path unless we perform the same substitution here
+    before scanning. Only LOCAL assignments in this command are resolved —
+    unknown vars are left as-is, so a scan that follows must not treat an
+    unresolved ``$var`` as innocuous (they simply cannot make the path checker
+    match a literal .ssh / .aws / .netrc etc. AT VET TIME, which is the point).
+    """
+    return "".join(
+        _expand_known_references(segment, env) + separator
+        for segment, separator, _entry_env, env in _iter_segment_environments(command)
+    )
+
+
+def _expand_as_nested_shell_sees(command: str) -> str:
+    """Expand what the OUTER shell expands; empty what only a NESTED shell sees.
+
+    Which shell level expands a reference is decided by the quoting around THAT
+    reference, so a view that treats them all alike is wrong in one direction or
+    the other. Per reference:
+
+    - unquoted or double-quoted -- the outer shell expands it, and the value it
+      produces reaches the nested shell as literal text;
+    - inside single quotes, or with the `$` backslash-escaped -- the outer shell
+      leaves it alone, so the NESTED shell expands it against an environment that
+      never received the assignment, which yields the empty string.
+
+    `A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'` needs both rules in one word: `$A`
+    becomes `s` and `${A}` becomes empty, so the nested shell opens `~/.ssh`.
+
+    Each reference is resolved against the environment at ITS OWN segment, from
+    the shared walk, so a trailing reassignment cannot hide an earlier read:
+    `A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'; A=x` still reads `s` here, as sh does.
+    """
+    states, escaped = _quote_states(command)
+    out: list[str] = []
+    offset = 0
+    for segment, separator, _entry_env, env in _iter_segment_environments(command):
+        index = 0
+        length = len(segment)
+        while index < length:
+            if segment[index] == "$":
+                match = _CRON_VAR_REF_RE.match(segment, index)
+                if match is not None and match.group(1) in env:
+                    if escaped[offset + index]:
+                        # The outer shell CONSUMES the escaping backslash and
+                        # hands the bare `$NAME` down, so the backslash must not
+                        # survive into this view -- left in, it re-escapes the
+                        # next character and the unescaped form of this view
+                        # reads `.s\\sh`, not `.ssh`.
+                        if out and out[-1] == "\\":
+                            out.pop()
+                        out.append("")
+                    elif states[offset + index] == "'":
+                        out.append("")
+                    else:
+                        out.append(env[match.group(1)])
+                    index = match.end()
+                    continue
+            out.append(segment[index])
+            index += 1
+        out.append(separator)
+        offset += length + len(separator)
     return "".join(out)
+
+
+def _prefix_reference_with_unknown_value(command: str) -> str | None:
+    """Return a name whose value at expansion time this gate cannot know.
+
+    A command word referencing a name assigned by its OWN segment's prefix reads
+    the value the gateway process INHERITED, not the prefix's: with `A=h` in the
+    environment, `A=s cat ~/.ss$A/id_rsa` opens `.ssh`, because the words are
+    expanded before `A=s` is applied (verified -- `A=zzz echo "[$A]"` prints the
+    inherited value). Neither the resolved view nor the prefix view can model that,
+    so the construct is refused rather than approximated, as an unresolvable
+    `$var` already is.
+
+    Only a reference the OUTER shell expands counts. One inside single quotes, or
+    with the `$` backslash-escaped, is expanded by the invoked command instead,
+    which DID receive the prefix -- `A=1 B=$A sh -c 'echo [$B]'` prints `1`
+    (verified), so refusing it would break an ordinary one-liner. An assignment
+    word in the prefix is likewise fine: prefix assignments chain among themselves.
+    """
+    states, escaped = _quote_states(command)
+    offset = 0
+    for segment, separator in _split_segments(command):
+        prefix_names: set[str] = set()
+        in_prefix = True
+        for start, word in _iter_unquoted_words(segment, states, escaped, offset):
+            name, assign, _value = word.partition("=")
+            if in_prefix and assign and name.isascii() and name.isidentifier():
+                prefix_names.add(name)
+                continue
+            in_prefix = False
+            if not prefix_names:
+                break
+            for reference in _CRON_VAR_REF_RE.finditer(word):
+                at = offset + start + reference.start()
+                if escaped[at] or states[at] == "'":
+                    continue
+                if reference.group(1) in prefix_names:
+                    return reference.group(1)
+        offset += len(segment) + len(separator)
+    return None
+
+
+def _value_synthesizing_shell_syntax(command: str) -> str | None:
+    """Return the first name whose VALUE carries a `$` the resolver cannot model.
+
+    A value holding a bare `$` synthesizes a reference that exists only after
+    expansion: `DOLLAR=\\$; A=s; sh -c "cat ~/.ssh${DOLLAR}A/id_rsa"` hands the
+    inner shell `~/.ssh$A`, which it expands to `~/.ssh/` and reads the key. The
+    `$` is in the VALUE, so no single expansion view holds both the synthesized
+    reference and the empty it expands to -- which level expands which depends on
+    the quoting around each one. The construct is refused instead of
+    approximated, matching how an unresolvable `$var` is already handled.
+
+    A `$` that names an EARLIER assignment is not synthesis: `A=x; B=$A` is the
+    ordinary chaining the sequential resolver already models, and stays allowed.
+    """
+    seen: set[str] = set()
+    for segment, _separator in _split_segments(command):
+        for name, raw in _iter_local_assignments(segment):
+            value = _shell_quote_removal(raw)
+            for match in re.finditer(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)?", value):
+                referenced = match.group(1)
+                if referenced in _CRON_VAR_REF_ALLOWED:
+                    # `$HOME` is the one reference the gate allows unresolved: a
+                    # fixed prefix that composes no fragment. `DEST=$HOME/backups`
+                    # is the documented way a cron names a path.
+                    continue
+                pos = match.start()
+                prev_char = value[pos - 1 : pos]
+                if prev_char == "\\":
+                    # `\$` in the raw value: the outer shell removes the
+                    # backslash and stores literal `$` (or `$NAME`). A nested
+                    # shell then expands it. This is synthesis whether or not
+                    # a name follows: `A=\$B` stores `$B` for a nested shell.
+                    return name
+                if referenced is not None:
+                    # Plain `$NAME` (not escaped): the sequential resolver
+                    # models it, or the leftover check refuses it with a
+                    # clearer message. Not synthesis.
+                    continue
+                # Bare `$` (no identifier, not escaped). Synthesis only when
+                # it could combine with adjacent text to construct a reference.
+                # A `$` used as a regex anchor in sed/awk (`s/$/,/`) is
+                # followed by non-name chars and is NOT synthesis.
+                next_char = value[match.end() : match.end() + 1]
+                if not next_char or next_char in ("{", "_") or next_char.isalpha():
+                    return name
+            seen.add(name)
+    return None
 
 
 def _audit_governance_deny(session_key: str, tool_name: str, scope: str, decision: object) -> None:
@@ -1270,6 +1596,28 @@ def _vet_shell_command(command: str, *, governance_checked: bool = False) -> str
     # a refusal on `'.ss\h'` is a false positive the vet accepts.
     unquoted = _unquote(command)
     unescaped = _BACKSLASH_ESCAPE_RE.sub(r"\1", unquoted)
+    # A nested shell (`sh -c`, `bash -c`, `eval`) does NOT inherit a local
+    # assignment: it is not exported, so the INNER shell expands the reference to
+    # EMPTY while this resolver expands it to the outer value. That inverts the
+    # gate -- `A=s; sh -c 'cat ~/.ssh$A/id_rsa'` resolves to a harmless
+    # `~/.sshs/id_rsa` here and reads the key for real (verified). Scan the
+    # empty-expansion view too, which is what the inner shell actually sees.
+    nested = _expand_as_nested_shell_sees(command)
+    inherited = _prefix_reference_with_unknown_value(command)
+    if inherited is not None:
+        return (
+            "Error: cron command blocked: a command word references a name its own "
+            f"assignment prefix sets ({inherited}). The shell expands the word before "
+            "applying the prefix, so the value comes from the inherited environment "
+            "and cannot be resolved here."
+        )
+    synthesizing = _value_synthesizing_shell_syntax(command)
+    if synthesizing is not None:
+        return (
+            "Error: cron command blocked: assignment value carries shell syntax "
+            f"({synthesizing}). A `$` inside a value synthesizes a reference that "
+            "a nested shell expands, so the path it builds cannot be resolved here."
+        )
     variants = (
         command,
         resolved,
@@ -1278,6 +1626,13 @@ def _vet_shell_command(command: str, *, governance_checked: bool = False) -> str
         _substitute_local_assignments(unquoted),
         unescaped,
         _substitute_local_assignments(unescaped),
+        # The nested view and its transformations: these are the views that catch
+        # credential paths assembled by a nested shell, where a local assignment
+        # is NOT inherited and expands to empty inside the nested shell.
+        nested,
+        _unquote(nested),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", nested),
+        _BACKSLASH_ESCAPE_RE.sub(r"\1", _unquote(nested)),
     )
     for variant in variants:
         if _CRON_CRED_PATH_RE.search(variant) or _glob_could_reach_credentials(variant):

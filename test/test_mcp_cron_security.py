@@ -303,6 +303,106 @@ MALICIOUS_COMMANDS = [
     # at the first `}` regardless of the separator reads this as separator-free.
     "cat ~/.a{w},w}s/credentials",
     "cp ~/.ss{h},h}/id_rsa /tmp/k",
+    # A local assignment is NOT exported, so a nested `sh -c` expands the same
+    # reference to EMPTY while the resolver expands it to the outer value. The
+    # literal `.ssh` is right there in the command text, and resolution is what
+    # hides it: `$A` becomes `s`, so the scan reads a harmless `~/.sshs/id_rsa`
+    # while the inner shell reads the key. Verified against real sh.
+    "A=s; sh -c 'cat ~/.ssh$A/id_rsa'",
+    "A=s; bash -c 'cat ~/.ssh$A/id_rsa'",
+    "A=ws; sh -c 'cat ~/.aws$A/credentials'",
+    # The same inversion with the fragment split across two locals.
+    "A=h; B=s; sh -c 'cat ~/.ssh$B${A}/id_rsa'",
+    # A value keeps its backslashes, which is correct -- sh stores `\\sh` for
+    # `A="\\s"h` -- but the resolved view then carries `.s\\sh`, a name the
+    # credential scan cannot match while the shell's word expansion drops the
+    # backslash and reads `.ssh`. Unescaping only the pre-resolution views cannot
+    # see it: the backslash arrives with the VALUE.
+    r'A="\s"h; cat ~/.s${A}/id_rsa',
+    r'A="\a"ws; cat ~/.$A/credentials',
+    # Both inversions at once: `${A}` is expanded by the OUTER shell (to `\sh`)
+    # and `\$A` by the INNER one (to empty), so no single view models the path.
+    r'A="\s"h; sh -c "cat ~/.s\$A${A}/id_rsa"',
+    r'A="\s"h; bash -c "cat ~/.s\$A${A}/id_rsa"',
+    # A value holding a bare `$` SYNTHESIZES a reference that exists only after
+    # expansion. The inner shell receives `~/.ssh$A`, expands `$A` to empty and
+    # opens the key, while every view built from the command text sees `$`, `s`
+    # or `A` after the directory name and matches nothing.
+    r'DOLLAR=\$; A=s; sh -c "cat ~/.ssh${DOLLAR}A/id_rsa"',
+    r'A=\$; sh -c "cat ~/.ssh${A}A/id_rsa"',
+    r'A="\$"; sh -c "cat ~/.ssh${A}A/id_rsa"',
+    r"A=\$; sh -c 'cat ~/.ssh$A/id_rsa'",
+    # Quoting decides which shell expands which reference, and one word can
+    # need both readings: the outer shell expands `$A` to `s` and leaves the
+    # single-quoted `${A}` alone, so the nested shell empties it and opens
+    # `~/.ssh`. A view that treats every reference alike misses this.
+    r"A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'",
+    r"A=w; sh -c 'cat ~/.a'$A'${A}s/credentials'",
+    # A value is resolved against the values assigned BEFORE it, as sh does:
+    # `B=$A` stores `s`, not the literal `$A`. Storing the reference instead puts
+    # a `$A` into the scanned view that no later pass resolves, so an ordinary
+    # two-step chain composes a path nothing sees.
+    r"A=s; B=$A; sh -c 'cat ~/.s'$B'${A}h/id_rsa'",
+    r"A=w; B=$A; sh -c 'cat ~/.a'$B'${A}s/credentials'",
+    # A trailing reassignment must not hide an earlier read: sh evaluates a
+    # reference when it REACHES that command, not after the last one, so each
+    # reference is resolved against the environment at its own segment.
+    r"A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'; A=x",
+    r"A=w; sh -c 'cat ~/.a'$A'${A}s/credentials'; A=q",
+    # An assignment written as a PREFIX does not reach its own command's
+    # argument expansion: sh expands the words first and applies the assignment
+    # to the invoked command's environment after, so `$A` is empty and the path
+    # is `~/.ssh/id_rsa`, not the `~/.sshs/id_rsa` a resolved view scans.
+    "A=s cat ~/.ssh$A/id_rsa",
+    "A=w cat ~/.aws$A/credentials",
+    # The value a command word sees is the INHERITED one, which the gate cannot
+    # know: with `A=h` in the gateway's environment, this opens `.ssh`. Refused
+    # outright, as an unresolvable `$var` already is.
+    "A=s cat ~/.ss$A/id_rsa",
+    "A=x cat ~/.aw$A/credentials",
+    # An assignment reaches what FOLLOWS only when its segment assigns and
+    # nothing else. `echo A=x` passes `A=x` to echo as an argument, `A=s true`
+    # applies it to `true` alone, and a pipeline stage is a subshell -- in all
+    # three sh leaves `$A` unset afterwards, so crediting the value scans a
+    # harmless path while the real command opens the credential one.
+    "echo A=x; cat ~/.ssh$A/id_rsa",
+    "echo A=w; cat ~/.aws$A/credentials",
+    "A=s true; cat ~/.ssh$A/id_rsa",
+    "A=s | cat ~/.ssh$A/id_rsa",
+    # A lone `&` backgrounds the assignment in a subshell, and a stage before a
+    # `|` is one too, so the parent's name stays unset either way.
+    "A=ws & cat ~/.aws$A/credentials",
+    "A=s & cat ~/.ssh$A/id_rsa",
+    "true | A=s; cat ~/.ssh$A/id_rsa",
+    # The segment split is quote-blind, so a separator inside an argument makes
+    # ` A=s` look like its own assignment-only segment. It is text, not a command.
+    'echo "a; A=s; b"; cat ~/.ssh$A/id_rsa',
+    # A quoted value holding a space ends a plain whitespace split inside the
+    # prefix, so the later `$A` was never checked against the prefix at all.
+    "X='foo bar' A=s cat ~/.ss$A/id_rsa",
+    # An ESCAPED separator `\;` is not a real separator: sh passes `a;B=zzz`
+    # to echo as one argument and leaves B unset, so `~/.ssh/id_rsa` is opened.
+    # `split_points_are_unquoted` must check `escaped[]` at both split points.
+    r"echo a\;B=zzz; cat ~/.ssh$B/id_rsa",
+    r"echo a\;B=ws; cat ~/.aws$B/credentials",
+    # `declare`, `typeset` and `local` are not POSIX builtins: in dash/ash
+    # they are not commands, so `declare A=s` leaves `$A` unset. Crediting
+    # them inverts the scan on that shell family.
+    "declare A=.s; cat ~/.ssh$A/id_rsa",
+    "typeset A=.s; cat ~/.ssh$A/id_rsa",
+    "local A=.s; cat ~/.ssh$A/id_rsa",
+    # CONDITIONAL assignments (&&/||): the assignment may not have run.
+    # sh leaves $A at its PRIOR value; crediting it scans a harmless path
+    # while the real command opens the credential.
+    "A=h; false && A=x; cat ~/.ss$A/id_rsa",
+    "false && A=s; cat ~/.ssh$A/id_rsa",
+    "A=h; true || A=x; cat ~/.ss$A/id_rsa",
+    # EXPORT CHAIN: `export A=x B=.ss$A` expands $A to the OLD value before
+    # the `A=x` assignment takes effect, so B=.ssh, not .ssx.
+    "A=h; export A=x B=.ss$A; cat ~/$B/id_rsa",
+    # ESCAPED-$ in a value stores literal `$NAME`, which a nested shell expands.
+    r'A=\$B; sh -c "cat ~/.ssh${A}/id_rsa"',
+    r"A=\$; sh -c 'cat ~/.ssh$A/id_rsa'",
 ]
 
 # Shapes that LOOK like the smuggling patterns above but cannot actually reach a
@@ -331,6 +431,20 @@ BENIGN_LOOKALIKE_COMMANDS = [
     # start rejecting these.
     "TZ=UTC date",
     "TZ=UTC LANG=C date",
+    # An assignment PREFIX is exported to the child, and `eval` re-parses in the
+    # current shell, so a backslash-deferred reference still expands to the OUTER
+    # value in both. Refusing them blocks ordinary one-liners for no gain.
+    r'A=1 sh -c "echo \$A"',
+    r'MODE=fast sh -c "echo \$MODE"',
+    r'A=1; eval "echo \$A"',
+    r'awk -v n=5 "{print \$n}" /etc/hostname',
+    # Without nesting the OUTER shell expands the reference itself, so this opens
+    # `.sshs` and reaches nothing. Emptying every reference regardless of quoting
+    # refused it -- the quote-aware view is what tells the two cases apart.
+    "A=s; cat ~/.ssh$A/id_rsa",
+    # `$HOME` is the one allowlisted unresolved reference, in a VALUE too.
+    "DEST=$HOME/backups; tar czf /tmp/b.tgz $DEST",
+    "A=logs; B=$A; tar czf /tmp/x.tgz ~/$B",
     "PYTHONUNBUFFERED=1 python3 ~/.kiro/crew/crons/report.py",
     # The reassignment case with the two values swapped: `B` captures `x`, so sh
     # reads `xsh` and no credential path is reachable. Resolution must be
@@ -349,6 +463,14 @@ BENIGN_LOOKALIKE_COMMANDS = [
     # A glob in a MIDDLE segment of an ordinary path composes nothing sensitive —
     # resolving `..` and matching segment-wise must not start flagging these.
     "tar czf /tmp/a.tgz ~/projects/*/dist",
+    # `export`/`readonly` NAME=value are assignment-only and credit the name to
+    # later segments, just like a bare `NAME=value; cmd`.
+    "export A=/data; ls $A",
+    "export A=/data && ls $A",
+    "readonly A=/data; ls $A",
+    # An unquoted newline is a foreground separator in sh (like `;`).
+    "A=/data\nls $A",
+    "A=/data\nB=$A/x\nls $B",
 ]
 
 BENIGN_COMMANDS = [
@@ -418,6 +540,285 @@ def _cron_caller_is_named(named_cron_caller):
 def test_vet_shell_command_blocks_malicious(cmd):
     err = _vet_shell_command(cmd)
     assert err is not None and err.startswith("Error:"), f"should block: {cmd!r}"
+
+
+def test_nested_shell_sees_a_local_reference_as_empty():
+    """A local assignment is out of scope one shell level down.
+
+    `sh -c '...'` is single-quoted, so the outer shell expands nothing inside it
+    and the inner shell -- which never received the assignment -- expands the
+    reference to the empty string. Resolving it to the OUTER value is what hides
+    the path: the command carries a literal `.ssh`, and substitution turns it
+    into `.sshs`, which matches nothing. The empty view is the one the inner
+    shell actually evaluates, so it has to be scanned too.
+    """
+    assert _vet_shell_command("A=s; sh -c 'cat ~/.ssh$A/id_rsa'") is not None
+    assert _vet_shell_command("A=h; B=s; sh -c 'cat ~/.ssh$B${A}/id_rsa'") is not None
+    # The same reference in the OUTER shell is still resolved, not emptied: this
+    # one composes a harmless path and must stay allowed.
+    assert _vet_shell_command("A=logs; tar czf /tmp/x.tgz ~/$A") is None
+
+
+def test_a_value_keeping_its_backslash_is_unescaped_after_resolution():
+    r"""`A="\s"h` stores `\sh`, and the resolved view must be unescaped too.
+
+    Keeping the backslash in the stored value is correct -- inside double quotes
+    sh only drops it before ``$ ` " \`` and newline -- but the credential scan
+    then sees `.s\sh`, a name it cannot match, while the shell's word expansion
+    drops the backslash and opens `.ssh`. The pre-resolution unescaped views
+    cannot cover it, because the backslash enters with the value.
+    """
+    assert _vet_shell_command(r'A="\s"h; cat ~/.s${A}/id_rsa') is not None
+    assert _vet_shell_command(r'A="\a"ws; cat ~/.$A/credentials') is not None
+
+
+def test_a_reference_the_outer_shell_leaves_alone_is_emptied_not_resolved():
+    r"""Quoting decides WHICH shell expands a reference, so the view must too.
+
+    `\$A` and a single-quoted `'$A'` both survive the outer shell and are
+    expanded by the nested one, against an environment that never received the
+    assignment -- so they yield empty there. An unquoted or double-quoted
+    reference is expanded by the outer shell and reaches the nested one as text.
+    `A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'` needs both rules in a single word.
+    """
+    assert _vet_shell_command(r"A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'") is not None
+    assert _vet_shell_command(r"A=w; sh -c 'cat ~/.a'$A'${A}s/credentials'") is not None
+    assert _vet_shell_command(r'A="\s"h; sh -c "cat ~/.s\$A${A}/id_rsa"') is not None
+
+
+def test_an_export_prefix_and_eval_keep_the_outer_value():
+    r"""Neither an `A=v cmd` prefix nor `eval` hides a reference from the resolver.
+
+    An assignment PREFIX is exported to the child, so the nested shell sees the
+    outer value -- `A=1 sh -c "echo \$A"` prints `1`. `eval` re-parses in the
+    CURRENT shell, so `\$A` expands there. Refusing either would block ordinary
+    one-liners for no gain, so the resolved view governs both.
+    """
+    assert _vet_shell_command(r'A=1 sh -c "echo \$A"') is None
+    assert _vet_shell_command(r'MODE=fast sh -c "echo \$MODE"') is None
+    assert _vet_shell_command(r'A=1; eval "echo \$A"') is None
+    assert _vet_shell_command(r'awk -v n=5 "{print \$n}" /etc/hostname') is None
+
+
+def test_a_chained_value_is_resolved_against_the_earlier_one():
+    r"""`B=$A` stores A's VALUE, so the nested view must too.
+
+    Quote removal alone leaves the reference in the stored value, and
+    substituting that raw value into a scanned view puts a `$A` there that no
+    later pass resolves. `A=s; B=$A; sh -c 'cat ~/.s'$B'${A}h/id_rsa'` then
+    composes `~/.ssh/id_rsa` for the nested shell while every variant sees a
+    literal `$A`.
+    """
+    assert _vet_shell_command(r"A=s; B=$A; sh -c 'cat ~/.s'$B'${A}h/id_rsa'") is not None
+    assert _vet_shell_command(r"A=w; B=$A; sh -c 'cat ~/.a'$B'${A}s/credentials'") is not None
+    assert _vet_shell_command("A=logs; B=$A; tar czf /tmp/x.tgz ~/$B") is None
+
+
+def test_propagation_needs_a_foreground_separator_and_unquoted_words():
+    """A name carries forward only where that can be PROVEN.
+
+    `_split_segments` is quote-blind and `_iter_local_assignments` is deliberately
+    conservative, so the walk credits a name only across `;`, `&&` or `||`, only
+    when both split points are outside quotes, and only when every UNQUOTED word in
+    the segment is an assignment. A lone `&` backgrounds the assignment in a
+    subshell and a pipeline stage is one, so the parent's name stays unset. An
+    uncredited name leaves `$A` unresolved, which the existing leftover-reference
+    refusal turns into a refusal.
+    """
+    assert _vet_shell_command("A=s & cat ~/.ssh$A/id_rsa") is not None
+    assert _vet_shell_command("A=ws & cat ~/.aws$A/credentials") is not None
+    assert _vet_shell_command("true | A=s; cat ~/.ssh$A/id_rsa") is not None
+    assert _vet_shell_command('echo "a; A=s; b"; cat ~/.ssh$A/id_rsa') is not None
+    # A quoted value holding a space must not end the prefix walk early.
+    assert _vet_shell_command("X='foo bar' A=s cat ~/.ss$A/id_rsa") is not None
+    # Foreground separators still propagate, as sh does.
+    assert _vet_shell_command("A=logs; tar czf /tmp/x.tgz ~/$A") is None
+    assert _vet_shell_command("A=.s && B=sh && cp ~/$A$B/id_rsa /tmp/key") is not None
+    # An unquoted newline is a foreground separator.
+    assert _vet_shell_command("A=logs\ntar czf /tmp/x.tgz ~/$A") is None
+    assert _vet_shell_command("A=.s\nB=sh\ncp ~/$A$B/id_rsa /tmp/key") is not None
+
+
+def test_an_assignment_reaches_later_segments_only_when_its_segment_only_assigns():
+    """`echo A=x`, `A=s true` and a pipeline stage all leave `$A` unset after.
+
+    `_iter_local_assignments` is deliberately conservative and yields a pair for
+    any `NAME=value` word, which is right for scanning that segment and wrong for
+    anything after it: `echo A=x` passes the text to echo, `A=s true` applies the
+    assignment to `true`'s environment only, and a pipeline stage runs in a
+    subshell. Crediting the value scans `~/.sshx/id_rsa` while sh opens
+    `~/.ssh/id_rsa`. Left uncredited, `$A` stays unresolved and the gate's
+    existing leftover-reference refusal fires.
+    """
+    assert _vet_shell_command("echo A=x; cat ~/.ssh$A/id_rsa") is not None
+    assert _vet_shell_command("A=s true; cat ~/.ssh$A/id_rsa") is not None
+    assert _vet_shell_command("A=s | cat ~/.ssh$A/id_rsa") is not None
+    # A segment that only assigns still reaches what follows, as sh does.
+    assert _vet_shell_command("A=logs; tar czf /tmp/x.tgz ~/$A") is None
+    assert _vet_shell_command("A=.s; B=sh; cp ~/$A$B/id_rsa /tmp/key") is not None
+
+
+def test_export_readonly_are_treated_as_assignment_only_segments():
+    """export/readonly NAME=value credits the name to later segments.
+
+    `export A=v` and `readonly A=v` are semantically assignment-only: every
+    unquoted word is either a keyword or a NAME=value, so the segment is
+    credited and `$A` is resolved in what follows. Refusing these was a
+    regression against commands that worked before this PR.
+    """
+    assert _vet_shell_command("export A=logs; tar czf /tmp/x.tgz ~/$A") is None
+    assert _vet_shell_command("export A=/data; ls $A") is None
+    assert _vet_shell_command("readonly A=/data; ls $A") is None
+    assert _vet_shell_command("export A=/data && ls $A") is None
+    # Still refused when the exported value assembles a credential path.
+    assert _vet_shell_command("export A=.s; export B=sh; cp ~/$A$B/id_rsa /tmp/key") is not None
+
+
+def test_a_conditional_or_compound_assignment_is_not_credited():
+    """An assignment entered via && or || may not have run.
+
+    `false && A=x` leaves `$A` at its prior value because the shell
+    short-circuits. Crediting the assignment scans a harmless path while
+    the real command opens the credential. Any assignment entered via `&&`
+    or `||` makes the name UNKNOWN.
+    """
+    assert _vet_shell_command("A=h; false && A=x; cat ~/.ss$A/id_rsa") is not None
+    assert _vet_shell_command("false && A=s; cat ~/.ssh$A/id_rsa") is not None
+    assert _vet_shell_command("A=h; true || A=x; cat ~/.ss$A/id_rsa") is not None
+    # Foreground `;` still propagates as before.
+    assert _vet_shell_command("A=logs; tar czf /tmp/x.tgz ~/$A") is None
+
+
+def test_an_unproven_reassignment_makes_the_name_unknown():
+    """A name reassigned where execution is unproven becomes UNKNOWN.
+
+    `A=h; false && A=x` -- A was credited from the first segment; the
+    conditional segment tries to overwrite it. Since we cannot prove whether
+    `A=x` ran, A is removed from env and the leftover-reference check fires.
+    """
+    err = _vet_shell_command("A=h; false && A=x; cat ~/.ss$A/id_rsa")
+    assert err is not None and "unresolved variable reference" in err
+    # Unconditional reassignment is still credited.
+    assert _vet_shell_command("A=h; A=logs; tar czf /tmp/x.tgz ~/$A") is None
+
+
+def test_export_and_readonly_assign_in_the_current_shell():
+    """`export A=v; cmd` and `readonly A=v; cmd` persist A unconditionally.
+
+    Both are POSIX builtins that assign in the current shell. The export
+    chain `export A=x B=.ss$A` must expand B using A's ENTRY value (the old
+    one), not the new A=x -- otherwise the gate scans .ssx while sh stores
+    .ssh in B.
+    """
+    assert _vet_shell_command("export A=logs; tar czf /tmp/x.tgz ~/$A") is None
+    assert _vet_shell_command("readonly A=logs; tar czf /tmp/x.tgz ~/$A") is None
+    # Export chain attack: B=.ssh from old A, not .ssx from new A.
+    assert _vet_shell_command("A=h; export A=x B=.ss$A; cat ~/$B/id_rsa") is not None
+
+
+def test_an_escaped_dollar_is_synthesis_even_when_it_names_an_earlier_value():
+    r"""A backslash-escaped `$` in a value stores literal `$NAME` for a nested shell.
+
+    `A=\$B` stores the two-character text `$B` in A (the outer shell consumes
+    the backslash). A nested `sh -c` receives `$B` literally and expands it.
+    """
+    assert _vet_shell_command(r'A=\$B; sh -c "cat ~/.ssh${A}/id_rsa"') is not None
+    assert _vet_shell_command(r"A=\$; sh -c 'cat ~/.ssh$A/id_rsa'") is not None
+    # Plain $NAME in a value (unescaped) is not synthesis.
+    assert _vet_shell_command("A=logs; B=$A; tar czf /tmp/x.tgz ~/$B") is None
+
+
+def test_split_points_are_unquoted_checks_escape():
+    r"""An ESCAPED separator is not a real separator.
+
+    `echo a\;B=zzz; cat ~/.ssh$B/id_rsa` -- the `\;` is an escaped
+    semicolon passed as part of the echo argument, not a command boundary.
+    sh executes `echo 'a;B=zzz'` and then `cat ~/.ssh/id_rsa` (with B
+    unset). Only `split_points_are_unquoted` catches this: the quote-blind
+    split sees ` A=zzz` as an assignment-only segment and credits B.
+    """
+    err = _vet_shell_command(r"echo a\;B=zzz; cat ~/.ssh$B/id_rsa")
+    assert err is not None, "escaped ; must not be treated as a separator"
+    err2 = _vet_shell_command(r"echo a\;B=ws; cat ~/.aws$B/credentials")
+    assert err2 is not None
+    # An unescaped semicolon is still a real separator and carries the name.
+    assert _vet_shell_command("B=logs; tar czf /tmp/x.tgz ~/$B") is None
+
+
+def test_a_command_word_naming_its_own_prefix_is_refused():
+    r"""The value such a word sees is inherited, so no view can model it.
+
+    `A=s cat ~/.ss$A/id_rsa` expands `$A` before `A=s` is applied, so it reads
+    whatever the gateway process inherited -- `A=zzz echo "[$A]"` prints the
+    inherited value, verified. With `A=h` present this opens `.ssh`.
+
+    Only a reference the OUTER shell expands counts. Inside single quotes, or with
+    the `$` escaped, the invoked command expands it, and that command DID receive
+    the prefix: `A=1 B=$A sh -c 'echo [$B]'` prints `1`.
+    """
+    err = _vet_shell_command("A=s cat ~/.ss$A/id_rsa")
+    assert err is not None and "inherited environment" in err
+    assert _vet_shell_command("A=x cat ~/.aw$A/credentials") is not None
+    assert _vet_shell_command(r"A=1 B=$A sh -c 'echo [$B]'") is None
+    assert _vet_shell_command(r'A=1 sh -c "echo \$A"') is None
+    assert _vet_shell_command("TZ=UTC LANG=C date") is None
+
+
+def test_a_prefix_assignment_is_not_in_scope_for_its_own_arguments():
+    """`A=s cat ~/.ssh$A/id_rsa` opens `.ssh`, not `.sshs`.
+
+    An assignment with no separator between it and the command is a PREFIX: sh
+    expands the command's words first, with the name still unset, and applies the
+    assignment to the invoked command's environment afterwards. Resolving it to
+    `s` scans a harmless path while the shell reads the key.
+    """
+    assert _vet_shell_command("A=s cat ~/.ssh$A/id_rsa") is not None
+    assert _vet_shell_command("A=w cat ~/.aws$A/credentials") is not None
+    # A separator-terminated assignment really is in scope for what follows, so
+    # this one composes `.sshs` and reaches nothing.
+    assert _vet_shell_command("A=s; cat ~/.ssh$A/id_rsa") is None
+    # An env-var prefix with nothing to expand stays ordinary.
+    assert _vet_shell_command("TZ=UTC date") is None
+
+
+def test_a_trailing_reassignment_cannot_hide_an_earlier_read():
+    r"""sh evaluates a reference when it REACHES that command.
+
+    A map holding only the last value per name lets `; A=x` at the end rewrite a
+    read earlier in the string, so the scan sees a harmless path while sh opens
+    the key. The nested view resolves each reference against the environment at
+    its OWN segment, from the same walk the resolver uses.
+    """
+    assert _vet_shell_command(r"A=s; sh -c 'cat ~/.s'$A'${A}h/id_rsa'; A=x") is not None
+    assert _vet_shell_command(r"A=w; sh -c 'cat ~/.a'$A'${A}s/credentials'; A=q") is not None
+    # The order-sensitivity cuts both ways: `B` captures `x` before `A` is
+    # reassigned, so this composes `~/xsh/` and must stay allowed.
+    assert _vet_shell_command("A=x; B=$A; A=.s; C=sh; cp ~/${B}${C}/id_rsa /tmp/key") is None
+
+
+def test_an_allowlisted_reference_in_a_value_is_not_synthesis():
+    """`$HOME` in a VALUE is the documented way a cron names a path.
+
+    The synthesis rule refuses a `$` that names no earlier assignment, because
+    what it builds depends on quoting. `$HOME` is the one reference the gate
+    allows unresolved -- a fixed prefix that composes no fragment -- so it is
+    exempt there as it is everywhere else.
+    """
+    assert _vet_shell_command("DEST=$HOME/backups; tar czf /tmp/b.tgz $DEST") is None
+    assert _vet_shell_command("DEST=$HOME/backups; echo $DEST") is None
+
+
+def test_a_value_carrying_a_bare_dollar_is_refused():
+    r"""A `$` in a VALUE synthesizes a reference no single view can model.
+
+    `DOLLAR=\$` makes `${DOLLAR}A` build `$A` for the inner shell, which expands
+    it to empty and reads `~/.ssh/id_rsa`. Which shell level expands which
+    reference depends on the quoting around each one, so the construct is refused
+    rather than approximated.
+    """
+    assert _vet_shell_command(r'DOLLAR=\$; A=s; sh -c "cat ~/.ssh${DOLLAR}A/id_rsa"') is not None
+    # Chaining to an EARLIER assignment is not synthesis and stays allowed.
+    assert _vet_shell_command("A=logs; B=$A; tar czf /tmp/x.tgz ~/$B") is None
 
 
 def test_chained_assignments_cannot_exhaust_memory_or_time():
