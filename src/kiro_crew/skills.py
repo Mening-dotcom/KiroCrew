@@ -144,6 +144,58 @@ def _body_term_hits(content: str, terms: Iterable[str]) -> int:
     return sum(1 for term in terms if any(bt.startswith(term) for bt in body_terms))
 
 
+#: Characters of skipped project ``always: true`` entries kept for the warning,
+#: and separately for the in-prompt notice, before the rest are only counted. The
+#: keys come from a checked-out repository, which chooses how many there are.
+_SKIPPED_PROJECT_KEYS_MAX_CHARS = 2000
+#: Characters of each skipped key the warning keeps; the notice keeps whole keys,
+#: since a cut key cannot be read back.
+_SKIPPED_PROJECT_KEY_LOG_CHARS = 200
+
+
+class SkippedProjectSkills:
+    """Project ``always: true`` skills left out, bounded where they are retained.
+
+    ``count`` covers every skipped row. ``logged`` (warning items, each key's
+    ``repr`` cut to ``_SKIPPED_PROJECT_KEY_LOG_CHARS`` plus its quotes) and
+    ``notice`` (whole-key read pointers) each keep only their leading items that
+    fit ``_SKIPPED_PROJECT_KEYS_MAX_CHARS`` together. The warning always names the
+    first row; the notice names none whose pointer alone is past the bound. Each
+    list closes at its first item that does not fit, so the rows it names are the
+    first ones skipped.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.logged: list[str] = []
+        self.notice: list[str] = []
+        self._logged_chars = 0
+        self._notice_chars = 0
+        self._logged_closed = False
+        self._notice_closed = False
+
+    def add(self, key: str, reason: str) -> None:
+        self.count += 1
+        if not self._logged_closed:
+            # Capped AFTER rendering as well: ``repr`` turns a non-printable code
+            # point into as many as ten characters, so the cut key alone does not
+            # bound what is kept (the two extra characters are the quotes).
+            shown = repr(key[:_SKIPPED_PROJECT_KEY_LOG_CHARS])[: _SKIPPED_PROJECT_KEY_LOG_CHARS + 2]
+            item = f"{shown} ({reason})"
+            self._logged_chars += len(item) + 2
+            if self._logged_chars > _SKIPPED_PROJECT_KEYS_MAX_CHARS and self.logged:
+                self._logged_closed = True
+            else:
+                self.logged.append(item)
+        if not self._notice_closed:
+            line = f"- skill_search(action='read', key={key!r})"
+            self._notice_chars += len(line) + 2
+            if self._notice_chars > _SKIPPED_PROJECT_KEYS_MAX_CHARS:
+                self._notice_closed = True
+            else:
+                self.notice.append(line)
+
+
 def _namespace_groups(skills: list[dict]) -> list[tuple[str, int]]:
     """Family label and member count for the skills the discovery entry omits.
 
@@ -808,11 +860,20 @@ def _decode_skill_text(raw: bytes, *, strict: bool = True) -> str:
     ``\r``, nothing would match ``always`` or ``pinned``, and skill bodies would
     silently stop being injected there while Linux and macOS looked fine.
 
+    ``utf-8-sig`` for the same reason: a UTF-8 file saved "with BOM" (Notepad and
+    other Windows editors) is valid UTF-8 whose first character is U+FEFF, which
+    is not content. Left in, it sits in front of the ``---`` fence, so the
+    frontmatter grammar (column 0, position 0) finds no block and the skill lists
+    with no metadata -- and the mark itself lands in the injected body. The codec
+    strips one leading mark and is otherwise plain UTF-8: a file without one
+    decodes byte-for-byte as before, and a file that is not UTF-8 at all (UTF-16,
+    which opens with ``0xFF``) still raises under *strict*.
+
     *strict* decoding propagates invalid UTF-8, which a WRITER must hear
     (``update_auto_skill`` carries version metadata across a rewrite). Callers
     that only render text pass ``strict=False``.
     """
-    text = raw.decode("utf-8") if strict else raw.decode("utf-8", errors="replace")
+    text = raw.decode("utf-8-sig") if strict else raw.decode("utf-8-sig", errors="replace")
     # Universal newlines, matching TEXT-mode reads: CRLF and lone CR both fold.
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -924,6 +985,41 @@ def _disabled_app_names() -> frozenset[str]:
     except Exception:
         logger.debug("skills: could not read app enablement", exc_info=True)
         return frozenset()
+
+
+# One unreadable SKILL.md costs its own row, never the index. The listing runs
+# on every chat turn and every Skills-page poll, and a failed read is never
+# cached, so without a bound a persistent bad file would write the same line
+# every few seconds. The bounded cache warns about once per (file, stat
+# fingerprint, problem): an unchanged bad file does not repeat, and a re-saved
+# one -- a new mtime -- earns a fresh line, so the operator who fixes it wrongly
+# twice hears about it twice.
+@functools.lru_cache(maxsize=256)
+def _warn_unreadable_skill(path: str, fingerprint: str, problem: str) -> None:
+    logger.warning("Skipping skill whose SKILL.md could not be read: %s (%s)", path, problem)
+
+
+def _warning_fingerprint(skill_file: Path, *, within: str | None) -> str:
+    """The stat fingerprint the warning bound keys on, one for every unconfined reader.
+
+    Taken HERE, when the read has already failed, never handed in by the
+    caller: the listing's own fingerprint is the catalog walk's until the next
+    walk, so a bad file re-saved out of band would keep its old identity and
+    the fresh line the operator is promised would wait for the refresh. A stat
+    on a failure only, so the hot path pays nothing, and it is the same
+    ``body_fingerprint`` string the listing and the catalog walk build (the
+    bare stat, without a mapped row's root suffix). One turn runs both the
+    listing and the matcher over the same file; with one key they warn once
+    between them. A confined row is never stat'ed by path (its reader is
+    descriptor-pinned) and never fails here, and a path the stat itself refuses
+    keys on the empty string, as the listing's own failed stat does.
+    """
+    if within is not None:
+        return ""
+    try:
+        return body_fingerprint(skill_file) or ""
+    except ValueError:  # a path no filesystem holds, such as an embedded NUL byte
+        return ""
 
 
 def _dedupe_identical_skills(skills: list[dict]) -> list[dict]:
@@ -3615,6 +3711,54 @@ class SkillsLoader:
         self._fm_cache[key] = (mtime, meta)
         return meta
 
+    def _readable_frontmatter(
+        self,
+        path: Path,
+        *,
+        within: str | None,
+        mtime: float | None = None,
+        canonical_root: str | None = None,
+    ) -> dict[str, str] | None:
+        """Frontmatter for a READER, or ``None`` when the row must be dropped.
+
+        The unconfined metadata read is strict on purpose: writers share it and
+        must never rewrite metadata they could not decode, so
+        :meth:`_cached_frontmatter` raises rather than guessing. A reader has the
+        opposite duty -- the index it is building, or the turn it is serving,
+        must not die on one file -- so every reader on the per-turn path takes
+        its metadata through here: the listing, the trigger matcher, and the two
+        renderers of its matches. A SKILL.md that is not UTF-8 (a UTF-16 file
+        PowerShell wrote, say) or that cannot be opened costs its own row, with
+        one warning naming the file and the problem, and the caller skips it. A
+        confined row never raises here (its reader already degrades), so the
+        call is uniform. ``None`` means "already warned about; drop it".
+
+        The warning keys on a stat taken at the failure (see
+        ``_warning_fingerprint``), so every reader keys the bound the same way
+        and a re-saved file earns its fresh line at once.
+        """
+        try:
+            return self._cached_frontmatter(
+                path, mtime=mtime, within=within, canonical_root=canonical_root
+            )
+        except UnicodeDecodeError as exc:
+            _warn_unreadable_skill(
+                str(path),
+                _warning_fingerprint(path, within=within),
+                f"not UTF-8 text: {exc}; re-save it as UTF-8",
+            )
+            return None
+        except (OSError, ValueError) as exc:
+            # A file that vanished or cannot be opened between enumeration and
+            # this read: the unconfined reader raises rather than refuses (see
+            # ``_read_enumerated_skill_bytes``), and a reader degrades.
+            _warn_unreadable_skill(
+                str(path),
+                _warning_fingerprint(path, within=within),
+                str(exc) or type(exc).__name__,
+            )
+            return None
+
     def _confined_frontmatter_and_size(self, path: Path, within: str) -> tuple[dict[str, str], int]:
         """Read confined metadata before any path-following metadata probe."""
         refusal_reasons: list[str] = []
@@ -3701,7 +3845,21 @@ class SkillsLoader:
 
         def read_entry(
             entry: _ScopedSkillEntry,
-        ) -> tuple[dict[str, str], int, str, tuple[str, str, dict] | None, int]:
+        ) -> tuple[dict[str, str], int, str, tuple[str, str, dict] | None, int] | None:
+            """Read one row's metadata; ``None`` means the row is dropped.
+
+            The unconfined read is strict on purpose (writers share it and must
+            never rewrite metadata they could not decode), so a SKILL.md that is
+            not UTF-8 -- a UTF-16 file PowerShell wrote, say -- raises out of
+            ``_cached_frontmatter``. This is a READER, so it takes its metadata
+            through ``_readable_frontmatter``, which catches at this call site --
+            both when it runs on the calling thread and when it runs on the pool
+            (where an exception would otherwise surface at ``future.result()``):
+            that one row is dropped with one warning naming the file, and every
+            other row is listed. Uncaught, one such file takes the whole index
+            with it: ``GET /api/skills`` answers 500 and every chat turn's
+            context build fails.
+            """
             name, skill_file, project_root, mapping_root = entry
             fingerprint = ""
             changed = None
@@ -3709,7 +3867,6 @@ class SkillsLoader:
             if project_root is not None:
                 meta, size_bytes = self._confined_frontmatter_and_size(skill_file, project_root)
             else:
-                st: os.stat_result | None = None
                 # A mapped row's fingerprint carries its mapping root, so the hint
                 # (which records the bare stat) would not match what is stored.
                 hinted = None if mapping_root else fingerprint_hint.get(str(skill_file))
@@ -3719,29 +3876,39 @@ class SkillsLoader:
                 else:
                     try:
                         st = skill_file.stat()
-                    except OSError:
-                        st = None
+                    except (OSError, ValueError) as exc:
+                        # The same answer as a failed read below. Without it the
+                        # row went on to a second stat inside ``_cached_frontmatter``
+                        # that swallows its own failure into ``{}``, which listed a
+                        # file that is gone as a row named after its path.
+                        # ``ValueError`` as well: a row adopted from the stored
+                        # snapshot can name a path no filesystem holds -- one with
+                        # an embedded NUL byte -- which ``os.stat`` refuses before
+                        # any syscall, and the index is agent-writable.
+                        _warn_unreadable_skill(str(skill_file), "", f"could not stat: {exc}")
+                        return None
                     fingerprint = (
                         f"{st.st_dev}:{st.st_ino}:{st.st_ctime_ns}:{st.st_mtime_ns}:{st.st_size}"
-                        if st is not None
-                        else ""
                     )
-                    if fingerprint and mapping_root:
+                    if mapping_root:
                         fingerprint += f":{mapping_root}"
-                    mtime = st.st_mtime if st is not None else None
-                    size_bytes = st.st_size if st is not None else 0
+                    mtime = st.st_mtime
+                    size_bytes = st.st_size
                 cached = cached_metadata.get(str(skill_file))
                 if cached and cached[0] == fingerprint and cached[1].get("_catalog_key") == name:
                     meta = cached[1]
                 else:
                     reads += 1
                     self._fm_cache.pop(str(skill_file), None)
-                    meta = self._cached_frontmatter(
+                    meta_or_none = self._readable_frontmatter(
                         skill_file,
-                        mtime=mtime,
                         within=None,
+                        mtime=mtime,
                         canonical_root=mapping_root,
                     )
+                    if meta_or_none is None:
+                        return None
+                    meta = meta_or_none
                     meta["_catalog_key"] = name
                     if fingerprint:
                         changed = (str(skill_file), fingerprint, meta)
@@ -3752,7 +3919,7 @@ class SkillsLoader:
         def rows() -> Iterator[
             tuple[
                 _ScopedSkillEntry,
-                tuple[dict[str, str], int, str, tuple[str, str, dict] | None, int],
+                tuple[dict[str, str], int, str, tuple[str, str, dict] | None, int] | None,
             ]
         ]:
             if len(entries) < _CATALOG_READ_BATCH:
@@ -3768,7 +3935,10 @@ class SkillsLoader:
                     ]
                     yield from zip(batch, (future.result() for future in futures))
 
-        for entry, (meta, size_bytes, fingerprint, changed, reads) in rows():
+        for entry, read in rows():
+            if read is None:
+                continue  # one unreadable file, already warned about; the index goes on
+            meta, size_bytes, fingerprint, changed, reads = read
             name, skill_file, project_root, mapping_root = entry
             if changed is not None:
                 changed_metadata.append(changed)
@@ -7200,7 +7370,11 @@ class SkillsLoader:
         visible = self._iter_visible(project_dir) if cap > 0 else ()
         text_words: set[str] = words_of(text) if cap > 0 else set()
         for name, skill_file, _within in visible:
-            meta = self._cached_frontmatter(skill_file, within=_within)
+            # A reader on the per-message path: one SKILL.md that is not UTF-8
+            # costs its own match, never the turn (rationale on the helper).
+            meta = self._readable_frontmatter(skill_file, within=_within)
+            if meta is None:
+                continue
             if meta.get("always", "").strip().lower() == "true":
                 continue
             triggers = meta.get("triggers", "")
@@ -7312,7 +7486,11 @@ class SkillsLoader:
             if found is None:
                 continue
             skill_file, within = found
-            meta = self._cached_frontmatter(skill_file, within=within)
+            # A reader on the per-message path: one SKILL.md that is not UTF-8
+            # costs its own match, never the turn (rationale on the helper).
+            meta = self._readable_frontmatter(skill_file, within=within)
+            if meta is None:
+                continue
             if within is not None:
                 enforced.append(name)
             elif meta.get("inject_on_trigger", "").strip().lower() == "false":
@@ -7354,7 +7532,11 @@ class SkillsLoader:
             skill_file, within = found
             if within is not None:
                 continue
-            meta = self._cached_frontmatter(skill_file, within=within)
+            # A reader on the per-message path: one SKILL.md that is not UTF-8
+            # costs its own pointer line, never the turn (rationale on the helper).
+            meta = self._readable_frontmatter(skill_file, within=within)
+            if meta is None:
+                continue
             desc = self._short_desc(meta.get("description", "") or name, suffix="…")
             lines.append(f"- **{meta.get('name', name)}**: {desc} → `{skill_file}`")
         if not lines:
@@ -7409,9 +7591,11 @@ class SkillsLoader:
         """Build a bounded directory over the agent's resolved available set.
 
         Mapping grants availability, not eager body delivery. Ordinary global and
-        confined skills load on demand through scoped search/list/read. Required
-        ``always:true`` bodies share PINNED_SKILL_BODIES_CAP; exceeding it raises
-        SkillContextCapacityError instead of silently dropping instructions.
+        confined skills load on demand through scoped search/list/read. The
+        operator's required ``always:true`` bodies share PINNED_SKILL_BODIES_CAP;
+        exceeding it raises SkillContextCapacityError instead of silently dropping
+        instructions. A project's ``always:true`` bodies use *project_body_budget*
+        (``budget`` when None) and degrade to directory rows with a warning.
 
         ``budget`` bounds optional discovery characters. ``discovery_only`` selects
         the shorter pointer; both variants expose complete paginated discovery.
@@ -7473,26 +7657,20 @@ class SkillsLoader:
         parts: list[str] = []
         pinned_spent = 0
 
-        # Pinned global skills: full content, always injected.
-        # A confined path must never be offered to the agent for a later direct
-        # read, because that read would sit outside the descriptor-pinned gate.
+        # The operator's own pinned skills: full content, always injected, and a
+        # body that cannot be delivered fails the session rather than vanishing.
+        # Confined project rows are excluded here: a checked-out repository must
+        # not be able to fail every session in that project.
         for s in all_skills:
-            if s["key"] not in pinned:
+            if s["key"] not in pinned or s.get("confine_root"):
                 continue
             remaining = max(0, PINNED_SKILL_BODIES_CAP - pinned_spent)
-            if s.get("confine_root"):
-                remaining = min(remaining, PROJECT_SKILL_BODY_CAP)
             content = self.read_scoped_skill(
                 str(s["key"]), only=only, project_dir=project_dir, max_bytes=remaining
             )
             if content is None:
-                detail = (
-                    f"the {PROJECT_SKILL_BODY_CAP}-byte per-project-skill limit, "
-                    if s.get("confine_root")
-                    else ""
-                )
                 raise SkillContextCapacityError(
-                    f"Required skill {s['key']!r} could not be loaded within {detail}"
+                    f"Required skill {s['key']!r} could not be loaded within "
                     f"the {PINNED_SKILL_BODIES_CAP}-byte total startup instruction "
                     "capacity, or its file was unreadable. Reduce always:true skills "
                     "or their bodies and verify the file before retrying."
@@ -7506,6 +7684,53 @@ class SkillsLoader:
                     "startup instruction capacity; reduce always:true skills."
                 )
             parts.append(rendered)
+
+        # A trusted project's pinned skills ride their own budget, through the same
+        # descriptor-pinned, byte-capped reader as before. A path is never offered for
+        # a later direct read, since that read would sit outside the gate. A body that
+        # does not fit or cannot be read is skipped with a warning, named in a notice
+        # in the required block, and returned to the directory below.
+        project_pinned = [s for s in all_skills if s["key"] in pinned and s.get("confine_root")]
+        project_parts: list[str] = []
+        # A skipped row is discarded from *pinned* as it is skipped, which returns it
+        # to the directory without retaining its key a second time.
+        skipped = self._append_project_skill_bodies(
+            project_parts,
+            project_pinned,
+            project_dir,
+            project_body_budget if project_body_budget is not None else budget,
+            pinned,
+        )
+        parts.extend(project_parts)
+        if skipped.count:
+            logger.warning(
+                "%d always: true skill(s) from trusted project %r were not injected: %s%s. "
+                "They stay listed for skill_search. Reduce the project's always: true skills "
+                "or their bodies, or revoke the project-skill trust grant for that project "
+                "to stop loading its skills.",
+                skipped.count,
+                str(project_pinned[0]["confine_root"]),
+                "; ".join(skipped.logged),
+                (
+                    f"; and {skipped.count - len(skipped.logged)} more"
+                    if skipped.count > len(skipped.logged)
+                    else ""
+                ),
+            )
+            # In the prompt, not only in the log: the agent has to know a required
+            # instruction is missing. It reads one on demand rather than all of them,
+            # which would spend the context the project budget exists to protect.
+            notice_lines = list(skipped.notice)
+            if skipped.count > len(notice_lines):
+                notice_lines.append(
+                    f"- ...and {skipped.count - len(notice_lines)} more not named here."
+                )
+            parts.append(
+                "### Project skills not injected\n\n"
+                "This project marks these skills always: true, but they did not fit this "
+                "session's project skill budget or could not be read. Read one when its "
+                "topic applies to the task:\n" + "\n".join(notice_lines)
+            )
 
         def wrap(items: list[str]) -> str:
             if not items:
@@ -7683,8 +7908,22 @@ class SkillsLoader:
         project_skills: list[dict],
         project_dir: str | Path | None,
         budget: int | None,
-    ) -> None:
-        """Append confined bodies without reading beyond the section budget."""
+        pinned: set[str] | None = None,
+    ) -> SkippedProjectSkills:
+        """Append confined bodies without reading beyond the section budget.
+
+        Returns the skills left out, bounded at retention. Each one is also
+        discarded from *pinned*, when given (the caller's set is mutated), so it
+        rejoins the directory.
+        """
+        skipped = SkippedProjectSkills()
+
+        def skip(key: str, reason: str) -> None:
+            skipped.add(key, reason)
+            if pinned is not None:
+                pinned.discard(key)
+
+        over_budget = f"past the room left in the project skill budget of {budget}"
         wrapper_size = len("[Skills:]\n") + len("\n[End of skills]\n\n")
         separator_size = len("\n\n---\n\n")
         used = wrapper_size + sum(len(part) for part in parts)
@@ -7692,26 +7931,35 @@ class SkillsLoader:
             used += separator_size * (len(parts) - 1)
 
         for skill in project_skills:
-            prefix = f"### Skill: {skill['key']}\n\n"
+            key = str(skill["key"])
+            prefix = f"### Skill: {key}\n\n"
             next_separator = separator_size if parts else 0
             max_bytes: int | None = None
             if budget is not None:
                 max_bytes = budget - used - next_separator - len(prefix)
-                if max_bytes <= 0:
-                    break
                 # The enumeration's size is only a hint because the file can be
                 # replaced afterward. It avoids opening a file that cannot fit;
                 # max_bytes on the descriptor-pinned read closes the race.
-                if int(skill.get("size_bytes", 0)) > max_bytes:
+                if max_bytes <= 0 or int(skill.get("size_bytes", 0)) > max_bytes:
+                    skip(key, over_budget)
                     continue
-            content = self.load_skill(skill["key"], project_dir, max_bytes=max_bytes)
+            content = self.load_skill(key, project_dir, max_bytes=max_bytes)
             if not content:
+                skip(key, "unreadable, empty or over its byte limit")
                 continue
+            # Re-checked on the bytes actually delivered: the listing read that
+            # scoped this row came earlier, and the file can change in between.
+            meta = self._parse_frontmatter_text(content)
+            scope = meta.get("repo_scope", "").strip()
+            if scope and not self._repo_scope_satisfied(scope, project_dir):
+                continue  # out of scope: neither delivered nor named, like any scoped row
             part = prefix + self.strip_frontmatter(content)
             if budget is not None and used + next_separator + len(part) > budget:
+                skip(key, over_budget)
                 continue
             parts.append(part)
             used += next_separator + len(part)
+        return skipped
 
     def _record_use(self, key: str) -> None:
         """Best-effort usage bump for the lazy-load ranking. Never raises."""
