@@ -126,6 +126,26 @@ class TestCaptainCaller:
             assert sc.captain_caller(state, CAPTAIN) is True
             assert sc.captain_caller(state, "chat-8-lead") is False
 
+    def test_member_named_like_the_captain_but_bound_elsewhere_is_not(self):
+        # The config entry wins over the name: a member NAMED kirocrew-captain
+        # that runs the worker template must not get the exemption.
+        cfg = SimpleNamespace(
+            agents={
+                CAPTAIN_AGENT_NAME: SimpleNamespace(kiro_agent="kirocrew-worker", member_id="m-1"),
+            }
+        )
+        with patch.object(sc.KiroCrewConfig, "load", return_value=cfg):
+            slot = _slot(CAPTAIN, agent_name=CAPTAIN_AGENT_NAME, memory_store="member-m-1")
+            assert sc.captain_caller(_State(slot), CAPTAIN) is False
+
+    def test_member_named_like_the_captain_with_no_template_is_not(self):
+        cfg = SimpleNamespace(
+            agents={CAPTAIN_AGENT_NAME: SimpleNamespace(kiro_agent="", member_id="m-1")}
+        )
+        with patch.object(sc.KiroCrewConfig, "load", return_value=cfg):
+            slot = _slot(CAPTAIN, agent_name=CAPTAIN_AGENT_NAME, memory_store="member-m-1")
+            assert sc.captain_caller(_State(slot), CAPTAIN) is False
+
     def test_unreadable_config_is_not_a_captain_by_member_name(self):
         with patch.object(sc.KiroCrewConfig, "load", side_effect=RuntimeError("boom")):
             state = _State(_slot(CAPTAIN, agent_name="ops-captain"))
@@ -227,6 +247,59 @@ class TestCaptainReach:
         child = _slot("chat-7-child", agent_name=CAPTAIN_AGENT_NAME, created_by=CAPTAIN)
         state = _State(_slot(CAPTAIN, agent_name=CAPTAIN_AGENT_NAME), child)
         assert sc._caller_is_ownership_fenced(state, "chat-7-child") is True
+
+
+class TestCarriedCaptainRevalidated:
+    """A carried captain admission is re-read at every authorization.
+
+    The HTTP gate decides captain status once per request. A verb that waits on
+    a lock (``adopt_target``) re-authorizes later, and the switch may have been
+    turned off in between: the carried ``False`` must not outlive it.
+    """
+
+    def _state(self, *, member: bool = True):
+        store = "member-x-1" if member else ""
+        captain = _slot(CAPTAIN, agent_name=CAPTAIN_AGENT_NAME, memory_store=store)
+        conductor = _slot("chat-2-cond", created_by="chat-3-other-lead")
+        return _State(captain, conductor)
+
+    def _with(self, captain_on: bool):
+        return (
+            patch.object(sc, "crew_captain_enabled", return_value=captain_on),
+            patch.object(sc, "session_control_enabled", return_value=True),
+            patch.object(sc, "_has_channel_mirror", return_value=False),
+            patch.object(sc, "_store_is_member_owned", return_value=True),
+        )
+
+    def test_carried_captain_still_on_passes(self):
+        a, b, c, d = self._with(True)
+        with a, b, c, d:
+            state = self._state()
+            _passes_the_fence(lambda: _authorize(state, CAPTAIN, "chat-2-cond", precomputed=False))
+
+    def test_carried_captain_revoked_is_fenced(self):
+        a, b, c, d = self._with(False)
+        with a, b, c, d:
+            state = self._state()
+            with pytest.raises(sc.SessionControlError) as exc_info:
+                _authorize(state, CAPTAIN, "chat-2-cond", precomputed=False)
+        assert exc_info.value.code == "not_creator"
+
+    def test_failed_reread_is_fenced(self):
+        a, b, c, d = self._with(True)
+        with a, b, c, d, patch.object(sc, "captain_caller", side_effect=RuntimeError("boom")):
+            state = self._state()
+            with pytest.raises(sc.SessionControlError) as exc_info:
+                _authorize(state, CAPTAIN, "chat-2-cond", precomputed=False)
+        assert exc_info.value.code == "not_creator"
+
+    def test_plain_tab_captain_with_switch_off_stays_unfenced(self):
+        # A person's own non-member tab was never fenced, so losing the
+        # exemption changes nothing for it.
+        a, b, c, d = self._with(False)
+        with a, b, c, patch.object(sc, "_store_is_member_owned", return_value=False):
+            state = self._state(member=False)
+            _passes_the_fence(lambda: _authorize(state, CAPTAIN, "chat-2-cond", precomputed=False))
 
 
 # ── the HTTP gate's carried verdict ─────────────────────────────────────────

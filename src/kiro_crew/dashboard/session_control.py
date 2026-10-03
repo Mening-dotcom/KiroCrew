@@ -754,24 +754,53 @@ def captain_caller(state: "DashboardState", caller_key: str) -> bool:
     return crew_captain_enabled() and session_control_enabled()
 
 
+def _carried_captain_lapsed(state: "DashboardState", caller_key: str) -> bool:
+    """Whether a carried captain exemption for *caller_key* no longer holds.
+
+    ``False`` for a caller whose slot does not run the captain template (an
+    ordinary unfenced caller carried ``False`` by ``close_target``). For a slot
+    that does, ``True`` when :func:`captain_caller` no longer answers yes AND the
+    fence would bind the caller without the exemption; a person's own plain tab
+    running the captain template was never fenced, so losing the exemption
+    changes nothing for it. Any error answers ``True``, so a failed re-read
+    restores the fence.
+    """
+    try:
+        slot = state.get_slot(caller_key)
+        if slot is None or not _runs_captain_template(str(getattr(slot, "agent", "") or "")):
+            return False
+        if captain_caller(state, caller_key):
+            return False
+        return _creator_fenced_ignoring_captain(state, caller_key)
+    except Exception:
+        return True
+
+
 def _runs_captain_template(agent_name: str) -> bool:
     """Whether a slot naming *agent_name* runs the ``kirocrew-captain`` template.
 
     A plain tab stores the template name itself. A crew member's slot stores
     the MEMBER's name, so the template is read off that member's config entry
-    (``kiro_agent``). An unreadable config answers ``False``.
+    (``kiro_agent``). The config entry is read FIRST and wins: a member may be
+    NAMED ``kirocrew-captain`` while bound to another template, and a bare name
+    match would hand it the exemption without the captain template. An entry
+    that is a member (``member_id``) or names a template (``kiro_agent``) answers
+    from its ``kiro_agent`` alone; only a name with no such entry is the template
+    name itself. An unreadable config answers ``False``.
     """
     from kiro_crew.agent_files import CAPTAIN_AGENT_NAME
 
     if not agent_name:
         return False
-    if agent_name == CAPTAIN_AGENT_NAME:
-        return True
     try:
         entry = KiroCrewConfig.load().agents.get(agent_name)
     except Exception:
         return False
-    return getattr(entry, "kiro_agent", "") == CAPTAIN_AGENT_NAME
+    if entry is not None:
+        template = str(getattr(entry, "kiro_agent", "") or "")
+        if template or str(getattr(entry, "member_id", "") or ""):
+            return template == CAPTAIN_AGENT_NAME
+    return agent_name == CAPTAIN_AGENT_NAME
 
 
 def member_admitted_to_scoped_surface(session_key: str, store: str) -> bool:
@@ -3766,6 +3795,22 @@ def authorize_target(
         if precomputed_ownership_fenced is None
         else precomputed_ownership_fenced
     )
+    if (
+        precomputed_ownership_fenced is False
+        and not skip_enabled_check
+        and _carried_captain_lapsed(state, caller_key)
+    ):
+        # A carried ``False`` for a slot running the captain template is the
+        # HTTP gate's captain admission, made once per request. A verb that waits
+        # (``adopt_target``'s tree lock) can outlive it: the operator turns
+        # ``agent.crew_captain`` off, or the slot stops qualifying, while the
+        # request is queued. Re-read the captain verdict here so a revoked
+        # exemption restores the fence at the final authorization. Only the
+        # member verdict stays sticky; the captain verdict never does.
+        # ``skip_enabled_check`` is the no-suspension close re-check, which must
+        # not read config; the switch read it skips is not a containment boundary
+        # there for the same reason ``session_control_enabled()`` is not.
+        ownership_fenced = True
     # A caller addressing ITSELF is not reaching a peer, so the fence has nothing to
     # protect and is waived -- reachable only under ``allow_self``, since the
     # self-target refusal above denies this case for every other verb. Without the
