@@ -3808,7 +3808,16 @@
       "error_harness_outdated": "This Kiro CLI is too old for {{productName}}. Update it, then check again.",
       "error_harness_check_first": "Check the sign-in once first.",
       "error_path_invalid": "Choose how you'd like to start.",
-      "error_step_interrupted": "{{productName}} restarted. Try this step again."
+      "error_step_interrupted": "{{productName}} restarted. Try this step again.",
+      "change_engine": "Choose a different engine",
+      "status_engine_changed": "Back to the engine choice",
+      "error_detail": "Details",
+      "signin_own_command": "Run this in your terminal to sign in to {{label}}. This step updates once you're signed in.",
+      "error_harness_check_failed": "{{productName}} couldn't finish checking {{label}}.",
+      "error_harness_sandbox_nested": "{{label}} couldn't start its own sandbox inside {{productName}}'s (macOS can't nest them).",
+      "error_harness_sandbox_crew": "{{productName}}'s sandbox couldn't start {{label}} on this computer.",
+      "error_harness_sandbox_harness": "{{label}}'s own sandbox couldn't start on this computer.",
+      "error_change_engine_unavailable": "This step can't go back to the engine choice."
     },
     "setupCardTray": {
       "needs_you": "needs you",

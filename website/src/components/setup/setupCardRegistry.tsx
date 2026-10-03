@@ -85,6 +85,10 @@ export interface SetupCardKindEntry {
   /** The card holds an unsaved draft (a secret field, import checkboxes), which a
    *  hand-off's navigation would destroy, so its error notice offers none. */
   draft?: boolean
+  /** The card comes before the first model turn, so no agent can answer yet: its
+   *  error notice offers no hand-off, and shows the server's own words for the
+   *  failure behind a disclosure under the plain sentence. */
+  beforeAgent?: boolean
   /** A commit settles a boot flag server-side (`dashboard.privacy_acked`, the
    *  import stage), so the tab re-reads the boot flags after one. */
   refreshesBoot?: boolean
@@ -115,7 +119,7 @@ export const SETUP_CARD_TITLE_KEY = {
 } as const satisfies Record<SetupCardKind, string>
 
 export const SETUP_CARD_KINDS = {
-  privacy: { Body: PrivacyBody, Icon: Lock, mandatory: true, refreshesBoot: true },
+  privacy: { Body: PrivacyBody, Icon: Lock, mandatory: true, refreshesBoot: true, beforeAgent: true },
   profile: { Body: ProfileBody, Icon: UserRound, hint: profileHint },
   soul: { Body: SoulBody, Icon: ScrollText, titleValues: card => ({ file: soulFileName(card.payload?.file) }) },
   import: { Body: ImportBody, Icon: PackageOpen, hint: importHint, resultDetail: importResultDetail, draft: true, refreshesBoot: true },
@@ -154,14 +158,15 @@ export const SETUP_CARD_KINDS = {
   },
   // The first run's scripted steps (UX.2, UX.3): mandatory, like privacy, because
   // nothing can answer in the chat until they are done.
-  harness: { Body: HarnessBody, Icon: Cpu, mandatory: true },
+  harness: { Body: HarnessBody, Icon: Cpu, mandatory: true, beforeAgent: true },
   harness_signin: {
     Body: HarnessSigninBody,
     Icon: LogIn,
     mandatory: true,
+    beforeAgent: true,
     titleValues: card => ({ label: str(card.payload?.label) }),
   },
-  path: { Body: PathBody, Icon: Signpost, mandatory: true },
+  path: { Body: PathBody, Icon: Signpost, mandatory: true, beforeAgent: true },
 } satisfies Record<SetupCardKind, SetupCardKindEntry>
 
 /** The entry for *kind*, or null for a kind this build does not know. */

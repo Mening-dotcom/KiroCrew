@@ -9519,7 +9519,16 @@
       "error_harness_outdated": "Ce Kiro CLI est trop ancien pour {{productName}}. Mets-le à jour, puis vérifie à nouveau.",
       "error_harness_check_first": "Vérifie d'abord la connexion une fois.",
       "error_path_invalid": "Choisis comment tu veux commencer.",
-      "error_step_interrupted": "{{productName}} a redémarré. Réessaie cette étape."
+      "error_step_interrupted": "{{productName}} a redémarré. Réessaie cette étape.",
+      "change_engine": "Choisir un autre moteur",
+      "status_engine_changed": "Retour au choix du moteur",
+      "error_detail": "Détails",
+      "signin_own_command": "Lance ceci dans ton terminal pour te connecter à {{label}}. Cette étape se met à jour dès que tu es connecté.",
+      "error_harness_check_failed": "{{productName}} n'a pas pu terminer la vérification de {{label}}.",
+      "error_harness_sandbox_nested": "{{label}} n'a pas pu démarrer son propre bac à sable dans celui de {{productName}} (macOS ne peut pas les imbriquer).",
+      "error_harness_sandbox_crew": "Le bac à sable de {{productName}} n'a pas pu démarrer {{label}} sur cet ordinateur.",
+      "error_harness_sandbox_harness": "Le bac à sable de {{label}} n'a pas pu démarrer sur cet ordinateur.",
+      "error_change_engine_unavailable": "Cette étape ne peut pas revenir au choix du moteur."
     },
     "setupCardTray": {
       "needs_you": "t’attend",

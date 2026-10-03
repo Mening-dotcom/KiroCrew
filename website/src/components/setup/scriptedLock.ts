@@ -18,10 +18,25 @@ import {
 } from '../../api/setupCards'
 import { i18nT } from '../../i18n/t'
 
+/**
+ * Whether a step was left through "Choose a different engine" after the last
+ * harness card: the engine choice is open again, though its new card may not
+ * have arrived yet (the gateway's `setup_flow.scripted_lock` reads it the same way).
+ */
+function engineChoiceReopened(cards: readonly SetupCard[]): boolean {
+  let reopened = false
+  for (const c of [...cards].sort((a, b) => a.created_ts - b.created_ts)) {
+    if (c.kind === 'harness') reopened = false
+    else if (c.status === 'declined' && c.outcome?.change_engine === true) reopened = true
+  }
+  return reopened
+}
+
 /** Why the composer is locked by *cards*, or '' when no scripted step waits. */
 export function scriptedLockReason(cards: readonly SetupCard[] | undefined): string {
-  const waiting = (cards ?? []).find(c => SCRIPTED_SETUP_KINDS.includes(c.kind) && !isTerminalSetupStatus(c.status))
-  if (!waiting) return ''
+  const scripted = (cards ?? []).filter(c => SCRIPTED_SETUP_KINDS.includes(c.kind))
+  const waiting = scripted.find(c => !isTerminalSetupStatus(c.status))
+  if (!waiting) return engineChoiceReopened(scripted) ? i18nT('components.setupStep.locked_harness') : ''
   switch (waiting.kind) {
     case 'harness':
       return i18nT('components.setupStep.locked_harness')

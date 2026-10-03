@@ -98,10 +98,37 @@ async def api_setup_card_approvals(request: web.Request) -> web.Response:
     return web.json_response({"approvals": pending_for_card(request.app["state"], card_id)})
 
 
+async def api_setup_card_signin_status(request: web.Request) -> web.Response:
+    """GET /api/setup/cards/{card_id}/signin-status — whether the card's harness is signed in.
+
+    ``{"signed_in": true | false | null}`` for a sign-in card whose payload offers it
+    (``sign_in_status``), from the harness's OWN status command, run in its session's
+    sandbox (``harness_readiness.signed_in``). Kiro Crew never reads the harness's
+    credential files to answer. ``null`` is unknown, and so is any card that is no
+    longer pending: Continue still asks by starting the harness.
+    """
+    denied = await require_owner_dashboard_request(request, "setup_cards.signin_status")
+    if denied is not None:
+        return denied
+    card_id = request.match_info.get("card_id", "")
+    if not sc.valid_card_id(card_id):
+        return _error("setup card not found", "card_not_found", 404)
+    card = await asyncio.to_thread(sc.get_card, card_id)
+    if card is None:
+        return _error("setup card not found", "card_not_found", 404)
+    if card.kind != sc.KIND_HARNESS_SIGNIN or card.payload.get("sign_in_status") is not True:
+        return _error("this card has no sign-in status", "no_signin_status", 404)
+    if card.status != sc.STATUS_PENDING:
+        return web.json_response({"signed_in": None})
+    from kiro_crew.dashboard.harness_readiness import signed_in
+
+    return web.json_response({"signed_in": await signed_in(str(card.payload.get("backend", "")))})
+
+
 async def api_setup_card_decide(request: web.Request) -> web.Response:
     """POST /api/setup/cards/{card_id}/decide — the owner's decision on a card.
 
-    Body ``{"decision": "commit"|"decline"|"preview"|"aws_signin", "hash": str, "input": {}}``.
+    Body ``{"decision": <a decision name>, "hash": str, "input": {}}``.
     """
     denied = await require_owner_dashboard_request(request, "setup_cards.decide")
     if denied is not None:
@@ -237,6 +264,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/setup/cards", api_setup_cards_list)
     app.router.add_get("/api/setup/cards/{card_id}", api_setup_card_get)
     app.router.add_get("/api/setup/cards/{card_id}/approvals", api_setup_card_approvals)
+    app.router.add_get("/api/setup/cards/{card_id}/signin-status", api_setup_card_signin_status)
     app.router.add_post("/api/setup/cards/{card_id}/decide", api_setup_card_decide)
     app.router.add_post("/api/setup/main-chat", api_setup_main_chat)
     app.router.add_post("/api/setup/home-arrival", api_setup_home_arrival)

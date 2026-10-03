@@ -311,6 +311,20 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # ``test_the_routing_read_back_runs_off_the_event_loop`` in
         # ``test/test_acp_opencode_backend.py`` pins that.
         "acp/client.py::_verify_opencode_routing",
+        # The first run's sign-in step asking a harness whether it is signed in
+        # (``harness_readiness.signed_in``). ONE fixed argv per harness -- the
+        # executable a session of that harness resolves plus the literal words of
+        # its ``host_auth`` declaration (``claude auth status --json``, ``codex
+        # login status``) -- no shell, stdin closed, a 20s timeout, and a cwd under
+        # the data home that the check owns. Nothing in it comes from a turn, and
+        # what it prints is parsed for one answer and never shown or logged.
+        #
+        # SANDBOX-WRAPPED before it is spawned, by the read-backs' caller pattern:
+        # ``run_sign_in_status_command`` runs the same refuse-then-mask preflight
+        # and ``wrap_argv_async`` with the same credential mask the harness's session
+        # spawn gets, so the child sees its own sign-in and nothing the mask denies
+        # it. Called from a worker thread, never the event loop.
+        "acp/client.py::_run_sign_in_status",
         # The pi gate read-back, the same shape as the opencode one above. ONE fixed
         # argv -- Kiro Crew's own gate launcher (a file this core wrote into the
         # sandbox run directory, execing the resolved ``pi`` binary) plus the three

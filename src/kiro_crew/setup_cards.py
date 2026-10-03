@@ -123,6 +123,8 @@ DECISION_REGION = "region"
 DECISION_REMOVE = "remove"
 #: The first run's "Where should your crew live?" answer on the home card (``input.where``).
 DECISION_CHOOSE = "choose"
+#: A scripted step's "Choose a different engine": back to the harness card (``setup_flow``).
+DECISION_CHANGE_ENGINE = "change_engine"
 DECISIONS: frozenset[str] = frozenset(
     {
         DECISION_COMMIT,
@@ -132,6 +134,7 @@ DECISIONS: frozenset[str] = frozenset(
         DECISION_REGION,
         DECISION_REMOVE,
         DECISION_CHOOSE,
+        DECISION_CHANGE_ENGINE,
     }
 )
 

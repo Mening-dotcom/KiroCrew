@@ -178,6 +178,136 @@ describe('the sign-in card, for any other harness', () => {
   })
 })
 
+describe('the sign-in card asks the harness whether it is signed in', () => {
+  const installed = () => serveBackends([{ id: 'claude', policy_id: 'claude', selectable: true, installed: 'installed', missing_components: [], install_command: '', restart_required: false }])
+  const claude = () => card({
+    kind: 'harness_signin',
+    payload: {
+      backend: 'claude', label: 'Claude Code', flow: 'own', install_command: '',
+      sign_in: 'Claude Code is a separate app you sign into yourself — run claude in your terminal and complete its sign-in. It is not checked here.',
+      sign_in_status: true, sign_in_command: 'claude auth login', change_engine: true,
+    },
+  })
+  const serveStatus = (signedIn: boolean | null) => {
+    const asked = { count: 0 }
+    server.use(http.get(`/api/setup/cards/${ID}/signin-status`, () => {
+      asked.count += 1
+      return HttpResponse.json({ signed_in: signedIn })
+    }))
+    return asked
+  }
+
+  it('says signed in, lights Continue, and drops the run-it-yourself sentence', async () => {
+    installed()
+    serveStatus(true)
+    serveCard(claude())
+    const el = await renderCard()
+    expect(await within(el).findByText('Signed in to Claude Code')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('setup-card-primary')).toHaveAttribute('data-lit', 'true'))
+    expect(screen.getByTestId('setup-card-primary')).toHaveTextContent('Continue')
+    expect(within(el).getByTestId('setup-card-signin-signin')).toHaveAttribute('data-done', 'true')
+    expect(within(el).queryByText(/run claude in your terminal/)).toBeNull()
+  })
+
+  it('names the harness own sign-in command when it says signed out, and keeps Continue unlit', async () => {
+    installed()
+    serveStatus(false)
+    serveCard(claude())
+    const el = await renderCard()
+    expect(await within(el).findByTestId('setup-card-login-command')).toHaveTextContent('claude auth login')
+    expect(within(el).queryByText(/run claude in your terminal/)).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('setup-card-primary')).toHaveTextContent('Check again'))
+    expect(screen.getByTestId('setup-card-primary')).not.toHaveAttribute('data-lit')
+  })
+
+  it('falls back to the handshake words when the harness cannot say', async () => {
+    installed()
+    const asked = serveStatus(null)
+    serveCard(claude())
+    const el = await renderCard()
+    await waitFor(() => expect(asked.count).toBe(1))
+    expect(within(el).getByText(/run claude in your terminal/)).toBeInTheDocument()
+    expect(within(el).getByText(/can't see whether you're signed in to Claude Code/)).toBeInTheDocument()
+    // Unknown is not "signed out": installed is enough to light Continue, which asks by starting it.
+    await waitFor(() => expect(screen.getByTestId('setup-card-primary')).toHaveAttribute('data-lit', 'true'))
+    expect(within(el).queryByTestId('setup-card-login-command')).toBeNull()
+  })
+
+  it('never asks for a harness that declares no status command', async () => {
+    installed()
+    const asked = serveStatus(true)
+    serveCard(card({ kind: 'harness_signin', payload: { backend: 'opencode', label: 'OpenCode', flow: 'own', sign_in: 'x' } }))
+    await renderCard()
+    await new Promise(r => setTimeout(r, 30))
+    expect(asked.count).toBe(0)
+  })
+})
+
+describe('choosing a different engine', () => {
+  it.each([
+    ['harness_signin', { backend: 'claude', label: 'Claude Code', flow: 'own', sign_in: 'x', change_engine: true }],
+    ['privacy', { change_engine: true }],
+    ['path', { options: ['tips', 'detailed'], change_engine: true }],
+  ] as const)('is offered on the %s step and posts the hash-bound decision', async (kind, payload) => {
+    serveBackends([])
+    server.use(http.get('/api/telemetry/beacon', () => HttpResponse.json({ enabled: false })))
+    const gw = serveCard(card({ kind, payload: { ...payload } }))
+    await renderCard()
+    await userEvent.click(await screen.findByTestId('setup-card-change-engine'))
+    await waitFor(() => expect(gw.bodies).toEqual([{ decision: 'change_engine', hash: HASH }]))
+  })
+
+  it('is not offered where the gateway did not say so', async () => {
+    serveCard(card({ kind: 'privacy', payload: {} }))
+    await renderCard()
+    expect(screen.queryByTestId('setup-card-change-engine')).toBeNull()
+  })
+
+  it('reads as going back once decided, and keeps the composer locked until the new choice shows', () => {
+    const ended = card({ kind: 'harness_signin', status: 'declined', outcome: { change_engine: true }, created_ts: 2 })
+    const harness = card({ kind: 'harness', status: 'committed', created_ts: 1 })
+    expect(scriptedLockReason([harness, ended])).toBe('Pick an agent engine above, then you can chat.')
+    const next = card({ kind: 'harness', status: 'committed', created_ts: 3 })
+    expect(scriptedLockReason([harness, ended, next])).toBe('')
+  })
+})
+
+describe('errors before the first turn', () => {
+  const nested = {
+    code: 'harness_sandbox_nested',
+    message: 'the kirocrew sandbox failed to initialize, so the agent process could not start -- sandbox initialization failed: Operation not permitted. Retrying cannot fix this: Kiro Crew wrapped this spawn in its own OS sandbox',
+  }
+
+  it('lead with plain words, keep the classified detail behind a disclosure, and offer no hand-off', async () => {
+    serveBackends([])
+    serveCard(card({ kind: 'harness_signin', payload: { backend: 'claude', label: 'Claude Code', flow: 'own', sign_in: 'x' }, error: nested }))
+    await renderCard()
+    const notice = screen.getByTestId('setup-card-error')
+    expect(notice).toHaveTextContent("Claude Code couldn't start its own sandbox inside Kiro Crew's (macOS can't nest them).")
+    const detail = within(notice).getByTestId('setup-card-error-detail')
+    expect(detail.tagName).toBe('DETAILS')
+    expect(detail).not.toHaveAttribute('open')
+    expect(within(detail).getByText(/sandbox initialization failed: Operation not permitted/)).toBeInTheDocument()
+    expect(within(notice).queryByRole('button', { name: /ask the agent/i })).toBeNull()
+  })
+
+  it.each(['harness', 'privacy', 'path'] as const)('offer no hand-off on the %s step either', async kind => {
+    server.use(http.get('/api/telemetry/beacon', () => HttpResponse.json({ enabled: false })))
+    serveCard(card({ kind, payload: kind === 'path' ? { options: ['tips', 'detailed'] } : {}, error: { code: 'step_interrupted', message: 'restarted' } }))
+    await renderCard()
+    const notice = screen.getByTestId('setup-card-error')
+    expect(within(notice).queryByRole('button', { name: /ask the agent/i })).toBeNull()
+  })
+
+  it('keep the hand-off on an agent-proposed card', async () => {
+    serveCard(card({ kind: 'profile', payload: { fields: { bot_name: 'Nova' } }, error: { code: 'step_interrupted', message: 'x' } }))
+    await renderCard()
+    const notice = screen.getByTestId('setup-card-error')
+    expect(within(notice).getByRole('button', { name: /ask the agent/i })).toBeInTheDocument()
+    expect(within(notice).queryByTestId('setup-card-error-detail')).toBeNull()
+  })
+})
+
 describe('the path card', () => {
   it('needs a choice, then commits it', async () => {
     const gw = serveCard(card({ kind: 'path', payload: { options: ['tips', 'detailed'] } }))

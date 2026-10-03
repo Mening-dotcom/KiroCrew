@@ -19,8 +19,8 @@ this spec is the contract the code keeps.
 | Card store | `src/kiro_crew/setup_cards.py` | The `SetupCard` record, the durable store `data_home()/setup/cards.json`, the kinds it accepts (`CARD_KINDS`), payload hashing, per-kind argument validation, the home's size and price data, the persona files. |
 | Setup actions | `src/kiro_crew/setup_actions/` | One module per kind, each a `SetupAction`: its tool arguments and their MCP-side check, its builder, committer, extra decisions, the model-facing title and result sentence, and the flags the flow reads instead of branching on the kind (see [Adding a setup action](#adding-a-setup-action)). |
 | Flow | `src/kiro_crew/dashboard/setup_flow.py` | `propose` (the directive applier), `decide` (the owner's click), both dispatching through the setup actions; the committers and watchers the actions name, `ensure_first_run_session`, `start_first_run_turn`, graduation and the crew overview. |
-| HTTP | `src/kiro_crew/dashboard/handlers/setup_cards.py` | `GET /api/setup/first-run`, `POST /api/setup/first-run/retry`, `GET /api/setup/cards?slot=`, `GET /api/setup/cards/{id}`, `GET /api/setup/cards/{id}/approvals`, `POST /api/setup/cards/{id}/decide`, `POST /api/setup/main-chat`. All owner-only. |
-| Harness check | `src/kiro_crew/dashboard/harness_readiness.py` | Whether the chosen harness answers, asked by the sign-in step's Continue: the Kiro prerequisite probe for the kiro-cli harnesses, the install probe and a no-prompt handshake for any other (see [The scripted steps](#the-scripted-steps)). |
+| HTTP | `src/kiro_crew/dashboard/handlers/setup_cards.py` | `GET /api/setup/first-run`, `POST /api/setup/first-run/retry`, `GET /api/setup/cards?slot=`, `GET /api/setup/cards/{id}`, `GET /api/setup/cards/{id}/approvals`, `GET /api/setup/cards/{id}/signin-status`, `POST /api/setup/cards/{id}/decide`, `POST /api/setup/main-chat`. All owner-only. |
+| Harness check | `src/kiro_crew/dashboard/harness_readiness.py` | Whether the chosen harness answers, asked by the sign-in step's Continue: the Kiro prerequisite probe for the kiro-cli harnesses, the install probe and a no-prompt handshake, built by the session factory, for any other; and whether a harness says it is signed in, asked of its own status command. Never by reading its credential files (see [The scripted steps](#the-scripted-steps)). |
 | Composer lock | `setup_flow.scripted_lock`, `dashboard/chat_handlers.py` (`api_chat`), `website/src/components/setup/scriptedLock.ts` | The first-run chat refuses a message, and its composer is disabled with the step's reason, while a scripted step waits. |
 | Guardrails | `src/kiro_crew/dashboard/setup_guardrails.py` | The stall watchdog, the kickoff notice and the quota pause (see [Guardrails](#guardrails)). |
 | MCP tools | `src/kiro_crew/mcp_tools/setup.py` | `setup_card` (a session directive) and `setup_status` (read-only). The `setup_card` kind enum, argument properties and description are generated from the proposable setup actions. |
@@ -117,21 +117,68 @@ owner's click alone. The order (`setup_cards.SCRIPTED_KINDS`):
    kiro-cli (`ACP_BACKENDS_KIRO_CLI_PREREQUISITE`: Kiro, KAS) the body reads the
    live Kiro CLI status (`?refresh=auto`, every 5 s): Kiro's install command for
    the host's platform, then its sign-in commands; a desktop app's bundled copy
-   skips the install. Any other harness shows its install command and its
-   declared `sign_in_remedy`, verbatim. Continue is the check
-   (`dashboard/harness_readiness.py`): the Kiro prerequisite service's forced
-   probe for the kiro-cli harnesses (never an `acp` spawn, which signed out opens
-   a browser sign-in; KAS also counts Crew's own vault identity), and for any
-   other harness its install probe, then a handshake with no prompt (spawn,
-   `initialize`, `session/new`, shut down). Kiro Crew reads no harness's
-   credential files. The button reads Check again until the live status says
-   ready, then lights up as Continue. A failed check returns the card with its
-   reason; after one, Continue without checking commits it unverified.
+   skips the install. Any other harness shows its install command, then what
+   the harness itself says about its sign-in: a harness whose `host_auth`
+   declaration names a `sign_in_status_command` (Claude Code's
+   `claude auth status --json`, Codex's `codex login status`) is asked through
+   `GET /api/setup/cards/{id}/signin-status` (`harness_readiness.signed_in`,
+   one answer per 8 s however many tabs ask; asked again every 10 s while it says
+   signed out). Signed in reads "Signed in to …" with Continue lit; signed out
+   names the declared `sign_in_command`; anything else (no command, not
+   installed, an older version without it, no answer in time) is unknown and
+   the card shows the declared `sign_in_remedy`, verbatim, as before. Continue is
+   the check (`dashboard/harness_readiness.py`): the Kiro prerequisite service's
+   forced probe for the kiro-cli harnesses (never an `acp` spawn, which signed
+   out opens a browser sign-in; KAS also counts Crew's own vault identity), and
+   for any other harness its install probe, then a handshake with no prompt:
+   the provider a chat gets, built by `build_provider_factory` from the loaded
+   config (so its `agent.sandbox` mode, wrap and credential mask are the first
+   turn's), started (spawn, `initialize`, `session/new`) and shut down. The status
+   answer only words the card; Continue still starts the harness, because a
+   harness can be signed in and still unable to start. The button reads Check
+   again until the live status says ready, then lights up as Continue. A failed
+   check returns the card with its reason; after one, Continue without checking
+   commits it unverified.
+
+   **Kiro Crew never reads another harness's credentials.** It asks the harness:
+   by its own status command, run in the sandbox that harness's session gets
+   (`acp.client.run_sign_in_status_command`: the same preflight, mask and env
+   scrub as the session spawn), or by starting it. The command's output can name
+   an account, so it is parsed for one answer and never shown or logged.
+
+   **A sandbox that refuses there** is classified, never retried and never
+   downgraded (security, "A sandbox that refuses to initialize"). An adapter
+   that runs the agent CLI as its own child (claude-agent-acp) answers
+   `session/new` with the child's stderr in the error's `data.details`, so the
+   signature is read off that too (`acp.client.sandbox_init_failure_from_error`),
+   with the layer taken from the argv Crew built. The card names the layer in
+   plain words (`harness_sandbox_nested` on macOS when the harness's own sandbox
+   refused inside Crew's, `harness_sandbox_crew`, `harness_sandbox_harness`) and
+   keeps the classified error's own message, remedy included, behind a Details
+   disclosure. No switch that turns a sandbox off is shown unless that message
+   carries one, which only a corroborated Crew-layer refusal does.
 3. **Privacy** (`privacy`), the existing disclosure. The first heartbeat waits
    on `privacy_acked` whatever the order, so nothing is sent before it.
 4. **How to start** (`path`): get started with tips, or a more detailed setup
    (UX.3). Its commit sends the kickoff with the path as a fact, and the
    crew-setup skill branches on it.
+
+**Choose a different engine.** Every step after the harness card offers it
+(`payload.change_engine`, hash-bound, so only the gateway sets it). It is the
+`change_engine` decision, claimed against the posted hash like a commit
+(`setup_flow.change_engine`): the step ends `declined` with
+`outcome.change_engine`, nothing is written (the configured engine stays the old
+one until the new harness card commits), and a fresh harness card shows. A
+sign-in passed before a newer harness card no longer counts, so it is asked again
+for the new engine; a privacy answer stands; a start path left through it is
+asked again. The lock holds through the gap: a step ended this way with no newer
+harness card reads as the harness step (`scripted_lock`, and the dashboard's
+`scriptedLock.ts`), and a restart inside that gap shows the harness card.
+
+**Errors before the first turn.** No agent can answer yet and the composer is
+locked, so the scripted cards' error notices (and the kickoff notice's retry
+error) offer no "Ask the agent". Their words lead with the translated sentence
+for the code, and the server's own detail sits behind a Details disclosure.
 
 Each step opens with the gateway's message: an `inject` row with no
 `injectKind` (it opens no turn) whose `meta.setupStep` names the step
@@ -153,7 +200,8 @@ it, and every other chat sends as before.
 
 **After a restart.** `ensure_first_run_session` re-runs the advance with no
 click: a step left `working` returns to `pending` (`step_interrupted`), a step
-whose successor was never shown is shown, and a finished script whose kickoff
+whose successor was never shown is shown (the harness card after a step ended by
+Choose a different engine), and a finished script whose kickoff
 got no reply posts the kickoff notice with Try again once, never a turn of its
 own (SC8).
 

@@ -87,6 +87,14 @@ const ERROR_KEY = {
   harness_not_signed_in: 'components.setupCard.error_harness_not_signed_in',
   harness_outdated: 'components.setupCard.error_harness_outdated',
   harness_check_first: 'components.setupCard.error_harness_check_first',
+  // A check that could not finish, and a sandbox that refused to start the
+  // harness, by layer (harness_readiness.sandbox_code). Plain words only: the
+  // classified error's own message, remedy included, is the detail beneath.
+  harness_check_failed: 'components.setupCard.error_harness_check_failed',
+  harness_sandbox_nested: 'components.setupCard.error_harness_sandbox_nested',
+  harness_sandbox_crew: 'components.setupCard.error_harness_sandbox_crew',
+  harness_sandbox_harness: 'components.setupCard.error_harness_sandbox_harness',
+  change_engine_unavailable: 'components.setupCard.error_change_engine_unavailable',
   path_invalid: 'components.setupCard.error_path_invalid',
   step_interrupted: 'components.setupCard.error_step_interrupted',
 } as const
@@ -94,12 +102,23 @@ const ERROR_KEY = {
 /**
  * The words for a failed decide or a card's own `error`: a known code gets its
  * translated sentence, anything else keeps the server's human text, and a bare
- * failure with neither gets the generic retry line.
+ * failure with neither gets the generic retry line. *values* fills a sentence
+ * that names the card's subject (`{{label}}`, the harness).
  */
-export function errorText(code: string | undefined, serverMessage: string): string {
+export function errorText(code: string | undefined, serverMessage: string, values?: Record<string, string>): string {
   const key = code ? ERROR_KEY[code as keyof typeof ERROR_KEY] : undefined
-  if (key) return i18nT(key)
+  if (key) return i18nT(key, values)
   return serverMessage || i18nT('components.setupCard.error_generic')
+}
+
+/**
+ * The server's own words beneath a translated sentence, for a disclosure: what
+ * the sentence summarised (a harness's exit, a classified sandbox refusal). Empty
+ * when the sentence IS the server's text, or the server gave none.
+ */
+export function errorDetail(code: string | undefined, serverMessage: string): string {
+  const known = !!code && Object.prototype.hasOwnProperty.call(ERROR_KEY, code)
+  return known && serverMessage && serverMessage !== code ? serverMessage : ''
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
@@ -169,6 +188,10 @@ export function isHomeOffer(card: SetupCard): boolean {
 export function resultStatusKey(card: SetupCard): string | undefined {
   if (card.kind === 'home' && card.status === 'committed' && card.outcome?.stayed === true) {
     return 'components.setupCard.home_offer_declined'
+  }
+  // A first-run step the owner left through "Choose a different engine".
+  if (card.status === 'declined' && card.outcome?.change_engine === true) {
+    return 'components.setupCard.status_engine_changed'
   }
   return STATUS_KEY[card.status as keyof typeof STATUS_KEY]
 }

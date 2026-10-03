@@ -5,14 +5,18 @@
  * - `harness`: pick the agent engine (the HarnessPicker seam).
  * - `harness_signin`: install and sign in to it. Kiro CLI (and KAS, which runs
  *   it) read the live Kiro CLI status; any other harness shows its own install
- *   command and its own sign-in sentence, verbatim from the gateway. Kiro Crew
- *   runs neither: these are commands for the owner's terminal.
+ *   command, then what its own status command says: signed in, or its sign-in
+ *   command. A harness with no status command (or one that cannot answer) shows
+ *   its own sign-in sentence, verbatim from the gateway. Kiro Crew runs neither
+ *   install nor sign-in, and never reads the harness's credentials: these are
+ *   commands for the owner's terminal.
  * - `path`: get started with tips, or a more detailed setup.
  *
  * Continue on the sign-in card is the check: the gateway asks the harness
  * whether it answers, and only a yes shows the next step. The same button reads
  * "Check again" until the live status says ready, then lights up as Continue.
- * After one failed check the owner may continue without it.
+ * After one failed check the owner may continue without it. Every step after
+ * the harness card also offers "Choose a different engine" (SetupCard's footer).
  */
 import { useId, useState } from 'react'
 import type React from 'react'
@@ -21,6 +25,7 @@ import { useTranslation } from 'react-i18next'
 import { CircleCheck, Circle, ExternalLink } from 'lucide-react'
 
 import { api, type AcpBackendProbe, type KiroPrerequisiteStatus } from '../../api/client'
+import { setupCardSigninStatusQueryKey, type SetupCardSigninStatus } from '../../api/setupCards'
 import { Btn } from '../ui'
 import CommandLine from './CommandLine'
 import HarnessPicker, { type HarnessOption } from './HarnessPicker'
@@ -29,6 +34,8 @@ import type { SetupBodyProps } from './SetupCardBodies'
 const LEAD = 'mt-1 text-[13px] leading-relaxed text-muted break-words'
 /** How often a live sign-in card re-reads the harness's status. */
 const STATUS_POLL_MS = 5_000
+/** How often it asks a signed-out harness again: each ask starts the harness's own command. */
+const SIGNIN_STATUS_POLL_MS = 10_000
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
@@ -151,12 +158,23 @@ function KiroCliSteps({ status, label }: { status: KiroPrerequisiteStatus | unde
   )
 }
 
-/** Any other harness: its own install command and its own sign-in, as the gateway names them. */
-function OwnSteps({ card, row, label }: { card: SetupBodyProps['card']; row: AcpBackendProbe | undefined; label: string }) {
+/**
+ * Any other harness: its own install command and its own sign-in, as the gateway
+ * names them. *signedIn* is what the harness's own status command said (`null`:
+ * unknown, or it has none), so the sign-in step is done, names the command, or
+ * falls back to the harness's own sentence.
+ */
+function OwnSteps({ card, row, label, signedIn }: {
+  card: SetupBodyProps['card']
+  row: AcpBackendProbe | undefined
+  label: string
+  signedIn: boolean | null
+}) {
   const { t } = useTranslation()
   const installed = row?.installed === 'installed'
   const installCommand = row?.install_command || str(card.payload?.install_command)
   const signIn = str(card.payload?.sign_in)
+  const signInCommand = str(card.payload?.sign_in_command)
   return (
     <ol className="mt-2 flex flex-col gap-2 min-w-0" aria-live="polite" data-testid="setup-card-signin-steps">
       <Step
@@ -171,11 +189,24 @@ function OwnSteps({ card, row, label }: { card: SetupBodyProps['card']; row: Acp
           <p className="text-[12px] text-muted break-words" translate="no">{row.missing_components.join(', ')}</p>
         ) : null}
       </Step>
-      <Step done={false} title={t('components.setupCard.signin_sign_in', { label })} testId="setup-card-signin-signin">
-        {/* The harness's own sentence, from the gateway's declaration: verbatim,
-            as the Agent Backend panel shows it. */}
-        {signIn ? <p className="text-[13px] leading-relaxed text-text break-words">{signIn}</p> : null}
-        <p className="text-[12px] leading-relaxed text-muted">{t('components.setupCard.signin_own_check', { label })}</p>
+      <Step
+        done={signedIn === true}
+        title={signedIn === true ? t('components.setupCard.signin_done', { label }) : t('components.setupCard.signin_sign_in', { label })}
+        testId="setup-card-signin-signin"
+      >
+        {signedIn === false && signInCommand ? (
+          <>
+            <CommandLine text={signInCommand} copyLabel={t('components.setupCard.copy_command')} testId="setup-card-login-command" />
+            <p className="text-[12px] leading-relaxed text-muted">{t('components.setupCard.signin_own_command', { label })}</p>
+          </>
+        ) : (
+          <>
+            {/* The harness's own sentence, from the gateway's declaration: verbatim,
+                as the Agent Backend panel shows it. */}
+            {signIn ? <p className="text-[13px] leading-relaxed text-text break-words">{signIn}</p> : null}
+            <p className="text-[12px] leading-relaxed text-muted">{t('components.setupCard.signin_own_check', { label })}</p>
+          </>
+        )}
       </Step>
     </ol>
   )
@@ -202,15 +233,30 @@ export function HarnessSigninBody({ card, busy, run, footer }: SetupBodyProps) {
     retry: false,
   })
   const row = (probes.data?.backends ?? []).find((r: AcpBackendProbe) => r.id === str(card.payload?.backend))
-  // Kiro Crew never reads another harness's credentials, so for one of those
-  // "ready" can only mean installed: Continue starts it once to ask.
-  const ready = kiroCli ? !!kiro.data?.installed && !!kiro.data?.authenticated : row?.installed === 'installed'
+  // Kiro Crew never reads another harness's credentials: it asks the harness's
+  // own status command, through the gateway, when the harness has one.
+  const asksStatus = !kiroCli && card.payload?.sign_in_status === true
+  const status = useQuery<SetupCardSigninStatus>({
+    queryKey: setupCardSigninStatusQueryKey(card.id),
+    queryFn: () => api.setupCardSigninStatus(card.id),
+    enabled: live && asksStatus,
+    // Asked again only while it says signed out: the owner may be signing in in a
+    // terminal right now. Signed in, or unknown, has nothing more to learn.
+    refetchInterval: q => (live && asksStatus && q.state.data?.signed_in === false ? SIGNIN_STATUS_POLL_MS : false),
+    retry: false,
+  })
+  const signedIn = asksStatus ? status.data?.signed_in ?? null : null
+  // Without that answer "ready" can only mean installed: Continue starts the
+  // harness once to ask. A harness that says it is signed out is not ready.
+  const ready = kiroCli
+    ? !!kiro.data?.installed && !!kiro.data?.authenticated
+    : row?.installed === 'installed' && signedIn !== false
   // A check came back no: the owner may now continue without one.
   const failedCheck = live && !!card.error && card.error.code.startsWith('harness_')
   return (
     <>
       <p className={LEAD}>{t('components.setupCard.signin_lead', { label })}</p>
-      {kiroCli ? <KiroCliSteps status={kiro.data} label={label} /> : <OwnSteps card={card} row={row} label={label} />}
+      {kiroCli ? <KiroCliSteps status={kiro.data} label={label} /> : <OwnSteps card={card} row={row} label={label} signedIn={signedIn} />}
       {/* One button whatever the status: it is the check either way, and it
           lights up (and says Continue) once the live status reads ready. */}
       {footer({

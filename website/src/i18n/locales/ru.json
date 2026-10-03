@@ -9647,7 +9647,16 @@
       "error_harness_outdated": "Этот Kiro CLI слишком старый для {{productName}}. Обнови его, а затем проверь снова.",
       "error_harness_check_first": "Сначала один раз проверь вход.",
       "error_path_invalid": "Выбери, как ты хочешь начать.",
-      "error_step_interrupted": "{{productName}} перезапустился. Попробуй этот шаг ещё раз."
+      "error_step_interrupted": "{{productName}} перезапустился. Попробуй этот шаг ещё раз.",
+      "change_engine": "Выбрать другой движок",
+      "status_engine_changed": "Снова выбор движка",
+      "error_detail": "Подробности",
+      "signin_own_command": "Запусти это в терминале, чтобы войти в {{label}}. Этот шаг обновится, как только вход будет выполнен.",
+      "error_harness_check_failed": "{{productName}} не удалось завершить проверку {{label}}.",
+      "error_harness_sandbox_nested": "{{label}} не удалось запустить собственную песочницу внутри песочницы {{productName}} (macOS не умеет вкладывать их друг в друга).",
+      "error_harness_sandbox_crew": "Песочнице {{productName}} не удалось запустить {{label}} на этом компьютере.",
+      "error_harness_sandbox_harness": "Собственной песочнице {{label}} не удалось запуститься на этом компьютере.",
+      "error_change_engine_unavailable": "С этого шага нельзя вернуться к выбору движка."
     },
     "setupCardTray": {
       "needs_you": "ждёт тебя",

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_crew import setup_cards as sc
 from kiro_crew.agent_sdk.backends import ACP_BACKEND_CLAUDE, ACP_BACKEND_KAS, ACP_BACKEND_KIRO
-from kiro_crew.setup_actions.base import SetupAction
+from kiro_crew.setup_actions.base import Decision, SetupAction
 
 if TYPE_CHECKING:  # pragma: no cover
     from kiro_crew.dashboard.state import DashboardState
@@ -51,6 +51,21 @@ async def _commit(
     from kiro_crew.dashboard import setup_flow as sf
 
     return await sf._commit_harness(state, card, input_)
+
+
+async def _change_engine(
+    state: "DashboardState", card: sc.SetupCard, input_: dict[str, Any]
+) -> sc.SetupCard:
+    from kiro_crew.dashboard import setup_flow as sf
+
+    return await sf.change_engine(state, card, input_)
+
+
+#: "Choose a different engine", offered by every scripted step after this card:
+#: claimed against the posted hash like a commit, then back to this card.
+CHANGE_ENGINE = Decision(
+    run=_change_engine, refusal="only a first-run step after the engine choice goes back to it"
+)
 
 
 ACTION = SetupAction(

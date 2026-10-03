@@ -46,8 +46,9 @@ export type SetupCardStatus =
   | 'failed'
   | 'expired'
 
-/** `aws_signin` is the home card's "Sign in to AWS"; `input.cancel` stops it. */
-export type SetupDecision = 'commit' | 'decline' | 'preview' | 'aws_signin' | 'region' | 'choose' | 'remove'
+/** `aws_signin` is the home card's "Sign in to AWS"; `input.cancel` stops it.
+ *  `change_engine` is a first-run step's "Choose a different engine". */
+export type SetupDecision = 'commit' | 'decline' | 'preview' | 'aws_signin' | 'region' | 'choose' | 'remove' | 'change_engine'
 
 export interface SetupCardError {
   code: string
@@ -136,8 +137,18 @@ export interface SetupCardApproval {
   ts: number
 }
 
+/**
+ * Whether a sign-in card's harness says it is signed in
+ * (`GET /api/setup/cards/{id}/signin-status`), from the harness's own status
+ * command. `null` is unknown: Continue still asks by starting the harness.
+ */
+export interface SetupCardSigninStatus {
+  signed_in: boolean | null
+}
+
 export const setupCardQueryKey = (id: string) => ['setup-card', id] as const
 export const setupCardApprovalsQueryKey = (id: string) => ['setup-card-approvals', id] as const
+export const setupCardSigninStatusQueryKey = (id: string) => ['setup-card-signin-status', id] as const
 export const setupCardsQueryKey = (slot: string) => ['setup-cards', slot] as const
 
 const TERMINAL: ReadonlySet<SetupCardStatus> = new Set(['committed', 'declined', 'failed', 'expired'])

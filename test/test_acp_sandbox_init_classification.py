@@ -977,3 +977,104 @@ async def test_the_runtime_tail_is_redacted_and_per_line():
 
     runtime._stderr_lines = []
     assert runtime.redacted_stderr_tail() == ""
+
+
+# ── A live adapter that reports its child's refusal in the error frame ──
+
+#: The ``session/new`` answer the owner's Mac got, verbatim: claude-agent-acp is
+#: alive, so its own stderr never saw the refusal; its child's is in ``data.details``.
+RECORDED_SESSION_NEW_ERROR = {
+    "code": -32603,
+    "message": "Internal error",
+    "data": {
+        "details": (
+            "Claude Code process exited with code 1. stderr: sandbox initialization "
+            "failed: Operation not permitted\nError: Failed to spawn child process\n\n"
+            "Caused by:\n    Invalid argument (os error 22)"
+        )
+    },
+}
+
+
+async def _recorded_frame_error() -> AcpError:
+    """The AcpError the raise site builds from the recorded frame, read off the wire."""
+    from kiro_crew.acp.types import JsonRpcMessage
+
+    client = AcpClient()
+    client._buffer.append(JsonRpcMessage(id=7, error=RECORDED_SESSION_NEW_ERROR))
+    with pytest.raises(AcpError) as caught:
+        await client._wait_for_response(7, timeout=1.0, method="session/new")
+    return caught.value
+
+
+@pytest.mark.asyncio
+async def test_the_raise_site_keeps_the_childs_details():
+    error = await _recorded_frame_error()
+    assert error.details == RECORDED_SESSION_NEW_ERROR["data"]["details"]
+    assert error.code == -32603
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("crew_wrap", "layer"),
+    [(True, SANDBOX_LAYER_CREW), (False, SANDBOX_LAYER_HARNESS)],
+    ids=["crew-wrapped", "harness-only"],
+)
+async def test_the_recorded_error_classifies_by_the_layer_crew_built(crew_wrap, layer):
+    """The layer comes from the argv record, never from the child's wording."""
+    from kiro_crew.acp.client import sandbox_init_failure_from_error
+
+    classified = await sandbox_init_failure_from_error(
+        await _recorded_frame_error(), crew_wrap=crew_wrap
+    )
+    assert isinstance(classified, AcpSandboxInitFailed)
+    assert classified.layer == layer and layer in str(classified)
+    assert classified.transient is False
+    # The child's own text is not a verdict on the host: no switch is offered.
+    assert "agent.sandbox off" not in str(classified)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("crew_wrap", "layer"),
+    [(True, SANDBOX_LAYER_CREW), (False, SANDBOX_LAYER_HARNESS)],
+    ids=["crew-wrapped", "harness-only"],
+)
+async def test_the_recorded_session_new_refusal_burns_exactly_one_spawn(crew_wrap, layer):
+    """The defect the owner hit: the raw frame, after a retry that met the same wall."""
+    client = _client([], crew_wrap=crew_wrap)
+    attempts: list[int] = []
+    client._spawn = _counting_spawn(client, attempts)
+    recorded = await _recorded_frame_error()
+
+    async def _refused(_client=None):
+        raise recorded
+
+    client._initialize_session = _refused
+    with pytest.raises(AcpSandboxInitFailed) as caught:
+        await client.ensure_ready()
+    assert len(attempts) == 1
+    assert caught.value.layer == layer
+
+
+@pytest.mark.asyncio
+async def test_an_error_frame_without_the_signature_is_not_classified():
+    from kiro_crew.acp.client import sandbox_init_failure_from_error
+
+    other = AcpError(
+        "JSON-RPC error", code=-32603, details="Claude Code process exited with code 1"
+    )
+    assert await sandbox_init_failure_from_error(other, crew_wrap=True) is None
+
+
+@pytest.mark.asyncio
+async def test_the_shared_runtimes_rpc_error_is_classified_too():
+    """The runtime folds the frame into its message; the same signature reads it."""
+    from kiro_crew.acp.client import sandbox_init_failure_from_error
+    from kiro_crew.acp.runtime import _format_runtime_rpc_error
+    from kiro_crew.acp.session_handle import AcpRuntimeError
+
+    error = AcpRuntimeError(_format_runtime_rpc_error(RECORDED_SESSION_NEW_ERROR))
+    classified = await sandbox_init_failure_from_error(error, crew_wrap=True)
+    assert isinstance(classified, AcpSandboxInitFailed)
+    assert classified.layer == SANDBOX_LAYER_CREW

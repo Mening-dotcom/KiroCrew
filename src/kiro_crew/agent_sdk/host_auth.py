@@ -23,6 +23,7 @@ consumer                                      projection it reads
 ``acp`` auth-required message                 :func:`signed_out_message`
 ``cli_doctor`` sign-in row                    :func:`declaration_for`
 ``GET /api/acp-backends`` auth object         :func:`declaration_for`
+first run's sign-in step                      :func:`declaration_for`
 ============================================  ================================
 
 The split is the security property, not a tidiness one. A driver declares WHAT IT
@@ -124,6 +125,23 @@ ENTITLEMENT_SOURCES: FrozenSet[str] = frozenset(
         ENTITLEMENT_OWN_CREDENTIAL_FILE,
         ENTITLEMENT_HOST_VAULT,
     }
+)
+
+# ── How a harness's own sign-in status command answers ──
+# Named shapes rather than a parser per harness: the reading is data the
+# declaration carries, and ``dashboard.harness_readiness`` is its one interpreter
+# (this module stays a stdlib leaf that parses nothing).
+
+#: The command prints a JSON object whose boolean ``loggedIn`` is the answer, and
+#: exits 0 exactly when it is true. Claude Code's ``auth status --json``.
+SIGN_IN_STATUS_JSON_LOGGED_IN = "json_logged_in"
+
+#: The command exits 0 with a line starting ``Logged in`` when signed in, and
+#: nonzero with a line starting ``Not logged in`` when not. Codex's ``login status``.
+SIGN_IN_STATUS_LOGGED_IN_LINE = "logged_in_line"
+
+SIGN_IN_STATUS_READINGS: FrozenSet[str] = frozenset(
+    {SIGN_IN_STATUS_JSON_LOGGED_IN, SIGN_IN_STATUS_LOGGED_IN_LINE}
 )
 
 
@@ -268,6 +286,26 @@ class AgentAuthDeclaration:
     #: (or have not been captured yet).
     signed_out_signature: str = ""
 
+    #: The harness's OWN read-only command that says whether it is signed in: its
+    #: executable name, then its arguments. The first run's sign-in step
+    #: (``dashboard/harness_readiness.py``) runs it inside the sandbox a session of
+    #: this harness gets, and reads only what it prints.
+    #:
+    #: This is how Kiro Crew asks, and the only way: it never opens the credential
+    #: leaves declared above, so a harness with no such command is asked by starting
+    #: it. Copied from a live run of the harness, never guessed, together with how
+    #: its answer reads (:attr:`sign_in_status_reading`). A version too old to know
+    #: the command answers in neither shape, which reads as "unknown".
+    sign_in_status_command: Tuple[str, ...] = ()
+
+    #: How :attr:`sign_in_status_command` answers; one of :data:`SIGN_IN_STATUS_READINGS`.
+    sign_in_status_reading: str = ""
+
+    #: What an owner types in a terminal to sign this harness in, shown as a command
+    #: line on the first run's sign-in step once the status command says signed out.
+    #: A command, never translated. Empty: the step shows :attr:`sign_in_remedy`.
+    sign_in_command: str = ""
+
     # There is deliberately NO field for re-exposing a file the mask hides.
     #
     # A re-exposure is an EDIT to the mask, and the rule this class exists to
@@ -302,6 +340,20 @@ class AgentAuthDeclaration:
             # A blank phrase is a substring of every error, so it would make every
             # failure of this harness terminal and hide its real cause.
             raise ValueError(f"{self.backend!r} declares a blank signed-out signature")
+        if bool(self.sign_in_status_command) != bool(self.sign_in_status_reading):
+            # A command with no reading has an answer nothing can interpret, and a
+            # reading with no command interprets an answer nothing produces.
+            raise ValueError(
+                f"{self.backend!r} declares a sign-in status command and its reading "
+                "apart: both or neither"
+            )
+        if self.sign_in_status_reading and (
+            self.sign_in_status_reading not in SIGN_IN_STATUS_READINGS
+        ):
+            raise ValueError(
+                f"{self.backend!r} declares unknown sign-in status reading "
+                f"{self.sign_in_status_reading!r}; known: {sorted(SIGN_IN_STATUS_READINGS)}"
+            )
         stray = tuple(
             leaf for leaf in self.adapter_own_leaves if leaf not in self.credential_leaves
         )
@@ -477,6 +529,12 @@ AGENT_AUTH_DECLARATIONS: Tuple[AgentAuthDeclaration, ...] = (
         # is still authenticated.
         host_logout_retires_children=False,
         entitlement_source=ENTITLEMENT_OWN_CREDENTIAL_FILE,
+        # Run live: ``Not logged in`` and exit 1 on an empty CODEX_HOME. A managed
+        # build that needs no login says so in other words and also exits 1, which
+        # reads as unknown rather than signed out.
+        sign_in_status_command=("codex", "login", "status"),
+        sign_in_status_reading=SIGN_IN_STATUS_LOGGED_IN_LINE,
+        sign_in_command="codex login",
     ),
     AgentAuthDeclaration(
         backend=ACP_BACKEND_CLAUDE,
@@ -498,6 +556,12 @@ AGENT_AUTH_DECLARATIONS: Tuple[AgentAuthDeclaration, ...] = (
         ),
         host_logout_retires_children=False,
         entitlement_source=ENTITLEMENT_OWN_CREDENTIAL_FILE,
+        # Run live: ``{"loggedIn": true, ...}`` with exit 0 when signed in (a cloud
+        # provider counts, as ``"authMethod": "third_party"``), ``"loggedIn": false``
+        # with exit 1 on an empty config directory.
+        sign_in_status_command=("claude", "auth", "status", "--json"),
+        sign_in_status_reading=SIGN_IN_STATUS_JSON_LOGGED_IN,
+        sign_in_command="claude auth login",
     ),
     AgentAuthDeclaration(
         backend=ACP_BACKEND_OPENCODE,

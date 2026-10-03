@@ -9263,7 +9263,16 @@
       "error_harness_outdated": "这个 Kiro CLI 版本太旧，无法用于 {{productName}}。请更新后再次检查。",
       "error_harness_check_first": "请先检查一次登录状态。",
       "error_path_invalid": "请选择你想如何开始。",
-      "error_step_interrupted": "{{productName}} 已重启。请再试一次这一步。"
+      "error_step_interrupted": "{{productName}} 已重启。请再试一次这一步。",
+      "change_engine": "选择其他引擎",
+      "status_engine_changed": "已返回引擎选择",
+      "error_detail": "详细信息",
+      "signin_own_command": "在终端里运行这条命令登录 {{label}}。登录后这一步会自动更新。",
+      "error_harness_check_failed": "{{productName}} 没能完成对 {{label}} 的检查。",
+      "error_harness_sandbox_nested": "{{label}} 无法在 {{productName}} 的沙盒里启动自己的沙盒（macOS 不能嵌套沙盒）。",
+      "error_harness_sandbox_crew": "{{productName}} 的沙盒无法在这台电脑上启动 {{label}}。",
+      "error_harness_sandbox_harness": "{{label}} 自带的沙盒无法在这台电脑上启动。",
+      "error_change_engine_unavailable": "这一步无法返回引擎选择。"
     },
     "setupCardTray": {
       "needs_you": "需要你",

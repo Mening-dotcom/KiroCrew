@@ -781,13 +781,49 @@ async def _show_scripted(
     return card
 
 
+#: The steps a different engine leaves unanswered: a sign-in vouches for one harness.
+_ENGINE_BOUND_KINDS: tuple[str, ...] = (sc.KIND_HARNESS_SIGNIN,)
+#: The steps that offer "Choose a different engine": every one after the harness card.
+_CHANGE_ENGINE_KINDS: tuple[str, ...] = (sc.KIND_HARNESS_SIGNIN, sc.KIND_PRIVACY, sc.KIND_PATH)
+#: The payload key a step offers it under (hash-bound, so only the gateway sets
+#: it), and the outcome key of a step it ended.
+_CHANGE_ENGINE_KEY = "change_engine"
+
+
+def _scripted_history(slot_key: str) -> list[sc.SetupCard]:
+    """Every scripted card in *slot_key*, in the order shown. Blocking."""
+    cards = [c for c in sc.list_cards(slot_key) if c.kind in sc.SCRIPTED_KINDS]
+    return sorted(cards, key=lambda c: c.created_ts)
+
+
 def _scripted_cards(slot_key: str) -> dict[str, sc.SetupCard]:
-    """The newest card of each scripted kind in *slot_key*. Blocking."""
+    """The newest card of each scripted kind in *slot_key* that still counts. Blocking.
+
+    A harness card shown after a sign-in card leaves that sign-in behind: it
+    vouched for the engine chosen before, so the step is asked again.
+    """
     latest: dict[str, sc.SetupCard] = {}
-    for card in sorted(sc.list_cards(slot_key), key=lambda c: c.created_ts):
-        if card.kind in sc.SCRIPTED_KINDS:
-            latest[card.kind] = card
+    for card in _scripted_history(slot_key):
+        if card.kind == sc.KIND_HARNESS:
+            for kind in _ENGINE_BOUND_KINDS:
+                latest.pop(kind, None)
+        latest[card.kind] = card
     return latest
+
+
+def _engine_choice_reopened(history: list[sc.SetupCard]) -> bool:
+    """Whether a step was ended by "Choose a different engine" after the last harness card.
+
+    Read from the store alone, so a restart between that step ending and the new
+    harness card showing still shows it, and the composer stays locked between them.
+    """
+    reopened = False
+    for card in history:
+        if card.kind == sc.KIND_HARNESS:
+            reopened = False
+        elif card.status == sc.STATUS_DECLINED and (card.outcome or {}).get(_CHANGE_ENGINE_KEY):
+            reopened = True
+    return reopened
 
 
 def _is_scripted(slot_key: str) -> bool:
@@ -809,9 +845,12 @@ def scripted_lock(slot_key: str) -> str | None:
     """
     if read_first_run_slot() != slot_key:
         return None
-    for card in sc.list_cards(slot_key):
-        if card.kind in sc.SCRIPTED_KINDS and not card.terminal:
+    history = _scripted_history(slot_key)
+    for card in history:
+        if not card.terminal:
             return card.kind
+    if _engine_choice_reopened(history):
+        return sc.KIND_HARNESS
     return None
 
 
@@ -855,9 +894,15 @@ def _signin_payload(backend: str) -> dict[str, Any]:
     from kiro_crew.agent_sdk import backend_install
     from kiro_crew.agent_sdk.host_auth import declaration_for
 
+    declaration = declaration_for(backend)
     payload["flow"] = "own"
     payload["install_command"] = backend_install.probe_backend(backend).install_command
-    payload["sign_in"] = declaration_for(backend).sign_in_remedy
+    payload["sign_in"] = declaration.sign_in_remedy
+    if declaration.sign_in_status_command:
+        # The body asks ``GET /api/setup/cards/{id}/signin-status`` whether the
+        # harness says it is signed in, and names this command when it says no.
+        payload["sign_in_status"] = True
+        payload["sign_in_command"] = declaration.sign_in_command
     return payload
 
 
@@ -886,14 +931,22 @@ async def _show_step(
     if kind == sc.KIND_HARNESS_SIGNIN:
         backend = await asyncio.to_thread(_chosen_backend, latest)
         payload = await asyncio.to_thread(_signin_payload, backend)
+        payload[_CHANGE_ENGINE_KEY] = True
         step = STEP_SIGNIN_AGAIN if again else STEP_SIGNIN
         return await _show_scripted(
             state, slot, session_key, kind, payload, step, str(payload["label"])
         )
     if kind == sc.KIND_PRIVACY:
-        return await _show_scripted(state, slot, session_key, kind, {}, STEP_PRIVACY)
+        return await _show_scripted(
+            state, slot, session_key, kind, {_CHANGE_ENGINE_KEY: True}, STEP_PRIVACY
+        )
     return await _show_scripted(
-        state, slot, session_key, kind, {"options": list(sc.PATHS)}, STEP_PATH
+        state,
+        slot,
+        session_key,
+        kind,
+        {"options": list(sc.PATHS), _CHANGE_ENGINE_KEY: True},
+        STEP_PATH,
     )
 
 
@@ -909,7 +962,11 @@ async def _advance(
     """
     from kiro_crew.dashboard import setup_guardrails
 
+    history = await asyncio.to_thread(_scripted_history, slot.key)
     latest = await asyncio.to_thread(_scripted_cards, slot.key)
+    if _engine_choice_reopened(history):
+        await _show_step(state, slot, session_key, sc.KIND_HARNESS, latest)
+        return
     for kind in sc.SCRIPTED_KINDS:
         card = latest.get(kind)
         if card is not None and card.status == sc.STATUS_COMMITTED:
@@ -982,6 +1039,34 @@ async def _commit_harness_signin(
             raise sc.CardRejected(verdict.detail or verdict.code, f"harness_{verdict.code}")
         outcome = {"verified": True}
     card = await _finish(card, sc.STATUS_COMMITTED, outcome=outcome)
+    slot = state.get_slot(card.slot)
+    if slot is not None:
+        await _advance(state, slot, card.session_key, clicked=True)
+    return card
+
+
+async def change_engine(
+    state: "DashboardState", card: sc.SetupCard, input_: dict[str, Any]
+) -> sc.SetupCard:
+    """The step's "Choose a different engine": end it uncommitted, show the harness card.
+
+    Claimed by ``decide`` against the posted hash like a commit, and offered only on
+    a step whose payload says so. Nothing is written: the engine in the config stays
+    the old one until the new harness card commits, and a sign-in passed for the old
+    engine does not count for the new one (:func:`_scripted_cards`). The step ends
+    before the new card shows, and :func:`scripted_lock` reads that gap as the
+    harness step, so the composer stays locked through it and a restart inside it
+    shows the card.
+    """
+    if (
+        card.kind not in _CHANGE_ENGINE_KINDS
+        or card.payload.get(_CHANGE_ENGINE_KEY) is not True
+        or not await asyncio.to_thread(_is_scripted, card.slot)
+    ):
+        raise sc.CardRejected(
+            "this step does not go back to the engine choice", "change_engine_unavailable"
+        )
+    card = await _finish(card, sc.STATUS_DECLINED, outcome={_CHANGE_ENGINE_KEY: True})
     slot = state.get_slot(card.slot)
     if slot is not None:
         await _advance(state, slot, card.session_key, clicked=True)

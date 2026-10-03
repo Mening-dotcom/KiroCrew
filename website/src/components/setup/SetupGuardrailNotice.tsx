@@ -100,9 +100,9 @@ export default function SetupGuardrailNotice({ message }: { message: ChatMessage
         }
       />
       {retry.isError && (
-        // A refusal of the retry request itself; nothing is typed here, so the
-        // hand-off loses nothing.
-        <ErrorNotice title={retryError} message={retry.error instanceof Error ? retry.error.message : null} askAgent />
+        // A refusal of the retry request itself. No hand-off: the kickoff is what
+        // did not start, so no agent can answer yet.
+        <ErrorNotice title={retryError} message={retry.error instanceof Error ? retry.error.message : null} />
       )}
     </div>
   )

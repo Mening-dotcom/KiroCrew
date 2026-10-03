@@ -502,6 +502,25 @@ in each alternative — the burst's other lines (`Failed to spawn child process`
 `Operation not permitted`) are ordinary output for a missing binary or a denied file,
 and matching those alone would make ordinary spawn failures permanent.
 
+**A live adapter reports its child's refusal in the error, not on its stderr.** An
+adapter that runs the agent CLI as its own child (claude-agent-acp runs Claude Code)
+outlives that child, and answers `session/new` with a JSON-RPC error whose
+`data.details` carries the child's exit and stderr; its own stderr never saw the
+refusal. `AcpError.details` keeps that field (redacted, bounded) at the raise site, and
+both startup translations ask `sandbox_init_failure_from_error` when the ring buffer and
+the latch found nothing — the same signature, the same layer rule (the argv record, never
+the child's wording), and the same corroboration rule: the text is the unverified
+child's, so it never unlocks a switch. The first run's sign-in check names the layer in
+plain words from `AcpSandboxInitFailed.layer`, which this is the one reader of, and shows
+the error's own message beneath (first-run, "The scripted steps").
+
+On macOS this is how a harness that starts a Seatbelt sandbox of its own fails inside
+Crew's: Seatbelt does not nest, so the inner `sandbox_init` gets `EPERM`. Kiro is the one
+harness with a configured way out (the mutual exclusion above: Crew's layer is delegated
+to kiro-cli's own sandbox when that is on, under H7 and the audit-or-deny step). Any
+other harness gets no automatic delegation, downgrade or switch for it; which layer to
+keep is the operator's call.
+
 **A restricted-memory session is the one exception, by design.** `AcpClient` reads its
 own stderr ring buffer, which such a session deliberately does not fill, so it cannot
 classify and keeps its retry rather than guessing. The shared runtime has no such gap:

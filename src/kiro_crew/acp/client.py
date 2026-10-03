@@ -3429,14 +3429,26 @@ class AcpError(Exception):
     instead of parsing the redacted message: a codex session dies at startup on
     a bare ``{"code": -32602, "message": "Invalid params"}`` with no ``data``,
     which no message match can tell from a protocol error.
+
+    ``details`` is the frame's ``data.details`` text, redacted, when it carried
+    one. An adapter that runs the agent CLI as its OWN child (claude-agent-acp
+    runs Claude Code) stays alive when that child dies, and reports the child's
+    exit and stderr there, so a startup refusal the child printed is read from it
+    (:func:`sandbox_init_failure_from_error`) rather than from the adapter's
+    stderr, which never saw it.
     """
 
     def __init__(
-        self, *args: object, transient: bool | None = None, code: int | None = None
+        self,
+        *args: object,
+        transient: bool | None = None,
+        code: int | None = None,
+        details: str = "",
     ) -> None:
         super().__init__(*args)
         self.transient = transient
         self.code = code
+        self.details = details
         # Reactive-fallback metadata, set by :func:`_raise_acp_error` when a
         # prompt-time error names a rejected model (so run_bg_oneliner can retry
         # once with a served model). Guarded so AcpModelUnavailable — which sets
@@ -3550,9 +3562,14 @@ class AcpSandboxInitFailed(AcpError):  # noqa: N818
     """
 
     def __init__(self, *, layer: str, detail: str = "", corroborated: bool = False) -> None:
-        # Layer and remedy are LOCALS folded into the message, not attributes: the
-        # message is what an operator and every error surface read, and a
-        # structured field with no reader is a promise nobody keeps.
+        # The message is what an operator and every error surface read. The layer
+        # and the child's text are also kept as attributes for the one reader that
+        # words the failure itself: the first run's sign-in check
+        # (``dashboard/harness_readiness.py``), which names the layer in plain
+        # words and shows this message as the detail. The remedy stays folded into
+        # the message only, so no reader can offer a switch the message withheld.
+        self.layer = layer
+        self.detail = detail
         remediation = sandbox_init_remediation(layer, corroborated=corroborated)
         # ``detail`` is the child's own stderr, already redacted by the caller
         # that captured it (both transports redact before retaining: the text is
@@ -4024,6 +4041,136 @@ async def sandbox_init_failure_for_runtime(runtime: Any) -> "AcpSandboxInitFaile
         # the launcher's own refusal unrecognisable and the trusted run unmade.
         corroboration_output=runtime.redacted_stderr_tail(),
     )
+
+
+async def sandbox_init_failure_from_error(
+    error: BaseException,
+    *,
+    crew_wrap: bool,
+    mode: str = "",
+    extra_hidden_dirs: tuple[str, ...] = (),
+) -> "AcpSandboxInitFailed | None":
+    """The classified error when a LIVE adapter reports its child's sandbox refusal.
+
+    An adapter that runs the agent CLI as its own child (claude-agent-acp runs
+    Claude Code) does not die when that child does: it answers ``session/new``
+    with a JSON-RPC error whose ``data.details`` carries the child's exit and
+    stderr. The adapter's own stderr never saw the refusal, so the ring-buffer
+    and latch readers above find nothing and the operator got the raw frame. The
+    same signature is read off the error instead -- its ``details`` when the
+    frame had them, else its message -- with the same layer rule: *crew_wrap* is
+    the argv record of Kiro Crew's own wrap, never the child's wording.
+
+    For the STARTUP window only, like every other reader of this signature: a
+    harness sandbox refusing a tool subprocess mid-turn is not "the agent could
+    not start", so callers ask this only where ``initialize`` / ``session/new``
+    failed. Corroboration is decided by :func:`sandbox_init_failure` exactly as
+    for stderr: this text is the unverified child's, so it never unlocks a switch.
+    """
+    if isinstance(error, AcpSandboxInitFailed):
+        return None
+    text = getattr(error, "details", "") or str(error)
+    if not text or not is_sandbox_init_failure_output(text):
+        return None
+    detail, _ = redact_exfiltration_urls(text)
+    detail, _ = redact_credentials(detail)
+    return await sandbox_init_failure(
+        detail, crew_wrap=crew_wrap, mode=mode, extra_hidden_dirs=extra_hidden_dirs
+    )
+
+
+#: Longest a harness's own sign-in status command may take. It reads a local store
+#: and prints one line, so anything slower is a binary doing something else.
+SIGN_IN_STATUS_TIMEOUT_SECS = 20.0
+#: How much of its output is kept for reading. A status is a line or a small object.
+_SIGN_IN_STATUS_MAX_CHARS = 16_000
+
+
+def resolve_harness_executable(name: str) -> str | None:
+    """The binary a harness's own command *name* resolves to, as its session finds it.
+
+    ``claude`` takes the session's own resolution (:func:`_resolve_claude_code_executable`,
+    the binary handed to the adapter), so its status describes the same install.
+    Any other name resolves the same way that one does past its override: mise, then
+    the augmented PATH. ``None`` when nothing resolves.
+    """
+    if name == CLAUDE_CODE_BIN:
+        return _resolve_claude_code_executable()
+    resolved = _mise_which(name)
+    if resolved:
+        return resolved
+    search_path = augmented_path(os.environ.get("PATH", ""))
+    return _normalize_exe_casing(shutil.which(name, path=search_path))
+
+
+def _run_sign_in_status(argv: list[str], cwd: str) -> tuple[int, str] | None:
+    """Run an already-wrapped status command; its exit code and output, or ``None``.
+
+    Blocking (spawns a short-lived child); callers run it off the loop. The SAME
+    environment a session spawn of this harness builds, scrub included: the child
+    is a third-party binary and the gateway's environment carries secrets no harness
+    may see. stdin is closed, so a binary that does not know the command and falls
+    into an interactive prompt cannot wait on it. stdout and stderr are read
+    together, because harnesses differ in which one carries the answer.
+    """
+    env = scrub_agent_subprocess_env(_resolve_spawn_env({**os.environ}, kiro_api_key=False))
+    env["PATH"] = augmented_path(env.get("PATH", ""))
+    try:
+        completed = subprocess_mod.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess_mod.DEVNULL,
+            stdout=subprocess_mod.PIPE,
+            stderr=subprocess_mod.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SIGN_IN_STATUS_TIMEOUT_SECS,
+        )
+    except (OSError, subprocess_mod.SubprocessError):
+        return None
+    return completed.returncode, (completed.stdout or "")[:_SIGN_IN_STATUS_MAX_CHARS]
+
+
+async def run_sign_in_status_command(
+    backend: str, argv: list[str], *, mode: str, work_dir: str
+) -> tuple[int, str] | None:
+    """Run *backend*'s own sign-in status command inside the sandbox its session gets.
+
+    The same refuse-then-mask preflight and the same wrap as the session spawn, the
+    way the routing read-backs are wrapped: the child is the harness's own binary,
+    and it must see exactly the files a session of that harness sees -- its own
+    sign-in, and none of the credential homes the mask denies it. Crew reads only
+    what the command prints; it never opens the harness's credential files itself.
+
+    *argv* is a fixed command from the harness's declaration
+    (``host_auth.AgentAuthDeclaration.sign_in_status_command``) with its executable
+    resolved; nothing in it comes from a turn. Returns ``(exit code, output)``, or
+    ``None`` when the command could not run or did not answer in time. The output
+    can carry an account name or a masked key, so callers parse it and never show
+    or log it.
+    """
+    hidden = await _run_preflight_bounded(_sandbox_preflight, backend, mode)
+    expose = acp_tool_gate.adapter_expose_files(backend, hidden)
+    forward_ssh_auth_sock = await asyncio.to_thread(_forward_ssh_auth_sock)
+    wrapped, cleanup = await wrap_argv_async(
+        argv,
+        mode=mode,
+        strip_python_env=True,
+        forward_ssh_auth_sock=forward_ssh_auth_sock,
+        extra_hidden_dirs=hidden,
+        extra_expose_files=expose,
+        # What the session spawn passes (``apply_pod_bundle_spawn``): only a harness
+        # that owns an internal sandbox may have Crew's layer delegated to it.
+        is_kiro_cli=backend in ACP_BACKENDS_INTERNAL_SANDBOX,
+        _prepare=wrap_argv,
+    )
+    try:
+        return await asyncio.to_thread(_run_sign_in_status, wrapped, work_dir)
+    finally:
+        if cleanup:
+            await asyncio.to_thread(_unlink_readback_launcher, cleanup)
 
 
 # A dynamic-registration call the endpoint throttled, read off the dead child's
@@ -4665,6 +4812,28 @@ def _jsonrpc_error_code(error: object) -> int | None:
     if isinstance(code, int):
         return code
     return None
+
+
+#: Longest ``data.details`` kept on an :class:`AcpError`: a child's stderr tail is
+#: what it carries, and the classifiers read only its first lines.
+_ERROR_DETAILS_MAX_CHARS = 4000
+
+
+def _jsonrpc_error_details(error: object) -> str:
+    """The frame's ``data.details`` text, redacted and capped, or ``""``.
+
+    Untrusted wire text that can echo a token, so it is redacted exactly as the
+    message beside it is before anything retains it.
+    """
+    if not isinstance(error, dict):
+        return ""
+    data = error.get("data")
+    details = data.get("details") if isinstance(data, dict) else None
+    if not isinstance(details, str) or not details.strip():
+        return ""
+    details, _ = redact_exfiltration_urls(details[:_ERROR_DETAILS_MAX_CHARS])
+    details, _ = redact_credentials(details)
+    return details
 
 
 #: JSON-RPC ``Invalid params``. On ``session/set_config_option`` the request shape
@@ -10865,6 +11034,16 @@ class AcpClient:
                     # ``initialize``, and as an ``OSError`` on the write that
                     # follows it.
                     sandbox_failure = await self._sandbox_init_failure()
+                    if sandbox_failure is None:
+                        # An adapter that outlived its own child (Claude Code
+                        # under claude-agent-acp) reports the refusal in the
+                        # ``session/new`` error frame, not on its stderr.
+                        sandbox_failure = await sandbox_init_failure_from_error(
+                            exc,
+                            crew_wrap=self._sandbox_wrapped_by_crew,
+                            mode=self._sandbox_mode,
+                            extra_hidden_dirs=self._sandbox_hidden_dirs,
+                        )
                     if sandbox_failure is not None:
                         _startup_outcome = "sandbox_init_failed"
                         await self._cleanup_failed_live_spawn()
@@ -11342,7 +11521,9 @@ class AcpClient:
                     _err_log, _ = redact_exfiltration_urls(str(msg.error))
                     _err_log, _ = redact_credentials(_err_log)
                     raise AcpError(
-                        f"JSON-RPC error: {_err_log}", code=_jsonrpc_error_code(msg.error)
+                        f"JSON-RPC error: {_err_log}",
+                        code=_jsonrpc_error_code(msg.error),
+                        details=_jsonrpc_error_details(msg.error),
                     )
                 return msg.result or {}
             # Notification (has method, no id) — buffer for drain.

@@ -531,7 +531,10 @@ class TestFirstRun:
         assert "privacy" in first_run.done_stages()
         # No model turn yet: the start path is the last scripted step.
         assert dispatched == []
-        assert _live(slot_key, sc.KIND_PATH).payload == {"options": ["tips", "detailed"]}
+        assert _live(slot_key, sc.KIND_PATH).payload == {
+            "options": ["tips", "detailed"],
+            "change_engine": True,
+        }
 
     @pytest.mark.asyncio
     async def test_a_first_run_chat_from_before_the_scripted_steps_starts_on_privacy(
@@ -1172,6 +1175,9 @@ class TestScriptedSteps:
         assert signin.payload["flow"] == "own" and signin.payload["backend"] == "codex"
         assert signin.payload["install_command"] == "npm i -g codex-acp"
         assert signin.payload["sign_in"]  # the harness's own declared remedy, verbatim
+        # Its own status command answers "signed in?"; its own command signs it in.
+        assert signin.payload["sign_in_status"] is True
+        assert signin.payload["sign_in_command"] == "codex login"
         step = [m for _r, _t, m in st.slots[slot_key].messages if m and "setupStep" in m][-1]
         assert (
             step["setupStep"]["step"] == "signin" and step["setupStep"]["label"] == "OpenAI Codex"
@@ -1186,6 +1192,7 @@ class TestScriptedSteps:
             "backend": "kas",
             "label": "KAS (kiro-agent)",
             "flow": "kiro_cli",
+            "change_engine": True,
         }
 
     @pytest.mark.asyncio
@@ -1264,6 +1271,116 @@ class TestScriptedSteps:
         slot_key = await setup_flow.ensure_first_run_session(st)
         (first_run.setup_dir() / sc.CARDS_FILE).unlink()
         assert setup_flow.scripted_lock(slot_key) is None
+
+
+class TestChooseADifferentEngine:
+    """The way back: every step after the engine choice can return to it, uncommitted."""
+
+    @staticmethod
+    def _config_backend() -> str:
+        return json.loads((data_home() / "config.json").read_text())["agent"]["acp_backend"]
+
+    @pytest.mark.asyncio
+    async def test_back_from_the_sign_in_shows_a_fresh_engine_choice_and_commits_nothing(
+        self, dispatched
+    ):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "claude"})
+        signin = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        assert signin.payload["change_engine"] is True
+        card = await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN, decision="change_engine")
+        assert card.status == sc.STATUS_DECLINED and card.outcome == {"change_engine": True}
+        assert _kinds(slot_key) == ["harness", "harness_signin", "harness"]
+        assert _live(slot_key, sc.KIND_HARNESS).payload["current"] == "claude"
+        # Nothing was written: the engine stays the old one until the new card commits.
+        assert self._config_backend() == "claude"
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_HARNESS
+        assert dispatched == []
+        # The new choice gets its own sign-in step.
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "codex"})
+        assert self._config_backend() == "codex"
+        assert _live(slot_key, sc.KIND_HARNESS_SIGNIN).payload["backend"] == "codex"
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_HARNESS_SIGNIN
+
+    @pytest.mark.asyncio
+    async def test_back_from_a_later_step_asks_the_sign_in_again_and_keeps_privacy(
+        self, dispatched
+    ):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        privacy = await _to_privacy(st, slot_key, backend="claude")
+        await setup_flow.decide(st, privacy.id, "commit", privacy.payload_hash, {})
+        await _decide_live(st, slot_key, sc.KIND_PATH, decision="change_engine")
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_HARNESS
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": ""})
+        # The sign-in vouched for the old engine, so it is asked again ...
+        signin = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        assert signin.payload["flow"] == "kiro_cli"
+        await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN)
+        # ... while privacy, answered once, is not; the start path is asked again.
+        assert _kinds(slot_key).count(sc.KIND_PRIVACY) == 1
+        assert dispatched == []
+        await _decide_live(st, slot_key, sc.KIND_PATH, {"path": "tips"})
+        assert [(k, kind) for k, kind, _ in dispatched] == [(slot_key, "first_run")]
+        assert "Agent engine the user chose: Kiro CLI. It answered" in dispatched[0][2]
+        assert setup_flow.scripted_lock(slot_key) is None
+
+    @pytest.mark.asyncio
+    async def test_back_from_privacy_shows_privacy_again_after_the_sign_in(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _to_privacy(st, slot_key, backend="claude")
+        await _decide_live(st, slot_key, sc.KIND_PRIVACY, decision="change_engine")
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "claude"})
+        await _decide_live(st, slot_key, sc.KIND_HARNESS_SIGNIN)
+        assert _live(slot_key, sc.KIND_PRIVACY).payload == {"change_engine": True}
+
+    @pytest.mark.asyncio
+    async def test_a_restart_inside_back_shows_the_engine_choice_and_keeps_the_lock(
+        self, dispatched
+    ):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "claude"})
+        signin = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        # The step ended, then the gateway stopped before the new harness card.
+        sc.claim_pending(signin.id, signin.payload_hash)
+
+        def _ended(c: sc.SetupCard) -> None:
+            c.status = sc.STATUS_DECLINED
+            c.outcome = {"change_engine": True}
+
+        sc.update_card(signin.id, _ended)
+        assert setup_flow.scripted_lock(slot_key) == sc.KIND_HARNESS
+        await setup_flow.ensure_first_run_session(st)
+        assert _live(slot_key, sc.KIND_HARNESS)
+        await setup_flow.ensure_first_run_session(st)
+        assert _kinds(slot_key).count(sc.KIND_HARNESS) == 2
+        assert dispatched == []
+
+    @pytest.mark.asyncio
+    async def test_back_is_hash_bound_and_offered_only_where_the_gateway_says(self, dispatched):
+        st = FakeState()
+        slot_key = await setup_flow.ensure_first_run_session(st)
+        harness = _live(slot_key, sc.KIND_HARNESS)
+        with pytest.raises(sc.CardRejected) as refused:
+            await setup_flow.decide(st, harness.id, "change_engine", harness.payload_hash, {})
+        assert refused.value.code == "invalid_decision"
+        await _decide_live(st, slot_key, sc.KIND_HARNESS, {"backend": "claude"})
+        signin = _live(slot_key, sc.KIND_HARNESS_SIGNIN)
+        with pytest.raises(sc.CardRejected) as stale:
+            await setup_flow.decide(st, signin.id, "change_engine", "0" * 64, {})
+        assert stale.value.code == "card_hash_mismatch"
+        assert sc.get_card(signin.id).status == sc.STATUS_PENDING
+        # A privacy card from a first run before the scripted steps offers no way back.
+        st.slots["chat-2-2"] = FakeSlot("chat-2-2")
+        legacy = sc.create_card(
+            slot="chat-2-2", session_key="dashboard:chat-2-2", kind=sc.KIND_PRIVACY, payload={}
+        )
+        card = await setup_flow.decide(st, legacy.id, "change_engine", legacy.payload_hash, {})
+        assert card.status == sc.STATUS_PENDING
+        assert card.error["code"] == "change_engine_unavailable"
 
 
 class TestScriptedStepsAfterARestart:

@@ -3,6 +3,7 @@
 The last scripted step. Its commit records the owner's answer and sends the first
 model turn, whose facts name the path so the agent follows it. Gateway-only and
 not refusable by policy: it changes nothing but which way the conversation goes.
+Like every step after the harness card, it offers "Choose a different engine".
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_crew import setup_cards as sc
 from kiro_crew.setup_actions.base import SetupAction
+from kiro_crew.setup_actions.harness import CHANGE_ENGINE
 
 if TYPE_CHECKING:  # pragma: no cover
     from kiro_crew.dashboard.state import DashboardState
@@ -31,4 +33,5 @@ ACTION = SetupAction(
     proposable=False,
     governed=False,
     reported=False,
+    decisions={sc.DECISION_CHANGE_ENGINE: CHANGE_ENGINE},
 )

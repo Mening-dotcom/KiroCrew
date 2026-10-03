@@ -34,7 +34,7 @@ import type { KiroCrewAgent } from '../components/AgentSelector'
 import type { MemoryRecord, MemoryRecordRef, MemoryRecordQuery, MemoryRecordSelection, MemoryEditOperation, MemoryEditPreview, MemoryRecordRevision } from '../types/memoryEditing'
 import type { AutoNudgeListResponse } from '../components/autoNudgeLoop'
 import type { TaskDetailResponse, TasksListResponse, TasksSummary } from './tasks'
-import type { FirstRunState, SetupCard, SetupCardApproval, SetupCardList, SetupDecideBody } from './setupCards'
+import type { FirstRunState, SetupCard, SetupCardApproval, SetupCardList, SetupCardSigninStatus, SetupDecideBody } from './setupCards'
 import { ApiError, friendlyErrText, toApiError } from './apiError'
 import { SESSION_CONTROL_STATUS_PATH_RE } from '../lib/sessionControlStatusPath'
 import { refreshOnce, __resetRefreshOnceForTests } from './refreshOnce'
@@ -5192,6 +5192,9 @@ export const api = {
   /** What a job card's running preview waits on; empty when none runs. */
   setupCardApprovals: (id: string) =>
     get('/api/setup/cards/' + encodeURIComponent(id) + '/approvals').then(j) as Promise<{ approvals: SetupCardApproval[] }>,
+  /** Whether a sign-in card's harness says it is signed in; `null` when unknown. */
+  setupCardSigninStatus: (id: string) =>
+    get('/api/setup/cards/' + encodeURIComponent(id) + '/signin-status').then(j) as Promise<SetupCardSigninStatus>,
   firstRun: () => get('/api/setup/first-run').then(j) as Promise<FirstRunState>,
   /** Send the first-run kickoff again (the kickoff-failed notice's Try again).
    *  409 `kickoff_answered` / `turn_running` / `privacy_not_acked`, 404 `slot_not_found`. */

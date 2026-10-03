@@ -5,7 +5,8 @@ nothing on the host: its Continue asks the harness whether it can answer
 (``dashboard/harness_readiness.py``), and only a yes shows the next step. After
 one failed check the owner may continue without one; the first turn then reports
 the truth, and a sign-in failure there shows this card again. Kiro Crew only
-names the harness's own install and sign-in; it runs neither.
+names the harness's own install and sign-in; it runs neither. "Choose a different
+engine" ends it uncommitted and shows the harness card again.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiro_crew import setup_cards as sc
 from kiro_crew.setup_actions.base import SetupAction
+from kiro_crew.setup_actions.harness import CHANGE_ENGINE
 
 if TYPE_CHECKING:  # pragma: no cover
     from kiro_crew.dashboard.state import DashboardState
@@ -34,4 +36,5 @@ ACTION = SetupAction(
     proposable=False,
     governed=False,
     reported=False,
+    decisions={sc.DECISION_CHANGE_ENGINE: CHANGE_ENGINE},
 )

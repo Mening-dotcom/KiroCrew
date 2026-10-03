@@ -53,7 +53,7 @@ import ErrorNotice from '../ErrorNotice'
 import { Btn, SendBtn } from '../ui'
 import type { SetupActions, SetupFooter } from './SetupCardBodies'
 import { HomeLeftoverRemoval } from './SetupCardBodies'
-import { classicAction, errorText, failedText, homeLeftover, homeRemovalState, resultStatusKey } from './setupCardCopy'
+import { classicAction, errorDetail, errorText, failedText, homeLeftover, homeRemovalState, resultStatusKey } from './setupCardCopy'
 import { cardTitle, committedDetail, SetupCardBody, setupCardEntry } from './setupCardRegistry'
 import { openSetupCardInTray } from './setupCardTray'
 
@@ -254,12 +254,25 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
   const busy = decide.isPending || card.status === 'working'
   const classic = classicAction(card.classic)
 
+  const entry = setupCardEntry(card.kind)
+  // A sentence that names the card's subject reads it from here (the harness).
+  const errorValues = typeof card.payload?.label === 'string' ? { label: card.payload.label } : undefined
   const decideError = decide.error
   const decideCode = decideError instanceof ApiError ? parseErrorCode(decideError.body) : undefined
-  const decideMessage = decideError
-    ? errorText(decideCode, decideError instanceof Error ? decideError.message : '')
-    : ''
-  const cardErrorMessage = card.error ? errorText(card.error.code, card.error.message) : ''
+  const decideRaw = decideError instanceof Error ? decideError.message : ''
+  const decideMessage = decideError ? errorText(decideCode, decideRaw, errorValues) : ''
+  const cardError = card.status === 'pending' ? card.error : null
+  const cardErrorMessage = cardError ? errorText(cardError.code, cardError.message, errorValues) : ''
+  // Before the first turn the plain sentence leads, and the server's own words
+  // for the failure (a classified sandbox refusal, a harness's exit) sit beneath.
+  const errorRaw = !entry?.beforeAgent
+    ? ''
+    : decideError
+      ? errorDetail(decideCode, decideRaw)
+      : cardError
+        ? errorDetail(cardError.code, cardError.message)
+        : ''
+  const changeEngine = card.status === 'pending' && card.payload?.change_engine === true
 
   const openClassic = () => {
     if (!classic) return
@@ -279,12 +292,20 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
             No hand-off on a draft kind (its registry entry's `draft`): the
             credential field, the bot-token field and the import checkboxes
             hold an unsaved draft that the hand-off's navigation would destroy
-            (and the token fields are cleared anyway). Elsewhere the card is
+            (and the token fields are cleared anyway). No hand-off before the
+            first turn either (`beforeAgent`): no agent can answer yet, and the
+            first-run chat's composer is locked. Elsewhere the card is
             server-side state, so a hand-off loses nothing. */}
         <ErrorNotice
-          message={decideMessage || (card.status === 'pending' ? cardErrorMessage : '')}
-          askAgent={setupCardEntry(card.kind)?.draft !== true}
+          message={decideMessage || cardErrorMessage}
+          askAgent={entry?.draft !== true && entry?.beforeAgent !== true}
           testId="setup-card-error"
+          footer={errorRaw ? (
+            <details data-testid="setup-card-error-detail">
+              <summary className="cursor-pointer text-[12px]">{t('components.setupCard.error_detail')}</summary>
+              <p className="mt-1 text-[12px] font-mono text-danger/80 break-words">{errorRaw}</p>
+            </details>
+          ) : null}
         />
         {(actions.primary || actions.secondary) && (
           <div className="flex flex-wrap items-center gap-2">
@@ -328,8 +349,19 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
             )}
           </div>
         )}
-        {(canDecline || classic) && (
+        {(canDecline || classic || changeEngine) && (
           <div className="flex flex-wrap items-center gap-x-1 gap-y-1">
+            {changeEngine && (
+              <Btn
+                type="button"
+                onClick={() => run('change_engine')}
+                disabled={busy}
+                className="border-transparent text-muted hover:text-text"
+                data-testid="setup-card-change-engine"
+              >
+                {t('components.setupCard.change_engine')}
+              </Btn>
+            )}
             {canDecline && (
               <Btn
                 type="button"
@@ -441,12 +473,13 @@ function ResultLine({ card, title, busy, actionError, onRemove }: {
         {statusKey && <span className="text-muted">{t(statusKey)}</span>}
       </div>
       {detail}
-      {/* A failed card is settled server-side; the hand-off loses nothing. */}
+      {/* A failed card is settled server-side; the hand-off loses nothing. No
+          hand-off before the first turn, though: no agent can answer yet. */}
       {card.status === 'failed' && card.error && removal !== 'done' && (
         <ErrorNotice
           variant="inline"
           message={failedText(card)}
-          askAgent
+          askAgent={setupCardEntry(card.kind)?.beforeAgent !== true}
           testId="setup-card-failed-error"
         />
       )}

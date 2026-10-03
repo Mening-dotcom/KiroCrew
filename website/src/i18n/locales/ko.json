@@ -9263,7 +9263,16 @@
       "error_harness_outdated": "이 Kiro CLI는 {{productName}}에 쓰기에 너무 오래됐어요. 업데이트한 뒤 다시 확인하세요.",
       "error_harness_check_first": "먼저 로그인을 한 번 확인하세요.",
       "error_path_invalid": "어떻게 시작할지 고르세요.",
-      "error_step_interrupted": "{{productName}}이(가) 다시 시작됐어요. 이 단계를 다시 시도하세요."
+      "error_step_interrupted": "{{productName}}이(가) 다시 시작됐어요. 이 단계를 다시 시도하세요.",
+      "change_engine": "다른 엔진 선택",
+      "status_engine_changed": "엔진 선택으로 돌아감",
+      "error_detail": "자세히",
+      "signin_own_command": "{{label}}에 로그인하려면 터미널에서 이 명령을 실행하세요. 로그인하면 이 단계가 바로 업데이트돼요.",
+      "error_harness_check_failed": "{{productName}}이(가) {{label}} 확인을 끝내지 못했어요.",
+      "error_harness_sandbox_nested": "{{label}}이(가) {{productName}} 샌드박스 안에서 자체 샌드박스를 시작하지 못했어요(macOS는 샌드박스를 중첩할 수 없어요).",
+      "error_harness_sandbox_crew": "{{productName}} 샌드박스가 이 컴퓨터에서 {{label}}을(를) 시작하지 못했어요.",
+      "error_harness_sandbox_harness": "{{label}} 자체 샌드박스가 이 컴퓨터에서 시작되지 못했어요.",
+      "error_change_engine_unavailable": "이 단계에서는 엔진 선택으로 돌아갈 수 없어요."
     },
     "setupCardTray": {
       "needs_you": "확인 필요",

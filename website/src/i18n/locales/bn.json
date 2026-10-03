@@ -9391,7 +9391,16 @@
       "error_harness_outdated": "এই Kiro CLI {{productName}}-এর জন্য খুব পুরোনো। এটি আপডেট করো, তারপর আবার যাচাই করো।",
       "error_harness_check_first": "আগে একবার সাইন-ইন যাচাই করো।",
       "error_path_invalid": "তুমি কীভাবে শুরু করতে চাও তা বেছে নাও।",
-      "error_step_interrupted": "{{productName}} আবার চালু হয়েছে। এই ধাপটি আবার চেষ্টা করো।"
+      "error_step_interrupted": "{{productName}} আবার চালু হয়েছে। এই ধাপটি আবার চেষ্টা করো।",
+      "change_engine": "অন্য ইঞ্জিন বেছে নাও",
+      "status_engine_changed": "ইঞ্জিন বাছাইয়ে ফিরে গেছে",
+      "error_detail": "বিস্তারিত",
+      "signin_own_command": "{{label}}-এ সাইন ইন করতে তোমার টার্মিনালে এটি চালাও। সাইন ইন হলে এই ধাপটি নিজেই বদলে যাবে।",
+      "error_harness_check_failed": "{{productName}} {{label}} যাচাই শেষ করতে পারেনি।",
+      "error_harness_sandbox_nested": "{{label}} {{productName}}-এর স্যান্ডবক্সের ভেতরে নিজের স্যান্ডবক্স চালু করতে পারেনি (macOS একটির ভেতরে আরেকটি চালাতে পারে না)।",
+      "error_harness_sandbox_crew": "{{productName}}-এর স্যান্ডবক্স এই কম্পিউটারে {{label}} চালু করতে পারেনি।",
+      "error_harness_sandbox_harness": "{{label}}-এর নিজের স্যান্ডবক্স এই কম্পিউটারে চালু হতে পারেনি।",
+      "error_change_engine_unavailable": "এই ধাপ থেকে ইঞ্জিন বাছাইয়ে ফেরা যায় না।"
     },
     "setupCardTray": {
       "needs_you": "তোমাকে দরকার",

@@ -9391,7 +9391,16 @@
       "error_harness_outdated": "यह Kiro CLI {{productName}} के लिए बहुत पुराना है। इसे अपडेट करो, फिर दोबारा जाँचो।",
       "error_harness_check_first": "पहले एक बार साइन-इन जाँचो।",
       "error_path_invalid": "चुनो कि तुम कैसे शुरू करना चाहोगे।",
-      "error_step_interrupted": "{{productName}} फिर से शुरू हुआ। यह चरण दोबारा आज़माओ।"
+      "error_step_interrupted": "{{productName}} फिर से शुरू हुआ। यह चरण दोबारा आज़माओ।",
+      "change_engine": "कोई दूसरा इंजन चुनो",
+      "status_engine_changed": "इंजन चुनने पर वापस गए",
+      "error_detail": "विवरण",
+      "signin_own_command": "{{label}} में साइन इन करने के लिए इसे अपने टर्मिनल में चलाओ। साइन इन होते ही यह चरण अपने आप बदल जाएगा।",
+      "error_harness_check_failed": "{{productName}} {{label}} की जाँच पूरी नहीं कर सका।",
+      "error_harness_sandbox_nested": "{{label}} {{productName}} के सैंडबॉक्स के अंदर अपना सैंडबॉक्स शुरू नहीं कर सका (macOS एक के अंदर दूसरा नहीं चला सकता)।",
+      "error_harness_sandbox_crew": "{{productName}} का सैंडबॉक्स इस कंप्यूटर पर {{label}} शुरू नहीं कर सका।",
+      "error_harness_sandbox_harness": "{{label}} का अपना सैंडबॉक्स इस कंप्यूटर पर शुरू नहीं हो सका।",
+      "error_change_engine_unavailable": "इस चरण से इंजन चुनने पर वापस नहीं जाया जा सकता।"
     },
     "setupCardTray": {
       "needs_you": "तुम्हारी ज़रूरत है",

@@ -9263,7 +9263,16 @@
       "error_harness_outdated": "この Kiro CLI は {{productName}} には古すぎます。更新してから、もう一度確認してください。",
       "error_harness_check_first": "まず一度サインインを確認してください。",
       "error_path_invalid": "どのように始めるかを選んでください。",
-      "error_step_interrupted": "{{productName}} が再起動しました。この手順をもう一度試してください。"
+      "error_step_interrupted": "{{productName}} が再起動しました。この手順をもう一度試してください。",
+      "change_engine": "別のエンジンを選ぶ",
+      "status_engine_changed": "エンジンの選択に戻りました",
+      "error_detail": "詳細",
+      "signin_own_command": "{{label}} にサインインするには、これをターミナルで実行してください。サインインすると、この手順は自動で更新されます。",
+      "error_harness_check_failed": "{{productName}} は {{label}} の確認を完了できませんでした。",
+      "error_harness_sandbox_nested": "{{label}} は {{productName}} のサンドボックス内で自身のサンドボックスを起動できませんでした（macOS ではサンドボックスを入れ子にできません）。",
+      "error_harness_sandbox_crew": "{{productName}} のサンドボックスは、このコンピューターで {{label}} を起動できませんでした。",
+      "error_harness_sandbox_harness": "{{label}} 自身のサンドボックスは、このコンピューターで起動できませんでした。",
+      "error_change_engine_unavailable": "この手順からはエンジンの選択に戻れません。"
     },
     "setupCardTray": {
       "needs_you": "対応が必要",

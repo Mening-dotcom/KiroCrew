@@ -42,7 +42,12 @@ import pytest
 from kiro_crew import acp_backends, security
 from kiro_crew.acp import types as acp_types
 from kiro_crew.agent_sdk import host_auth, tool_gate
-from kiro_crew.agent_sdk.backends import ACP_BACKEND_KAS, ACP_BACKEND_KIRO
+from kiro_crew.agent_sdk.backends import (
+    ACP_BACKEND_CLAUDE,
+    ACP_BACKEND_CODEX,
+    ACP_BACKEND_KAS,
+    ACP_BACKEND_KIRO,
+)
 from kiro_crew.security import paths as security_paths
 from kiro_crew.subprocess_utf8 import UTF8_TEXT
 
@@ -872,3 +877,42 @@ def test_a_host_vault_harness_names_the_config_surface_that_feeds_it() -> None:
     for declaration in declarations:
         for text in (declaration.sign_in_remedy, declaration.signed_out_message):
             assert "Secrets" in text, declaration.backend
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sign_in_status_command": ("tool", "status")},
+        {"sign_in_status_reading": host_auth.SIGN_IN_STATUS_LOGGED_IN_LINE},
+    ],
+    ids=["command-without-reading", "reading-without-command"],
+)
+def test_a_status_command_and_its_reading_are_declared_together(overrides: dict) -> None:
+    """Half a declaration is an answer nothing reads, or a reading nothing answers."""
+    with pytest.raises(ValueError, match="both or neither"):
+        host_auth.AgentAuthDeclaration(**_declaration_kwargs(**overrides))
+
+
+def test_an_unknown_status_reading_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown sign-in status reading"):
+        host_auth.AgentAuthDeclaration(
+            **_declaration_kwargs(
+                sign_in_status_command=("tool", "status"), sign_in_status_reading="vibes"
+            )
+        )
+
+
+def test_the_harnesses_that_can_say_they_are_signed_in_name_their_own_commands() -> None:
+    """The first run asks these harnesses, and only by their own commands."""
+    claude = host_auth.declaration_for(ACP_BACKEND_CLAUDE)
+    assert claude.sign_in_status_command == ("claude", "auth", "status", "--json")
+    assert claude.sign_in_status_reading == host_auth.SIGN_IN_STATUS_JSON_LOGGED_IN
+    assert claude.sign_in_command == "claude auth login"
+    codex = host_auth.declaration_for(ACP_BACKEND_CODEX)
+    assert codex.sign_in_status_command == ("codex", "login", "status")
+    assert codex.sign_in_status_reading == host_auth.SIGN_IN_STATUS_LOGGED_IN_LINE
+    assert codex.sign_in_command == "codex login"
+    # A command never names one of the harness's own credential files.
+    for declaration in host_auth.AGENT_AUTH_DECLARATIONS:
+        for leaf in declaration.credential_leaves:
+            assert not any(leaf in part for part in declaration.sign_in_status_command)

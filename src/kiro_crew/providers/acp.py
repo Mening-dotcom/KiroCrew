@@ -23,6 +23,7 @@ from kiro_crew.acp.client import (
     model_is_unusable,
     resolve_pin_spelling,
     sandbox_init_failure_for_runtime,
+    sandbox_init_failure_from_error,
 )
 from kiro_crew.acp.runtime import AcpRuntime, AcpRuntimeError
 from kiro_crew.acp.session_handle import AcpSessionHandle
@@ -1317,6 +1318,15 @@ class AcpProvider(LLMProvider):
                     )
                 except AcpRuntimeError as exc:
                     sandbox_failure = await sandbox_init_failure_for_runtime(runtime)
+                    if sandbox_failure is None:
+                        # The adapter is alive and answered ``session/new`` with
+                        # its child's refusal in the error itself.
+                        sandbox_failure = await sandbox_init_failure_from_error(
+                            exc,
+                            crew_wrap=runtime.sandbox_wrapped_by_crew,
+                            mode=runtime.sandbox_mode,
+                            extra_hidden_dirs=runtime.sandbox_hidden_dirs,
+                        )
                     if sandbox_failure is not None:
                         raise sandbox_failure from exc
                     if runtime.saw_not_logged_in():

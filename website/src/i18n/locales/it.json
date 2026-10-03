@@ -9519,7 +9519,16 @@
       "error_harness_outdated": "Questo Kiro CLI è troppo vecchio per {{productName}}. Aggiornalo, poi verifica di nuovo.",
       "error_harness_check_first": "Prima verifica l'accesso una volta.",
       "error_path_invalid": "Scegli come vuoi iniziare.",
-      "error_step_interrupted": "{{productName}} si è riavviato. Riprova questo passaggio."
+      "error_step_interrupted": "{{productName}} si è riavviato. Riprova questo passaggio.",
+      "change_engine": "Scegli un altro motore",
+      "status_engine_changed": "Di nuovo alla scelta del motore",
+      "error_detail": "Dettagli",
+      "signin_own_command": "Esegui questo comando nel terminale per accedere a {{label}}. Questo passaggio si aggiorna appena hai effettuato l'accesso.",
+      "error_harness_check_failed": "{{productName}} non è riuscito a completare la verifica di {{label}}.",
+      "error_harness_sandbox_nested": "{{label}} non è riuscito ad avviare la propria sandbox dentro quella di {{productName}} (macOS non può annidarle).",
+      "error_harness_sandbox_crew": "La sandbox di {{productName}} non è riuscita ad avviare {{label}} su questo computer.",
+      "error_harness_sandbox_harness": "La sandbox di {{label}} non è riuscita ad avviarsi su questo computer.",
+      "error_change_engine_unavailable": "Questo passaggio non può tornare alla scelta del motore."
     },
     "setupCardTray": {
       "needs_you": "ha bisogno di te",
