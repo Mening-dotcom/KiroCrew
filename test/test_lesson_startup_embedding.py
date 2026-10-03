@@ -26,12 +26,14 @@ that ``inject_activity: false`` still embeds nothing.
 
 from __future__ import annotations
 
+import itertools
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from kiro_crew import vector_memory
 from kiro_crew._sqlite_compat import sqlite3
 from kiro_crew.context import (
     CONTEXT_GROUP_MEMORY,
@@ -55,6 +57,20 @@ LEXICAL = "Never discard unrelated deployment evidence"
 @pytest.fixture(autouse=True)
 def _close_skills_loaders(close_skills_loaders):
     """``build_first_turn`` builds a ``ContextBuilder``: close its ``SkillsLoader`` (``test/conftest.py``)."""
+
+
+@pytest.fixture
+def distinct_write_instants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stamp every store write with its own strictly later instant.
+
+    A case whose expected order relies on newest-first among rows the score
+    ties needs each write to land on a distinct ``updated_at``. The host clock
+    does not give that: on a Windows runner it advances in 15.6 ms ticks, so
+    consecutive writes share a stamp and ``ORDER BY updated_at DESC`` returns
+    the tied rows in storage order, oldest first.
+    """
+    ticks = (f"2026-01-01T00:00:00.{tick:06d}+00:00" for tick in itertools.count(1))
+    monkeypatch.setattr(vector_memory, "_now_iso", lambda: next(ticks))
 
 
 class Embedder:
@@ -629,6 +645,7 @@ class TestGainingAVectorNeverLowersARow:
             memory.close()
 
 
+@pytest.mark.usefixtures("distinct_write_instants")
 class TestOneKeywordMeasureAcrossTheVectorBoundary:
     """The rare word and the two common words are the whole fixture.
 
@@ -749,6 +766,7 @@ class TestOneKeywordMeasureAcrossTheVectorBoundary:
             memory.close()
 
 
+@pytest.mark.usefixtures("distinct_write_instants")
 class TestTheKeywordHalfStaysBounded:
     """The three lines the scaled keyword half rests on, each pinned by a mutation.
 

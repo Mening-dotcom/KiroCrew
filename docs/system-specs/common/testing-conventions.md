@@ -428,6 +428,14 @@ Rules that decide whether one is worth having:
 - **Make each ranked seed discriminating.** Write the most-relevant row FIRST, so the
   ranked order is the reverse of the insertion order; a seed whose ranked order equals
   its write order proves nothing about ranking.
+- **Give every write its own instant when an expected order leans on recency.** A
+  Windows runner's clock advances in 15.6 ms ticks, so rows written back to back share
+  one `updated_at`, and `ORDER BY updated_at DESC` returns the tied rows in storage
+  order — oldest first, the reverse of the newest-first order the fixture assumes. The
+  case passes on any host slow enough to cross a tick between writes and fails on a
+  fast runner. Patch the store's `_now_iso` with a strictly increasing tick
+  (`test_lesson_ranking.store`, `test_lesson_startup_embedding.distinct_write_instants`);
+  a sleep between writes only makes the tie rarer.
 - **Mark the module `xdist_group`** when the subsystem holds module globals
   (`context._memory_stores` / `_lesson_stores` behind `_stores_lock`), and reset those
   globals through `monkeypatch`, never raw assignment.
