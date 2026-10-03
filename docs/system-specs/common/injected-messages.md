@@ -196,7 +196,7 @@ boundary:
 | `cron` | A scheduled job's output — the user's own | Labelled bubble (also carries `cronLabel`) |
 | `user_replay` | The user's original message, replayed because the turn emitted nothing | Ordinary bubble; it is speech |
 | `first_run` | The `[First run]` kickoff, dispatched when the owner acknowledges the privacy card | Collapsed one-line note |
-| `setup_result` | A `[Setup card result]` report of the owner's decision on a setup card | Collapsed one-line note |
+| `setup_result` | A `[Setup card result]` report of the owner's decision on a setup card, or that a proposed card was not shown | Collapsed one-line note |
 
 `resolveInjectCard` in `website/src/pages/chat/RecoveryCard.tsx` is the single
 decision point, shared by `ChatPage` and the `transcriptRenderers` registry so the
@@ -523,7 +523,7 @@ owner's click:
 | Envelope | Prefix constants (`dashboard/state.py`) | Emitted by | What it means to the model |
 |---|---|---|---|
 | `[First run]` … `[End of first run]` | `FIRST_RUN_PREFIX`, `FIRST_RUN_END` | `setup_flow.start_first_run_turn` after the privacy card is committed | This chat is a fresh install's first run; the facts listed were gathered by the gateway, not typed by the user. |
-| `[Setup card result]` … `[End of setup card result]` | `SETUP_RESULT_PREFIX`, `SETUP_RESULT_END` | `setup_flow._report` when a card reaches a terminal status | The owner decided a setup card; the status and outcome are the gateway's record, not the user's words. |
+| `[Setup card result]` … `[End of setup card result]` | `SETUP_RESULT_PREFIX`, `SETUP_RESULT_END` | `setup_flow._report` when a card reaches a terminal status; `setup_flow._refused` when the gateway did not show a proposed card (`… card not shown: <reason>`) | The owner decided a setup card, or the card the agent proposed is not on screen; the status, outcome or reason is the gateway's record, not the user's words. |
 
 ## Adding a new envelope
 

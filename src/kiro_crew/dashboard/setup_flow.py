@@ -178,6 +178,97 @@ async def _report(state: "DashboardState", card: sc.SetupCard) -> None:
 # ── propose ─────────────────────────────────────────────────────────────────
 
 
+#: Refusal turns the gateway sends in a row before a person acts again. The agent
+#: hears why a card did not show; a turn that proposes again and is refused again
+#: is the most a refusal can drive, so refusals never keep a chat busy on their own.
+_REFUSAL_TURNS_PER_CHAIN = 2
+#: What marks a ``[Setup card result]`` envelope as a refusal, on its first line.
+_REFUSAL_MARK = "card not shown:"
+
+
+def _refusal_text(kind: str, reason: str) -> str:
+    from kiro_crew.dashboard.state import SETUP_RESULT_END, SETUP_RESULT_PREFIX
+
+    return (
+        f"{SETUP_RESULT_PREFIX} {kind} {_REFUSAL_MARK} {reason}\n"
+        "Nothing is on the user's screen for it. Tell the user in one line, then carry "
+        "on; do not say it is showing.\n"
+        f"{SETUP_RESULT_END}"
+    )
+
+
+def _is_refusal_envelope(content: str) -> bool:
+    from kiro_crew.dashboard.state import SETUP_RESULT_PREFIX
+
+    first = content.split("\n", 1)[0]
+    return first.startswith(SETUP_RESULT_PREFIX) and _REFUSAL_MARK in first
+
+
+def _refusal_chain(slot: "_ChatSlot") -> tuple[int, bool]:
+    """Refusal turns run or queued since a person last acted, and whether one is queued.
+
+    Read from the transcript, newest first: a typed message, the kickoff, or the
+    result of an owner's click ends the chain; the refusal envelopes after it are
+    the chain. A queued refusal has not run yet, so a second refusal in the same
+    turn adds nothing: the agent hears the first, and every one is logged.
+    """
+    from kiro_crew.dashboard.chat_utils import SETUP_ENVELOPE_KINDS
+
+    count, queued = 0, False
+    for row in reversed(list(getattr(slot, "messages", None) or [])):
+        if not isinstance(row, dict):
+            continue
+        role, content = row.get("role"), str(row.get("content") or "")
+        meta = row.get("meta")
+        inject_kind = meta.get("injectKind") if isinstance(meta, dict) else None
+        if role == "queued" or (role == "inject" and inject_kind in SETUP_ENVELOPE_KINDS):
+            if not _is_refusal_envelope(content):
+                break
+            count += 1
+            queued = queued or role == "queued"
+        elif role == "user":
+            break
+    return count, queued
+
+
+async def _refused(
+    state: "DashboardState",
+    slot: "_ChatSlot",
+    session_key: str,
+    kind: str,
+    code: str,
+    reason: str,
+    *,
+    tell: bool,
+    outcome: str = "refused",
+) -> None:
+    """Record a proposal the gateway did not show, and tell the agent when it should hear.
+
+    The ``setup_card`` tool answers before the gateway applies the directive, so
+    the agent was told a card was requested and would say it is on screen. Every
+    refusal is logged and audited; with *tell*, the agent also gets one
+    ``[Setup card result]`` turn saying the card was not shown, with the user
+    provenance a result turn carries (SC8), bounded by
+    :data:`_REFUSAL_TURNS_PER_CHAIN`. *tell* is false for a proposal no person
+    caused and for refusals a turn could not fix (a paused quota, a duplicate of a
+    card that is showing).
+    """
+    from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+
+    said, _ = redact_exfiltration_urls(reason)
+    said, _ = redact_credentials(said)
+    logger.warning(
+        "setup card %r not shown in %s (%s): %s", kind, getattr(slot, "key", "?"), code, said
+    )
+    _audit("setup_card.propose", outcome, session_key, f"kind:{kind} reason={code}")
+    if not tell:
+        return
+    count, queued = _refusal_chain(slot)
+    if queued or count >= _REFUSAL_TURNS_PER_CHAIN:
+        return
+    await _dispatch_envelope_turn(state, slot, _refusal_text(kind, said), "setup_result")
+
+
 async def propose(
     state: "DashboardState",
     slot: "_ChatSlot",
@@ -186,29 +277,56 @@ async def propose(
     *,
     producer_is_user_facing: bool,
 ) -> str:
-    """Apply a ``setup_card`` directive; return the model-facing confirmation."""
+    """Apply a ``setup_card`` directive; return the model-facing confirmation.
+
+    A refusal is also recorded and, for a proposal a person caused, reported to
+    the agent in its own chat (:func:`_refused`): the tool's own answer came first.
+    """
     kind = str(args.get("kind", ""))
     action = setup_actions.get(kind)
+
+    async def _refuse(code: str, reason: str, *, tell: bool = True, outcome: str = "refused"):
+        await _refused(
+            state,
+            slot,
+            session_key,
+            kind,
+            code,
+            reason,
+            tell=tell and producer_is_user_facing,
+            outcome=outcome,
+        )
+
     # A gateway-only kind (the privacy disclosure) is answered exactly as an
     # unknown one: the agent cannot tell it apart, let alone raise it.
     if action is None or not action.proposable or action.build is None:
-        return f"Error: unknown setup card kind {kind!r}. Nothing was shown."
+        reason = f"unknown setup card kind {kind!r}."
+        # Not told: the tool refuses an unknown kind to the model itself, so one
+        # that reaches here came from no proposal the model was told was made.
+        await _refuse("unknown_kind", reason, tell=False)
+        return f"Error: {reason} Nothing was shown."
     if not producer_is_user_facing:
         # SC8: a cron, a watch, an injected event or a sub-agent must not put a
         # setup decision in front of the user; only a turn a person started, or
         # one that exists because they clicked a card, may.
-        _audit("setup_card.propose", "denied", session_key, f"kind:{kind} reason=not_user_facing")
+        await _refuse(
+            "not_user_facing", "not in a turn the user started", tell=False, outcome="denied"
+        )
         return (
             "Error: setup cards can only be shown in a turn the user started. "
             "Nothing was shown; ask the user in your reply instead."
         )
     denial = await asyncio.to_thread(_governance_denial, kind, session_key)
     if denial:
-        _audit("setup_card.propose", "denied", session_key, f"kind:{kind} reason=governance")
-        return f"Error: this setup action is blocked by policy ({denial}). Nothing was shown."
+        reason = f"this setup action is blocked by policy ({denial})."
+        await _refuse("governance", reason, outcome="denied")
+        return f"Error: {reason} Nothing was shown."
     from kiro_crew.dashboard.setup_guardrails import quota_paused
 
     if quota_paused(slot.key):
+        # Not told: a turn now would meet the same empty allowance, and the
+        # quota notice already speaks to the user.
+        await _refuse("quota_paused", "the chat's model allowance ran out", tell=False)
         return (
             "Error: this chat ran out of model allowance on an earlier turn, so setup "
             "cards are paused until a turn completes. Nothing was shown; tell the user "
@@ -222,22 +340,31 @@ async def propose(
     if home_choice:
         home = next((c for c in reversed(existing) if c.kind == sc.KIND_HOME), None)
         if home is not None:
+            await _refuse(
+                "home_exists",
+                f"the home step already has a card ({sc.home_state_words(home)}).",
+            )
             return (
                 f"The home step already has a card ({home.status}). Do not propose it again. "
                 "Use setup_status to check its outcome and continue from there."
             )
     if not kept_job and not home_choice and len(proposable) >= sc.CARD_BUDGET_BEFORE_FIRST_JOB:
+        reason = f"this chat already showed {len(proposable)} setup cards without a kept job."
+        await _refuse("budget", reason)
         return (
-            f"Error: this chat already showed {len(proposable)} setup cards without a kept job. "
-            "Stop proposing setup steps; help the user with what they asked instead."
+            f"Error: {reason} Stop proposing setup steps; help the user with what they asked "
+            "instead."
         )
     try:
         payload, private = await action.build(args)
     except sc.CardRejected as exc:
+        await _refuse("rejected", str(exc))
         return f"Error: {exc} Nothing was shown."
     digest = sc.payload_hash(kind, payload)
     for card in existing:
         if card.status == sc.STATUS_PENDING and card.payload_hash == digest:
+            # Not told: this card IS on screen, so the agent saying so is true.
+            await _refuse("duplicate", f"the same card is already showing ({card.id})", tell=False)
             return f"That setup card is already showing ({_card_title(card)}). End your turn."
     # One decision at a time: a second card while one is still waiting splits the
     # user's attention and buries the first. A stack-exempt kind (the home card,
@@ -247,10 +374,9 @@ async def propose(
         None,
     )
     if waiting is not None and not action.stack_exempt:
-        return (
-            f"Error: the user has not decided the card already showing ({_card_title(waiting)}). "
-            "One card at a time: end your turn and let them decide it first."
-        )
+        reason = f"the user has not decided the card already showing ({_card_title(waiting)})."
+        await _refuse("one_at_a_time", reason + " One card at a time: wait for that decision.")
+        return f"Error: {reason} One card at a time: end your turn and let them decide it first."
     card = await asyncio.to_thread(
         lambda: sc.create_card(
             slot=slot.key, session_key=session_key, kind=kind, payload=payload, private=private
@@ -311,15 +437,51 @@ def _import_plan() -> dict[str, Any]:
     return preview_import()
 
 
+def _source_key(text: str) -> str:
+    """*text* compared without case, spaces or punctuation: "Claude Code" is "claude-code"."""
+    return re.sub(r"[^0-9a-z]+", "", text.casefold())
+
+
+def _source_aliases(source: dict[str, Any]) -> set[str]:
+    """The names a model may use for *source*: its id, its name, and each one's first word."""
+    source_id, name = str(source.get("id") or ""), str(source.get("name") or "")
+    spellings = {source_id, name, *name.split("/")}
+    firsts = {re.split(r"[\s_/-]+", s.strip())[0] for s in spellings if s.strip()}
+    return {key for key in map(_source_key, spellings | firsts) if key}
+
+
+def _resolve_source_ids(wanted: list[str], sources: list[dict[str, Any]]) -> set[str]:
+    """Map each wanted name onto a detected source's id; refuse one that names none.
+
+    The facts and the schema name each source's id, but a model often writes the
+    display name or a hyphenated id instead ("Claude Code", "claude-code",
+    "claude"), and filtering on the exact id then left nothing to show. An alias
+    two sources share is refused rather than guessed.
+    """
+    resolved: set[str] = set()
+    for name in wanted:
+        matches = [s["id"] for s in sources if _source_key(name) in _source_aliases(s)]
+        if len(matches) != 1:
+            known = ", ".join(f"{s['id']} ({s['name']})" for s in sources) or "none"
+            what = "names more than one" if matches else "is not one of the"
+            raise sc.CardRejected(
+                f"{name!r} {what} agents detected on this machine. Use a source id: {known}."
+            )
+        resolved.add(matches[0])
+    return resolved
+
+
 async def _build_import(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     from kiro_crew.dashboard.handlers.onboarding_import import _scan_response
 
     plan = await asyncio.to_thread(_import_plan)
     projected = _scan_response(plan)
+    detected = [s for s in projected.get("sources", []) if s.get("id")]
     wanted = args.get("source_ids")
+    chosen = _resolve_source_ids(list(wanted), detected) if wanted else None
     sources = []
-    for source in projected.get("sources", []):
-        if wanted and source.get("id") not in wanted:
+    for source in detected:
+        if chosen is not None and source.get("id") not in chosen:
             continue
         categories = [
             {"id": c["id"], "label": c["label"], "count": int(c.get("count", 0))}
@@ -2338,7 +2500,11 @@ def _kickoff_facts(slot_key: str = "") -> list[str]:
             }
             if counts:
                 listed = ", ".join(f"{n} {cat}" for cat, n in counts.items())
-                facts.append(f"Another agent is installed here: {source.get('name')} ({listed}).")
+                # The id is what setup_card(kind="import", source_ids=[...]) takes.
+                facts.append(
+                    f"Another agent is installed here: {source.get('name')} "
+                    f"(source id: {source.get('id')}; {listed})."
+                )
     except Exception:
         logger.warning("import scan for the first-run kickoff failed", exc_info=True)
     try:
@@ -2507,10 +2673,8 @@ async def make_main_chat(state: "DashboardState", slot_key: str) -> str:
     return slot_key
 
 
-def _plain(text: Any, limit: int = 60) -> str:
-    """A title safe to quote inside a context block: no brackets, one line, bounded."""
-    out = " ".join(str(text or "").split()).replace("[", "(").replace("]", ")")
-    return out if len(out) <= limit else out[: limit - 1] + "…"
+#: Quoting a title inside a context block (``setup_move_in`` shares it).
+_plain = sc.plain_title
 
 
 def _slot_status(slot: Any) -> str:
@@ -2521,41 +2685,20 @@ def _slot_status(slot: Any) -> str:
     return "idle"
 
 
-def _card_state(card: sc.SetupCard) -> str:
-    """A card's status in words the model reads correctly.
+def _overview_chat() -> tuple[str | None, bool]:
+    """The chat the overview is for, and whether it is the main chat yet. Blocking.
 
-    The raw ``waiting`` means the card's own work is running (a build, a
-    sign-in, a preview), not that the user owes it an answer; printed as is,
-    the main chat told the user a home that was building still awaited them.
+    The main chat; before graduation, the first-run chat, which becomes it. That
+    is where the user asks what is going on while the home still builds, and
+    graduation waits on the home card, so a block kept for the main chat alone
+    was missing exactly then.
     """
-    if card.status == sc.STATUS_PENDING:
-        return "waiting for the user's decision"
-    if card.status in (sc.STATUS_WAITING, sc.STATUS_WORKING):
-        return "in progress, nothing needed from the user"
-    return card.status
+    from kiro_crew.first_run import read_main_slot
 
-
-def _home_state(card: sc.SetupCard) -> str:
-    """Where the newest home card stands, for the overview's home line."""
-    outcome = card.outcome or {}
-    if outcome.get("moved"):
-        if outcome.get("arrived"):
-            return "this home; signed in to Kiro; move complete"
-        return "moved in"
-    if outcome.get("ready"):
-        return "ready to move in (the card offers Move in)"
-    if outcome.get("needs_signin"):
-        return "built, waiting for the user to sign it in to Kiro on its card"
-    if outcome.get("stayed"):
-        return "not wanted: the user keeps the crew on this machine"
-    if card.status in (sc.STATUS_WAITING, sc.STATUS_WORKING):
-        steps = [s for s in outcome.get("steps") or [] if isinstance(s, dict)]
-        active = next((s for s in steps if s.get("state") == "active"), None)
-        where = f": {_plain(str(active.get('label') or ''))}" if active else ""
-        return f"building in the background{where}; nothing needed from the user"
-    if card.status == sc.STATUS_PENDING:
-        return "waiting for the user's decision on its card"
-    return card.status
+    main = read_main_slot()
+    if main:
+        return main, True
+    return read_first_run_slot(), False
 
 
 async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
@@ -2564,11 +2707,11 @@ async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
     Information about the user's own sessions, jobs and cards -- what
     ``list_sessions`` and ``setup_status`` already answer -- so it widens
     nothing; it saves the main chat a lookup. Bounded by
-    :data:`OVERVIEW_MAX_CHARS`.
+    :data:`OVERVIEW_MAX_CHARS`. Also attached in the first-run chat until it
+    graduates (:func:`_overview_chat`).
     """
-    from kiro_crew.first_run import read_main_slot
-
-    if await asyncio.to_thread(read_main_slot) != slot.key:
+    target, graduated = await asyncio.to_thread(_overview_chat)
+    if target != slot.key:
         return ""
     lines: list[str] = []
     others = [
@@ -2588,7 +2731,7 @@ async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
     open_cards = [c for c in cards if not c.terminal]
     if open_cards:
         items = "; ".join(
-            f"{_plain(_card_title(c))} ({_card_state(c)}"
+            f"{_plain(_card_title(c))} ({sc.card_state_words(c)}"
             f"{'' if c.slot == slot.key else ', another chat'})"
             for c in open_cards[-5:]
         )
@@ -2615,7 +2758,7 @@ async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
             lines.append(f"- Scheduled jobs ({len(jobs)}), next due first: {names}.")
     home = next((c for c in reversed(cards) if c.kind == sc.KIND_HOME), None)
     if home is not None:
-        lines.append(f"- Home in the cloud: {_home_state(home)}.")
+        lines.append(f"- Home in the cloud: {sc.home_state_words(home)}.")
     from kiro_crew.context import _neutralize_structural_markers
 
     # Chat and job titles are user- and agent-authored; a forged block marker in
@@ -2623,9 +2766,14 @@ async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
     body = (
         _neutralize_structural_markers("\n".join(lines)) if lines else "- Nothing else is running."
     )
+    where = (
+        "You are in the user's main chat."
+        if graduated
+        else "You are in the user's first-run chat, which becomes their main chat."
+    )
     block = (
         "[CREW OVERVIEW]\n"
-        "You are in the user's main chat. What else is happening (gathered by the gateway):\n"
+        f"{where} What else is happening (gathered by the gateway):\n"
         f"{body}\n"
         "Delegate long work to its own chat (session_create, session_send) or a sub-agent. "
         "A note appears here when that chat finishes; read it with session_read_message "

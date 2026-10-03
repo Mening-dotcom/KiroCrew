@@ -77,8 +77,9 @@ def setup_card(name: str, args: dict[str, Any]) -> str:
     return control._emit_directive(
         "setup_card",
         directive_args,
-        f"Setup card ({kind}) requested for this session. End your turn now; the user's "
-        "decision arrives as a [Setup card result] message.",
+        f"Setup card ({kind}) requested for this session; the gateway shows it if it can. "
+        "End your turn now; the user's decision arrives as a [Setup card result] message, "
+        "and so does a card the gateway could not show.",
     )
 
 
@@ -102,12 +103,18 @@ def setup_status(name: str, args: dict[str, Any]) -> str:
             )
         elif homes and homes[-1].status not in (sc.STATUS_COMMITTED, sc.STATUS_DECLINED):
             lines.append(
-                "The home step is not settled. Check its status; do not say setup is done."
+                f"The home step is not finished yet: {sc.home_state_words(homes[-1])}. "
+                "Do not say setup is done."
             )
     if not cards:
         lines.append("No setup cards in this session.")
+    # The same plain states the crew overview uses: a raw ``waiting`` reads as
+    # "the user owes it an answer" when it means the card's own work is running.
     for card in cards[-20:]:
-        line = f"- {card.kind} ({card.id}): {card.status}"
+        words = (
+            sc.home_state_words(card) if card.kind == sc.KIND_HOME else sc.card_state_words(card)
+        )
+        line = f"- {card.kind} ({card.id}): {words}"
         if card.error:
             line += f" — {card.error.get('message', '')}"
         lines.append(line)

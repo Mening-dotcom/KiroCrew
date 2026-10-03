@@ -209,14 +209,17 @@ class TestPropose:
         assert sc.list_cards("chat-1-1") == []
 
     @pytest.mark.asyncio
-    async def test_governance_denial_shows_nothing(self, state, monkeypatch):
+    async def test_governance_denial_shows_nothing(self, state, monkeypatch, dispatched):
         monkeypatch.setattr(setup_flow, "_governance_denial", lambda kind, sk: "not here")
         out = await _propose(state, {"kind": "profile", "fields": {"bot_name": "Nova"}})
         assert "blocked by policy" in out
         assert sc.list_cards("chat-1-1") == []
+        # The agent hears that nothing was shown, and why.
+        ((_slot, kind, text),) = dispatched
+        assert kind == "setup_result" and "card not shown: this setup action is blocked" in text
 
     @pytest.mark.asyncio
-    async def test_the_model_cannot_propose_the_privacy_disclosure(self, state):
+    async def test_the_model_cannot_propose_the_privacy_disclosure(self, state, dispatched):
         out = await _propose(state, {"kind": "privacy"})
         assert out.startswith("Error:")
 
@@ -239,7 +242,7 @@ class TestPropose:
         assert out.startswith("Error:") and "setup cards" in out
 
     @pytest.mark.asyncio
-    async def test_one_card_waits_at_a_time_except_the_home(self, state, monkeypatch):
+    async def test_one_card_waits_at_a_time_except_the_home(self, state, monkeypatch, dispatched):
         from kiro_crew.cloud import simulated_engine
 
         monkeypatch.setenv(simulated_engine.SIMULATE_ENV, "1")
@@ -250,10 +253,167 @@ class TestPropose:
         assert out.startswith("Setup card shown")
 
     @pytest.mark.asyncio
-    async def test_invalid_arguments_show_nothing(self, state):
+    async def test_invalid_arguments_show_nothing(self, state, dispatched):
         out = await _propose(state, {"kind": "cron", "name": "x", "prompt": "y", "every_secs": 5})
         assert out.startswith("Error:")
         assert sc.list_cards("chat-1-1") == []
+
+
+class _TranscriptSlot(FakeSlot):
+    """A slot whose rows are the gateway's own shape, so the refusal chain can read them."""
+
+    def append(self, role, content, cls="", ts="", *, broadcast=True, meta=None):
+        row: dict[str, Any] = {"role": role, "content": content}
+        if meta:
+            row["meta"] = meta
+        self.messages.append(row)  # type: ignore[arg-type]
+
+    def drain(self) -> None:
+        """The queued envelopes run, as the turn's end drains them."""
+        for row in self.messages:
+            if isinstance(row, dict) and row["role"] == "queued":
+                row["role"] = "inject"
+                row["meta"] = {"injectKind": "setup_result"}
+
+
+@pytest.fixture
+def busy_chat(monkeypatch):
+    """A chat whose turn is running: a refusal envelope queues, as in the live gateway."""
+    st = FakeState()
+    slot = _TranscriptSlot("chat-1-1")
+    slot.running = True
+    st.slots["chat-1-1"] = slot
+    sent: list[str] = []
+
+    async def _dispatch(state, slot, text, inject_kind):
+        assert inject_kind == "setup_result"
+        sent.append(text)
+        slot.append("queued", text)
+
+    monkeypatch.setattr(setup_flow, "_dispatch_envelope_turn", _dispatch)
+    return st, slot, sent
+
+
+_CRON = {"kind": "cron", "name": "Brief", "prompt": "Summarize", "every_secs": 86400}
+
+
+class TestARefusedCardIsReported:
+    """The tool answered "requested" before the gateway refused: the agent must hear it."""
+
+    @pytest.mark.asyncio
+    async def test_an_applied_directive_refused_reaches_the_agent_once(self, busy_chat):
+        st, slot, sent = busy_chat
+        await _propose(st, {"kind": "profile", "fields": {"bot_name": "Nova"}})
+        out = await _propose(st, _CRON)
+        assert out.startswith("Error:") and "One card at a time" in out
+        assert len(sent) == 1
+        first_line = sent[0].splitlines()[0]
+        assert first_line.startswith("[Setup card result] cron card not shown:")
+        assert "Save your profile" in first_line
+        assert sent[0].rstrip().endswith("[End of setup card result]")
+        # A second refusal in the same turn: the agent hears the first only.
+        await _propose(st, _CRON)
+        assert len(sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_chain_of_refusals_is_bounded_until_a_person_acts(self, busy_chat):
+        st, slot, sent = busy_chat
+        await _propose(st, {"kind": "profile", "fields": {"bot_name": "Nova"}})
+        for _turn in range(4):
+            await _propose(st, _CRON)
+            slot.drain()
+        assert len(sent) == setup_flow._REFUSAL_TURNS_PER_CHAIN
+        # The user types: a new chain, so the next refusal is told again.
+        slot.append("user", "set up the brief please")
+        await _propose(st, _CRON)
+        assert len(sent) == setup_flow._REFUSAL_TURNS_PER_CHAIN + 1
+
+    @pytest.mark.asyncio
+    async def test_a_proposal_no_person_caused_is_never_reported(self, busy_chat):
+        st, _slot, sent = busy_chat
+        await _propose(st, _CRON, user_facing=False)
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_a_card_already_showing_is_not_reported_as_missing(self, busy_chat):
+        st, _slot, sent = busy_chat
+        await _propose(st, _CRON)
+        out = await _propose(st, _CRON)
+        assert "already showing" in out and sent == []
+
+    @pytest.mark.asyncio
+    async def test_every_refusal_is_logged_and_audited(self, busy_chat, caplog, monkeypatch):
+        st, _slot, _sent = busy_chat
+        audits: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            setup_flow, "_audit", lambda op, outcome, sk, res: audits.append((op, outcome, res))
+        )
+        await _propose(st, {"kind": "profile", "fields": {"bot_name": "Nova"}})
+        with caplog.at_level(logging.WARNING, logger="kiro_crew.dashboard.setup_flow"):
+            await _propose(st, _CRON)
+            await _propose(st, _CRON, user_facing=False)
+        logged = [r.getMessage() for r in caplog.records if "not shown" in r.getMessage()]
+        assert any("'cron'" in m and "one_at_a_time" in m for m in logged), logged
+        assert any("not_user_facing" in m for m in logged), logged
+        assert ("setup_card.propose", "refused", "kind:cron reason=one_at_a_time") in audits
+        assert ("setup_card.propose", "denied", "kind:cron reason=not_user_facing") in audits
+
+
+_PLAN = {
+    "sources": [
+        {
+            "id": "claude_code",
+            "name": "Claude Code",
+            "categories": [{"id": "memories", "count": 8}],
+        },
+        {"id": "hermes", "name": "Hermes Agent", "categories": [{"id": "skills", "count": 1}]},
+    ],
+    "skipped": [],
+}
+
+
+class TestTheImportCardNamesItsSources:
+    """repro R1: source_ids=["claude-code"] matched nothing and the card never showed."""
+
+    @pytest.fixture(autouse=True)
+    def _plan(self, monkeypatch):
+        monkeypatch.setattr(setup_flow, "_import_plan", lambda: json.loads(json.dumps(_PLAN)))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["Claude Code", "claude-code", "claude", "CLAUDE_CODE"])
+    async def test_a_display_name_or_alias_finds_the_source(self, name):
+        payload, _ = await setup_flow._build_import({"source_ids": [name]})
+        assert [s["id"] for s in payload["sources"]] == ["claude_code"]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_id_still_refuses_and_names_the_real_ids(self):
+        with pytest.raises(sc.CardRejected) as refused:
+            await setup_flow._build_import({"source_ids": ["chatgpt"]})
+        assert "claude_code (Claude Code)" in str(refused.value)
+        assert "hermes (Hermes Agent)" in str(refused.value)
+
+    @pytest.mark.asyncio
+    async def test_no_source_ids_offers_everything_found(self):
+        payload, _ = await setup_flow._build_import({})
+        assert [s["id"] for s in payload["sources"]] == ["claude_code", "hermes"]
+
+    def test_the_kickoff_facts_give_each_source_its_id(self, monkeypatch):
+        monkeypatch.setattr(setup_flow, "_service_payload", lambda: {"installed": False})
+        facts = setup_flow._kickoff_facts()
+        assert any("Claude Code (source id: claude_code; 8 memories)" in f for f in facts), facts
+
+    def test_the_schema_says_source_ids_take_those_ids(self):
+        from kiro_crew import setup_actions
+
+        described = setup_actions.setup_card_properties()["source_ids"]["description"]
+        assert "source id" in described and "claude_code" in described
+
+    @pytest.mark.asyncio
+    async def test_the_users_own_case_now_shows_the_card(self, busy_chat):
+        st, _slot, sent = busy_chat
+        out = await _propose(st, {"kind": "import", "source_ids": ["claude-code"]})
+        assert out.startswith("Setup card shown"), out
+        assert sent == []
 
 
 class TestDecide:
@@ -855,7 +1015,7 @@ class TestWhereTheCrewLives:
 
     @pytest.mark.asyncio
     async def test_home_choice_still_requires_user_provenance_and_governance(
-        self, state, monkeypatch
+        self, state, monkeypatch, dispatched
     ):
         args = {"kind": "home", "step": "choose"}
         assert (await _propose(state, args, user_facing=False)).startswith("Error:")
@@ -1034,6 +1194,28 @@ class TestMainChat:
         assert "PR babysit" in block and "working" in block
         assert block.count("[End of crew overview]") == 1
         assert len(block) <= setup_flow.OVERVIEW_MAX_CHARS
+
+    @pytest.mark.asyncio
+    async def test_the_first_run_chat_has_the_overview_before_it_graduates(self, state):
+        """Graduation waits on the home card, so "what's going on?" during the build
+        is asked in the first-run chat: it carries the overview until then."""
+        first_run.record_slot("chat-1-1")
+        assert first_run.read_main_slot() is None
+        card = sc.create_card(
+            slot="chat-1-1",
+            session_key="dashboard:chat-1-1",
+            kind=sc.KIND_HOME,
+            payload={"region": "us-east-1", "size": {"key": "lite"}},
+            private={},
+        )
+        sc.update_card(card.id, lambda c: setattr(c, "status", sc.STATUS_WAITING))
+        block = await setup_flow.crew_overview(state, state.slots["chat-1-1"])
+        assert block.startswith("[CREW OVERVIEW]\n")
+        assert "first-run chat, which becomes their main chat" in block
+        assert "building in the background; nothing needed from the user" in block
+        # Once another chat is the main chat, the first-run chat is just a chat.
+        first_run.record_main("chat-2-2")
+        assert await setup_flow.crew_overview(state, state.slots["chat-1-1"]) == ""
 
     @pytest.mark.asyncio
     async def test_a_building_home_is_not_reported_as_awaiting_the_user(self, state):

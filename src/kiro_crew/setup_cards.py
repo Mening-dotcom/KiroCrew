@@ -480,6 +480,52 @@ def slot_has_kept_job(slot: str) -> bool:
     return any(c.kind == KIND_CRON and c.status == STATUS_COMMITTED for c in list_cards(slot))
 
 
+# ── a card's state in words (the crew overview and ``setup_status``) ─────────
+
+
+def plain_title(text: Any, limit: int = 60) -> str:
+    """A title safe to quote inside a context block: no brackets, one line, bounded."""
+    out = " ".join(str(text or "").split()).replace("[", "(").replace("]", ")")
+    return out if len(out) <= limit else out[: limit - 1] + "…"
+
+
+def card_state_words(card: SetupCard) -> str:
+    """A card's status in words the model reads correctly.
+
+    The raw ``waiting`` means the card's own work is running (a build, a
+    sign-in, a preview), not that the user owes it an answer; printed as is,
+    the main chat told the user a home that was building still awaited them.
+    """
+    if card.status == STATUS_PENDING:
+        return "waiting for the user's decision"
+    if card.status in (STATUS_WAITING, STATUS_WORKING):
+        return "in progress, nothing needed from the user"
+    return card.status
+
+
+def home_state_words(card: SetupCard) -> str:
+    """Where a home card stands, in the same plain words as :func:`card_state_words`."""
+    outcome = card.outcome or {}
+    if outcome.get("moved"):
+        if outcome.get("arrived"):
+            return "this home; signed in to Kiro; move complete"
+        return "moved in"
+    if outcome.get("ready"):
+        return "ready to move in (the card offers Move in)"
+    if outcome.get("needs_signin"):
+        return "built, waiting for the user to sign it in to Kiro on its card"
+    if outcome.get("stayed"):
+        return "not wanted: the user keeps the crew on this machine"
+    if card.status in (STATUS_WAITING, STATUS_WORKING):
+        steps = [s for s in outcome.get("steps") or [] if isinstance(s, dict)]
+        active = next((s for s in steps if s.get("state") == "active"), None)
+        where = f": {plain_title(str(active.get('label') or ''))}" if active else ""
+        return f"building in the background{where}; nothing needed from the user"
+    if card.status == STATUS_PENDING:
+        return "waiting for the user's decision on its card"
+    return card.status
+
+
 # ── per-kind argument validation (no dashboard state needed) ─────────────────
 
 

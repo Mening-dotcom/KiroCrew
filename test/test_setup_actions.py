@@ -183,7 +183,11 @@ class TestTheToolSchema:
                 "source_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "import: limit to these detected sources",
+                    "description": (
+                        "import: limit to these detected sources, by source id: the "
+                        'first-run facts name each one\'s id, e.g. "claude_code" for '
+                        "Claude Code"
+                    ),
                 },
                 "provider": {"type": "string", "description": "connect: registry slug"},
                 "name": {

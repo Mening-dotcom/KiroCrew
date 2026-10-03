@@ -63,7 +63,10 @@ ACTION = SetupAction(
         "source_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "limit to these detected sources",
+            "description": (
+                "limit to these detected sources, by source id: the first-run facts name "
+                'each one\'s id, e.g. "claude_code" for Claude Code'
+            ),
         },
     },
     validate=_validate,

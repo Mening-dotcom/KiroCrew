@@ -223,6 +223,22 @@ withheld, and committing the new card sends the kickoff again.
    proposal while the chat's quota is paused, a proposal past the card budget, a
    duplicate of a pending card, and a proposal while another card still waits
    for the owner (one decision at a time; see the `stack_exempt` flag).
+   The tool answered the model before this step ran ("requested", never
+   "shown"), so every refusal is logged to `gateway.log`, audited
+   (`setup_card.propose`, `refused` or `denied`, with its code), and, for a
+   proposal a person's turn made, reported to the agent as one
+   `[Setup card result] <kind> card not shown: <reason>` envelope turn in its
+   chat (`setup_flow._refused`), with the user provenance a result turn carries.
+   At most one is queued per turn, and a chain of them stops at
+   `_REFUSAL_TURNS_PER_CHAIN` (2) until a person types, the kickoff runs or a
+   card is decided. No turn is sent for a proposal no person caused, a kind the
+   tool would not emit, a paused quota (a turn would meet the same limit), or a
+   duplicate of a card that is showing (the agent saying so is true).
+   An import card's `source_ids` take the source ids the kickoff facts name
+   (`Claude Code (source id: claude_code; …)`); a display name or an obvious
+   alias ("Claude Code", "claude-code", "claude") resolves to that id, case- and
+   punctuation-insensitively, and a name that matches no detected source, or
+   more than one, is refused with the ids that exist.
    Otherwise it builds the payload the owner will see (an import preview, a
    provider lookup, the service platform, the current persona file, the home's
    account facts), stores the card, appends an `inject` row whose meta is
@@ -277,7 +293,7 @@ for a picked region), so a click carrying the old hash is refused.
 | SC5 | A schedule runs on exactly one crew during a move-in: the local copies are off before the archive reaches the home, back on when the home does not confirm it, and stay off once it has. | `test_setup_move_in.py::TestHappyPath::test_sc5_the_moving_job_is_off_here_before_the_archive_lands`, `TestCarryFailure`, `TestRetry` |
 | SC6 | The first-run state file admits nothing. | `test_setup_flow.py::TestPropose::test_s6_the_first_run_state_file_admits_nothing` |
 | SC9 | No model turn runs in the first-run chat before its scripted steps are done: a typed message is refused (`setup_step_pending`) before anything stores it, and the kickoff starts only from the start path's click (or the sign-in step's, after the first reply could not sign in), never from a restart. | `test_setup_flow.py::TestScriptedSteps::test_no_model_turn_runs_before_the_start_path`, `TestScriptedStepsAfterARestart::test_a_finished_script_never_starts_a_turn_on_its_own`, `test_first_run_composer_lock.py` |
-| SC8 | A card is raised only in a turn a person started: a typed message, or a turn that exists because the owner clicked a card (the first-run kickoff and every `[Setup card result]` turn carry user provenance for that reason). | `test_setup_flow.py::TestPropose::test_s8_a_turn_no_person_started_shows_nothing` |
+| SC8 | A card is raised only in a turn a person started: a typed message, or a turn that exists because the owner clicked a card (the first-run kickoff and every `[Setup card result]` turn carry user provenance for that reason). A `[Setup card result]` saying a card was not shown carries it too: it exists because a person's turn proposed the card, it is never sent for a proposal no person caused, and a chain of them is capped. | `test_setup_flow.py::TestPropose::test_s8_a_turn_no_person_started_shows_nothing` |
 
 ## Governance
 
@@ -305,7 +321,7 @@ offers classic setup (`/onboarding`).
 | Guardrail | Trigger | What the user sees | Then |
 |---|---|---|---|
 | Card budget | `CARD_BUDGET_BEFORE_FIRST_JOB` (8) proposals without a kept job; the gateway's own cards (privacy, the home question) do not count | nothing; `propose` tells the model to stop proposing | the budget is lifted by the first kept job |
-| One at a time | a card of a kind that is not `stack_exempt` is still `pending` | nothing; `propose` tells the model to end its turn | the owner decides the waiting card; the home card is exempt both ways, since its build runs in the background |
+| One at a time | a card of a kind that is not `stack_exempt` is still `pending` | the agent's one line from its `[Setup card result] … not shown` turn | the owner decides the waiting card, and its result turn re-proposes; the home card is exempt both ways, since its build runs in the background |
 | Stall | a first-run turn whose progress markers have not moved for `FIRST_RUN_STALL_SECS` (90 s) with nothing to wait on | `setup_stalled`, `reason: no_output`: stop the reply and send again, or use classic setup | at most one per turn |
 | Kickoff | the `[First run]` kickoff ends with no reply (and no retry or queued turn follows it), or cannot be dispatched | `setup_stalled`, `reason: kickoff_failed`, with Try again | Try again posts `POST /api/setup/first-run/retry` |
 | Quota | a first-run turn whose last word is the `usage_limit` error row | `setup_quota`: the allowance ran out; cards already shown and classic setup still work; the chat keeps its place | `propose` refuses new cards until a turn in that chat lands a reply |
@@ -1036,13 +1052,18 @@ remembered and no `?sid=`, on the main chat, then the first-run chat, then the
 first row. "Ask in main chat" on a job and "Ask about this chat in main chat" on a
 session pre-fill the main chat's composer, unsent.
 
-**The crew overview.** In the main chat only, every top-level turn carries a
-`[CREW OVERVIEW]` block (`setup_flow.crew_overview`, attached in `chat_runner`
-beside the theme persona): other live chats with their status (working, waiting
+**The crew overview.** In the main chat, and in the first-run chat until it
+graduates (no chat is the main chat yet, and graduation waits on the home card,
+so "what's going on?" during a build is asked there), every top-level turn
+carries a `[CREW OVERVIEW]` block (`setup_flow.crew_overview`, attached in
+`chat_runner` beside the theme persona): other live chats with their status (working, waiting
 on the user, idle), setup cards open anywhere, enabled jobs in due order, and the
 home's state. Titles are flattened (no brackets, one line, bounded) before
 quoting, and the block is capped at `OVERVIEW_MAX_CHARS`. It carries what
-`list_sessions` and `setup_status` already return, so it widens nothing.
+`list_sessions` and `setup_status` already return, so it widens nothing. Both
+word a card's state the same way (`setup_cards.card_state_words`,
+`home_state_words`): a card whose own work is running (a build, a sign-in, a
+preview) reads "nothing needed from the user", never the raw `waiting`.
 
 **The main chat's agent.** The first-run chat runs on the `kirocrew-main` agent
 spec (`slot.agent`, `agent_files.MAIN_CHAT_AGENT_NAME`), set when the chat is

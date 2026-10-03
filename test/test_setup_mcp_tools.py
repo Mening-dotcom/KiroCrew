@@ -56,8 +56,34 @@ def test_setup_status_reports_this_sessions_cards(dashboard_key):
         payload={"fields": {}},
     )
     out = setup_tools.setup_status("setup_status", {})
-    assert card.id in out and "pending" in out
+    assert card.id in out and "waiting for the user's decision" in out
     assert "chat-2-2" not in out and "profile" not in out
+
+
+def test_setup_status_says_a_building_home_needs_nothing_from_the_user(dashboard_key):
+    """The raw "waiting" read as "the user owes it an answer" while the home built."""
+    from kiro_crew import first_run
+
+    first_run.record_slot("chat-1-1")
+    card = sc.create_card(
+        slot="chat-1-1",
+        session_key=dashboard_key,
+        kind=sc.KIND_HOME,
+        payload={"region": "us-east-1", "size": {"key": "lite"}},
+    )
+
+    def _building(c: sc.SetupCard) -> None:
+        c.status = sc.STATUS_WAITING
+        c.outcome = {
+            "steps": [{"key": "create", "label": "Create the instance", "state": "active"}]
+        }
+
+    sc.update_card(card.id, _building)
+    out = setup_tools.setup_status("setup_status", {})
+    building = "building in the background: Create the instance; nothing needed from the user"
+    assert f"- home ({card.id}): {building}" in out
+    assert f"The home step is not finished yet: {building}." in out
+    assert "not settled" not in out and ": waiting" not in out
 
 
 def test_the_tools_are_registered():
