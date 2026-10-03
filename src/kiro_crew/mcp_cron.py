@@ -295,6 +295,24 @@ _CRON_SHELL_KEYWORD_RE = re.compile(r"(?:^|[;&|]|\bdo\b|\bthen\b)\s*\b(?:for|whi
 # on a hostile `cat ????...`.
 _CRON_MAX_GLOB_WORD = 256
 
+# Bash extglob operators: @( ?( +( *( !(
+# These are never expanded by `sh` or plain `bash` without `shopt -s extglob`,
+# but two paths DO reach the filesystem: `shopt -s extglob; eval '...'` and
+# `bash -O extglob -c '...'`.  The inner string passes through quote removal in
+# the variants loop and lands as a bare word containing e.g. `~/.ss@(h)/id_rsa`
+# — a path `_contains_glob_meta` does not detect without this change (it only checks `*`,
+# `?`, `[`.  We detect all five operators here and expand them to their literal
+# alternatives in `_glob_could_reach_credentials`, so every expanded form is
+# re-checked against `_CRON_CRED_PATH_RE`.  Negation `!(…)` is refused outright
+# because it can match any string, including the credential character.
+_EXTGLOB_OP_RE = re.compile(r"[?+*@!]\(")
+
+# Hard cap on the total number of leaf expansions from one word.  An
+# adversarial word with N alternatives in K nested operators could produce
+# N**K expansions; this cap makes the cost O(1) in space and time per word.
+# No legitimate cron one-liner comes close.  Exceeded → refuse the word.
+_EXTGLOB_MAX_EXPANSIONS = 64
+
 
 # Local variable assignments can smuggle path fragments past the vet:
 # `A=.s; B=sh; cp ~/$A$B/id_rsa ...` — the vetter sees `~/` and `/id_rsa` as
@@ -374,8 +392,132 @@ def _contains_glob_meta(value: str) -> bool:
     """Recognize wildcard markers without rescanning unmatched bracket suffixes."""
     if "*" in value or "?" in value:
         return True
+    # Extglob operators @( +( !( that lack * or ? in their prefix character
+    if _EXTGLOB_OP_RE.search(value):
+        return True
     opening = value.find("[")
     return opening >= 0 and value.find("]", opening + 1) >= 0
+
+
+def _extglob_expansions(text: str, _budget: list[int] | None = None) -> list[str | None]:
+    """Expand bash extglob operators in *text* to their literal alternatives.
+
+    Each operator ``OP(alt1|alt2|...)`` is replaced by each alternative in
+    turn.  Returns a list of concrete strings; a ``None`` entry means a
+    negation operator ``!(…)`` was found, which the caller treats as "refuse".
+
+    ``?(…)`` and ``*(…)`` also add the empty-string alternative (they match
+    zero occurrences).  Recursion handles nested operators.
+
+    A hard cap ``_EXTGLOB_MAX_EXPANSIONS`` prevents exponential blowup on
+    adversarial input; once exceeded the list contains a sentinel ``None``
+    and further expansion stops.
+    """
+    if _budget is None:
+        _budget = [_EXTGLOB_MAX_EXPANSIONS]
+
+    m = _EXTGLOB_OP_RE.search(text)
+    if m is None:
+        return [text]
+
+    op_char = text[m.start()]
+    inner_start = m.end()  # just after '('
+
+    # Find the matching ')' by tracking nesting depth.
+    # Track whether the immediately preceding UNESCAPED character was an
+    # extglob prefix so a backslash-prefixed `(` is not mistaken for a
+    # nested group: `\(` is a literal paren, not an opener.
+    depth = 1
+    pos = inner_start
+    prev_op = False  # was the last processed character an unescaped ?+*@! ?
+    while pos < len(text) and depth > 0:
+        ch = text[pos]
+        if ch == "\\":
+            # Backslash escapes the next character; neither is structural.
+            prev_op = False
+            pos += 2
+            continue
+        if ch == "(" and prev_op:
+            depth += 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        prev_op = ch in "?+*@!"
+        pos += 1
+
+    if depth != 0:
+        # Unmatched parenthesis — cannot parse, refuse conservatively
+        return [None]
+
+    inner_end = pos - 1  # index of the matching ')'
+    inner = text[inner_start:inner_end]
+    before = text[: m.start()]
+    after = text[pos:]
+
+    if op_char in ("!", "+", "*"):
+        # Negation !(…): can match any string — refuse outright.
+        # Repetition +(…)/*(…): the pattern repeats an arbitrary number of
+        # times, so one occurrence of each alternative is not the full set.
+        # `~/.+(s)h/id_rsa` expands to `~/.sh/id_rsa` (one `s`) but bash
+        # also matches `.ssh` (two `s`) — a credential path the single-
+        # occurrence enumeration never sees.  Cannot enumerate all repetitions
+        # without knowing the target length, so refuse rather than miss one.
+        return [None]
+
+    # Split inner alternatives on '|' at depth 0.
+    # Backslash-escaped characters are not structural tokens, so `\|` is a
+    # literal pipe (not a separator) and `\)` is a literal paren (not a close).
+    alts: list[str] = []
+    depth2 = 0
+    cur: list[str] = []
+    inner_idx = 0
+    while inner_idx < len(inner):
+        ch = inner[inner_idx]
+        if ch == "\\":
+            # Escaped character: consume both the backslash and the next char
+            cur.append(ch)
+            if inner_idx + 1 < len(inner):
+                cur.append(inner[inner_idx + 1])
+                inner_idx += 2
+            else:
+                inner_idx += 1
+            continue
+        if ch == "(" and cur and cur[-1] in "?+*@!":
+            depth2 += 1
+            cur.append(ch)
+        elif ch == "(":
+            depth2 += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth2 -= 1
+            cur.append(ch)
+        elif ch == "|" and depth2 == 0:
+            alts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        inner_idx += 1
+    alts.append("".join(cur))
+
+    # ?(…) also matches the empty string (zero occurrences)
+    if op_char == "?":
+        alts = [""] + alts
+
+    results: list[str | None] = []
+    for alt in alts:
+        if _budget[0] <= 0:
+            results.append(None)
+            return results
+        expanded = before + alt + after
+        sub = _extglob_expansions(expanded, _budget)
+        for item in sub:
+            _budget[0] -= 1
+            results.append(item)
+            if _budget[0] <= 0:
+                results.append(None)
+                return results
+    return results
 
 
 #: ``_iter_shell_chars`` reports quote state as an int; the scans below read the
@@ -771,6 +913,24 @@ def _glob_could_reach_credentials(command: str) -> bool:
         # the safe side of a bound that exists only to cap pathological input.
         if len(word) > _CRON_MAX_GLOB_WORD:
             return True
+        # Bash extglob operators (@(…) ?(…) +(…) *(…) !(…)) compose a sensitive
+        # path that literal-string checks never see: `~/.ss@(h)/id_rsa` expands
+        # to `~/.ssh/id_rsa` under `shopt -s extglob` or `bash -O extglob`.
+        # Expand the alternatives and re-check each against the credential-path
+        # pattern.  Negation !(…) is refused outright (matches any string).
+        # The expansion budget caps adversarial combinatorial blowup.
+        if _EXTGLOB_OP_RE.search(word):
+            for exp in _extglob_expansions(word):
+                if exp is None or _CRON_CRED_PATH_RE.search(exp):
+                    return True
+                # An expansion may retain regular glob metacharacters: e.g.
+                # `~/.s?h?(x)/id_rsa` -> expansion `~/.s?h/id_rsa` which
+                # has `?` but no literal `.ssh`.  Feed it back through the
+                # full fnmatch window pipeline so the plain-glob check that
+                # already handles `~/.s?h/id_rsa` covers this expansion too.
+                if _contains_glob_meta(exp) and _glob_could_reach_credentials(exp):
+                    return True
+            continue
         # Strip shell decoration that is not part of the path: quotes (all of
         # them — see the quote-removal note in _substitute_local_assignments), a
         # leading redirection/flag, and a trailing separator or list punctuation.
