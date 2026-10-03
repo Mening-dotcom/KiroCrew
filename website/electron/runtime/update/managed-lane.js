@@ -416,6 +416,8 @@ function createManagedLane({
       return;
     }
     log.error(`[update] managed install failed (exit ${code})`);
+    // The apply is over: let the poll resume and the quit command run again.
+    managedInstalling = false;
     try { if (onInstallFailed) onInstallFailed(); } catch { /* advisory */ }
     emitManagedError("install", new Error(`managed update command exited ${code}`));
   }

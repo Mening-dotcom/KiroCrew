@@ -1038,6 +1038,24 @@ test("managed quitCommand: not started while an apply is still running", async (
   assert.deepStrictEqual(commands, ["/usr/bin/apply"], "the quit command must not run beside an apply");
 });
 
+test("managed quitCommand: a FAILED apply does not suppress it at the next quit", async (t) => {
+  const { deps, appOnce } = makeDeps({
+    externallyManaged: {
+      managedBy: "m",
+      updateCommand: "/usr/bin/apply",
+      checkCommand: "/usr/bin/check",
+      quitCommand: "/usr/bin/after-quit",
+    },
+  });
+  const { commands, restore } = stubSpawn((cmd) => (cmd === "/usr/bin/apply" ? { code: 1 } : { code: 0 }));
+  t.after(restore);
+  const u = initAutoUpdate(deps);
+  await u.install();
+  appOnce.find((r) => r.ev === "will-quit").fn();
+  assert.deepStrictEqual(commands, ["/usr/bin/apply", "/usr/bin/after-quit"],
+    "a non-zero apply has ended; the quit command must run again");
+});
+
 test("managed quitCommand: absent -> no will-quit hook", (t) => {
   const { deps, appOnce } = makeDeps({
     externallyManaged: { managedBy: "m", updateCommand: "/usr/bin/apply", checkCommand: "/usr/bin/check" },
