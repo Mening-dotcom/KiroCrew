@@ -394,6 +394,25 @@ def _caller_is_ownership_fenced(state: "DashboardState", caller_key: str) -> boo
     runs unfenced. The question this predicate can answer is "whose authority is
     this session", not "is a person at the keyboard", so a person working in an
     agent-created session keeps that session's reach rather than their own.
+
+    The ONE exemption is a crew captain (:func:`captain_caller`): a person-opened
+    slot running the ``kirocrew-captain`` agent. It is checked FIRST so a captain
+    that is also a crew member is unfenced too, and it cannot be inherited: a
+    captain's children carry ``_created_by`` and are fenced like any other.
+    """
+    if captain_caller(state, caller_key):
+        return False
+    return _creator_fenced_ignoring_captain(state, caller_key)
+
+
+def _creator_fenced_ignoring_captain(state: "DashboardState", caller_key: str) -> bool:
+    """:func:`_caller_is_ownership_fenced` WITHOUT the captain exemption.
+
+    The captain's exemption lifts the fence on which TARGETS it may reach. It
+    does not make a member-bound captain the owner's own session for memory
+    delegation: :func:`fork_session` reads this predicate, and
+    :func:`create_session` reads :func:`_delegation_lineage_fenced` (which never
+    consults the captain), before binding a child to a member's private store.
     """
     if _member_caller(state, caller_key) or _cron_caller(caller_key):
         return True
@@ -670,6 +689,89 @@ def member_dispatch_enabled() -> bool:
         logger.warning("member_dispatch: agent config section degraded — withdrawing member bypass")
         return False
     return bool(cfg.agent.member_dispatch)
+
+
+def crew_captain_enabled() -> bool:
+    """Whether a captain session may reach past the creator fence (``agent.crew_captain``).
+
+    Fails closed the same two ways :func:`member_dispatch_enabled` does: a config
+    read that raises, and a config whose ``agent`` section was discarded and so
+    carries the permissive default rather than what the operator wrote.
+    """
+    try:
+        cfg = KiroCrewConfig.load()
+    except Exception:
+        logger.warning(
+            "crew_captain: config read failed — captains stay fenced until config loads",
+            exc_info=True,
+        )
+        return False
+    if cfg.degraded_sections & {DEGRADED_WHOLE_CONFIG, "agent"}:
+        logger.warning("crew_captain: agent config section degraded — captains stay fenced")
+        return False
+    return bool(getattr(cfg.agent, "crew_captain", False))
+
+
+def captain_caller(state: "DashboardState", caller_key: str) -> bool:
+    """Whether *caller_key* is a crew captain: the one agent caller not creator-fenced.
+
+    A captain is a slot that runs the ``kirocrew-captain`` agent AND that the
+    person opened themselves. Every clause below is a way a captain could be
+    minted or steered by something other than the person, and each one keeps
+    the fence:
+
+    * ``_created_by`` set: an agent made this slot (``session_create`` or
+      ``session_fork``). Without this clause any fenced worker could mint an
+      unfenced deputy by naming the captain agent in its own ``session_create``,
+      which is the exact escape the fence exists to stop.
+    * a cron slot, a channel link or an outbound channel mirror: nobody is at
+      the keyboard, or whatever the captain reads lands in front of a channel's
+      audience.
+    * an app-scoped or non-persistent slot: those never control peers at all.
+    * the ``agent.crew_captain`` and ``agent.session_control`` switches: either
+      one off withdraws the exemption, so a captain that is also a crew member
+      cannot use the member bypass to keep a reach the operator withdrew.
+
+    A captain that is a crew member keeps its member store; only the creator
+    fence lifts. Every other gate in :func:`authorize_target` (workspace,
+    incognito, app, channel targets) still applies.
+    """
+    if _cron_caller(caller_key):
+        return False
+    slot = state.get_slot(caller_key)
+    if slot is None:
+        return False
+    if getattr(slot, "_created_by", ""):
+        return False
+    if getattr(slot, "_app", ""):
+        return False
+    if getattr(slot, "memory_mode", "persistent") != "persistent":
+        return False
+    if not _runs_captain_template(str(getattr(slot, "agent", "") or "")):
+        return False
+    if _channel_link_of(slot) or _has_channel_mirror(state, slot):
+        return False
+    return crew_captain_enabled() and session_control_enabled()
+
+
+def _runs_captain_template(agent_name: str) -> bool:
+    """Whether a slot naming *agent_name* runs the ``kirocrew-captain`` template.
+
+    A plain tab stores the template name itself. A crew member's slot stores
+    the MEMBER's name, so the template is read off that member's config entry
+    (``kiro_agent``). An unreadable config answers ``False``.
+    """
+    from kiro_crew.agent_files import CAPTAIN_AGENT_NAME
+
+    if not agent_name:
+        return False
+    if agent_name == CAPTAIN_AGENT_NAME:
+        return True
+    try:
+        entry = KiroCrewConfig.load().agents.get(agent_name)
+    except Exception:
+        return False
+    return getattr(entry, "kiro_agent", "") == CAPTAIN_AGENT_NAME
 
 
 def member_admitted_to_scoped_surface(session_key: str, store: str) -> bool:
@@ -2428,8 +2530,15 @@ async def create_session(
             # selection, so an ordinary create pays nothing. Confined to this gate
             # on purpose: the owner-rooted allowance never widens the per-verb
             # ownership boundary in `authorize_target`.
+            # The DELEGATION fence, which the captain exemption does not lift: a
+            # member-bound captain still may not bind a child to another member's
+            # private store. The gate carries a verdict only for a member, so ANY
+            # carried verdict (True, or False for a member captain) means fenced
+            # here, and the lineage walk never consults the captain. Nothing about
+            # the captain is re-read: a re-read that answers False on a config flip
+            # or a failed read would turn the refusal into an admission.
             fenced = (
-                caller_fenced
+                True
                 if caller_fenced is not None
                 else await asyncio.to_thread(_delegation_lineage_fenced, state, caller_key)
             )
@@ -3063,6 +3172,25 @@ async def fork_session(
             operation="fork",
             precomputed_ownership_fenced=caller_fenced,
         )
+        # A fork copies the source's memory binding into a child the CALLER
+        # owns. A member captain's reach is for steering and reading, not for
+        # taking over a session bound to another member's memory, so any caller
+        # the creator fence binds WITHOUT the captain exemption forks only what it
+        # created. Every other such caller was already refused by
+        # `authorize_target`, so in practice this lands on a member captain. A
+        # carried verdict always means a member, and the predicate fails closed,
+        # so a config flip mid-request cannot reopen the fork.
+        if (
+            source_slot is not caller_slot
+            and _created_by_other(source_slot, caller_key)
+            and (
+                caller_fenced is not None
+                or await asyncio.to_thread(_creator_fenced_ignoring_captain, state, caller_key)
+            )
+        ):
+            raise SessionControlError(
+                "a crew member can fork only sessions it created itself", code="not_creator"
+            )
 
     log = state.conversation_log
     if log is None:
