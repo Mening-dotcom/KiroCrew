@@ -3,6 +3,7 @@ import { ChevronDown, ImageOff } from 'lucide-react'
 import { i18nT } from '../../i18n/t'
 import { useReducedMotion } from '../../hooks/useReducedMotion'
 import { ROW_PAD_Y, PINNED_PREVIEW_LINES, PINNED_RESTING_LINES, pinnedImageUrl } from '../../utils/pinnedPrompt'
+import { EdgeFade } from '../../app-sdk/ChatScrollChrome'
 
 interface PinnedPromptProps {
   /** Clamped plain-text preview of the pinned prompt (images stripped out). */
@@ -527,164 +528,176 @@ export default function PinnedPrompt({
   const showChevron = !folding && (clamped || images.length > 0 || bodyBeyondPreview || expanded)
 
   return (
-    <div
-      className="relative px-4 py-1 mx-auto w-full pointer-events-none flex items-start justify-end"
-      style={{
-        maxWidth: 'var(--mc-content-width, 900px)',
-        // Clip ONLY while collapsed AND being pushed. The clip is what reveals
-        // the card away as the next prompt pushes it up. Two things it must NOT
-        // do: (1) clip the EXPANDED card at rest — an expanded prompt grows
-        // multi-line past the collapsed band height, and a constant `hidden` cut
-        // its lower lines off; (2) reintroduce the transition blink. The blink is
-        // not the overflow flip itself but a ~4.5px HEIGHT jump alongside it.
-        // With the continuous height below, flipping
-        // `visible`→`hidden` at pushUp>0 is seamless: the card has 4px of band
-        // padding beneath it, enough for `--shadow-sm` (`0 1px 2px`) to still
-        // render in the first push frame, so nothing pops. The peek needs no
-        // term here: it closes the moment `pushUp > 0` (see `peek` above), so a
-        // pushed card is always its resting size.
-        overflow: pushUp > 0 && !expanded ? 'hidden' : 'visible',
-        // Height must be CONTINUOUS through pushUp === 0, or the clip box jumps
-        // the moment the push starts. Carrying both paddings (ROW_PAD_Y * 2)
-        // makes this formula equal the natural height at rest and shrink smoothly
-        // from there. pushUp travels ROW_PAD_Y + bannerH (see computePinPush), so
-        // it bottoms out at a ROW_PAD_Y-tall, empty, transparent strip with the
-        // card entirely clipped away — no fragment of it survives the no-banner
-        // stretch that a tall incoming prompt opens up.
-        height: bannerH > 0
-          ? Math.max(0, ROW_PAD_Y * 2 + bannerH - pushUp)
-          : undefined,
-      }}
-    >
+    // The band is opaque. The card is a narrow bubble at the right, so with a
+    // see-through band the reply scrolling up beneath it ran on beside the
+    // bubble, its lines cut where the bubble sat. Behind the backing a row is
+    // either below the band and readable or under it and hidden whole, as under
+    // the title row, and the fade dissolves it into the band the same way. The
+    // backing spans the band from OUTSIDE the clip a push opens, so the fade
+    // does not pop away when the next prompt starts pushing the card out.
+    <div className="relative">
+      <div aria-hidden="true" data-testid="pinned-prompt-backing" className="absolute inset-0 bg-bg pointer-events-none">
+        <EdgeFade side="top" anchor="below" />
+      </div>
       <div
-        ref={cardRef}
-        data-testid="pinned-prompt"
-        // Interactive, always. This card sits in a `pointer-events-none` overlay
-        // that is a SIBLING of the transcript scroller, so an interactive box here
-        // would swallow a wheel: the browser hunts for a scrollable ancestor of the
-        // box and finds the overlay, then the page, never the transcript. Going
-        // inert dodges that but costs the reader the content — while the fold holds
-        // the card over lines they have not read, an inert card cannot be selected,
-        // copied or clicked, and its two buttons keep their hover styling while
-        // doing nothing. So the gesture is FORWARDED instead (see
-        // `scrollTranscriptBy`) and the card keeps its pointer events.
-        className="pointer-events-auto max-w-full min-w-0"
-        style={{ transform: `translateY(${-pushUp}px)`, willChange: 'transform' }}
+        className="relative px-4 py-1 mx-auto w-full pointer-events-none flex items-start justify-end"
+        style={{
+          maxWidth: 'var(--mc-content-width, 900px)',
+          // Clip ONLY while collapsed AND being pushed. The clip is what reveals
+          // the card away as the next prompt pushes it up. Two things it must NOT
+          // do: (1) clip the EXPANDED card at rest — an expanded prompt grows
+          // multi-line past the collapsed band height, and a constant `hidden` cut
+          // its lower lines off; (2) reintroduce the transition blink. The blink is
+          // not the overflow flip itself but a ~4.5px HEIGHT jump alongside it.
+          // With the continuous height below, flipping
+          // `visible`→`hidden` at pushUp>0 is seamless: the card has 4px of band
+          // padding beneath it, enough for `--shadow-sm` (`0 1px 2px`) to still
+          // render in the first push frame, so nothing pops. The peek needs no
+          // term here: it closes the moment `pushUp > 0` (see `peek` above), so a
+          // pushed card is always its resting size.
+          overflow: pushUp > 0 && !expanded ? 'hidden' : 'visible',
+          // Height must be CONTINUOUS through pushUp === 0, or the clip box jumps
+          // the moment the push starts. Carrying both paddings (ROW_PAD_Y * 2)
+          // makes this formula equal the natural height at rest and shrink smoothly
+          // from there. pushUp travels ROW_PAD_Y + bannerH (see computePinPush), so
+          // it bottoms out at a ROW_PAD_Y-tall, empty strip of the backing with the
+          // card entirely clipped away — no fragment of it survives the no-banner
+          // stretch that a tall incoming prompt opens up.
+          height: bannerH > 0
+            ? Math.max(0, ROW_PAD_Y * 2 + bannerH - pushUp)
+            : undefined,
+        }}
       >
         <div
-          ref={boxRef}
-          className="user-bubble flex items-start gap-2 rounded-xl bg-card text-card-fg ring-1 ring-inset forced-colors:border ring-border shadow-sm px-4 py-2 text-sm"
+          ref={cardRef}
+          data-testid="pinned-prompt"
+          // Interactive, always. This card sits in a `pointer-events-none` overlay
+          // that is a SIBLING of the transcript scroller, so an interactive box here
+          // would swallow a wheel: the browser hunts for a scrollable ancestor of the
+          // box and finds the overlay, then the page, never the transcript. Going
+          // inert dodges that but costs the reader the content — while the fold holds
+          // the card over lines they have not read, an inert card cannot be selected,
+          // copied or clicked, and its two buttons keep their hover styling while
+          // doing nothing. So the gesture is FORWARDED instead (see
+          // `scrollTranscriptBy`) and the card keeps its pointer events.
+          className="pointer-events-auto max-w-full min-w-0"
+          style={{ transform: `translateY(${-pushUp}px)`, willChange: 'transform' }}
         >
-          <button
-            type="button"
-            // The jump is suppressed for the duration of the fold. This button wraps the
-            // prompt TEXT, and while the fold holds the card at the pinned row's height
-            // that text can cover most of the viewport — so a click meant to place a
-            // caret or start a selection would instead scroll the transcript away from
-            // the place the reader is holding, which is the exact harm this fold exists
-            // to prevent. At rest the card is one line and the jump is a deliberate
-            // target again.
-            onClick={folding ? undefined : onJump}
-            title={folding ? undefined : i18nT('pages.chat.pinnedPrompt.jump_to_this_turn')}
-            aria-disabled={folding || undefined}
-            tabIndex={folding ? -1 : undefined}
-            className={`min-w-0 flex-1 bg-transparent border-none p-0 m-0 text-left ${folding ? '' : 'cursor-pointer'}`}
+          <div
+            ref={boxRef}
+            className="user-bubble flex items-start gap-2 rounded-xl bg-card text-card-fg ring-1 ring-inset forced-colors:border ring-border shadow-sm px-4 py-2 text-sm"
           >
-            {/* Expanded: images get their own strip at readable size, outside the
-                scrollable <p> so they stay put while long text scrolls. */}
-            {expanded && shown.length > 0 && (
-              <span className="flex flex-wrap gap-2 my-1">
-                {shown.map(src => (
+            <button
+              type="button"
+              // The jump is suppressed for the duration of the fold. This button wraps the
+              // prompt TEXT, and while the fold holds the card at the pinned row's height
+              // that text can cover most of the viewport — so a click meant to place a
+              // caret or start a selection would instead scroll the transcript away from
+              // the place the reader is holding, which is the exact harm this fold exists
+              // to prevent. At rest the card is one line and the jump is a deliberate
+              // target again.
+              onClick={folding ? undefined : onJump}
+              title={folding ? undefined : i18nT('pages.chat.pinnedPrompt.jump_to_this_turn')}
+              aria-disabled={folding || undefined}
+              tabIndex={folding ? -1 : undefined}
+              className={`min-w-0 flex-1 bg-transparent border-none p-0 m-0 text-left ${folding ? '' : 'cursor-pointer'}`}
+            >
+              {/* Expanded: images get their own strip at readable size, outside the
+                  scrollable <p> so they stay put while long text scrolls. */}
+              {expanded && shown.length > 0 && (
+                <span className="flex flex-wrap gap-2 my-1">
+                  {shown.map(src => (
+                    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- onError is an image-load lifecycle event (drop the 404'd src so `shown` falls back to the ImageOff glyph), not a user interaction; there is nothing here for a keyboard to reach
+                    <img key={src} src={pinnedImageUrl(src)} alt="" loading="lazy"
+                      onError={() => markFailed(src)}
+                      className={`h-20 w-auto max-w-[160px] rounded object-cover p-0.5 ${THUMB_FRAME}`} />
+                  ))}
+                </span>
+              )}
+              {/* The same all-failed fallback the collapsed card gets. Without it,
+                  expanding an image-only prompt whose files are gone empties the card
+                  completely — the strip is skipped and `fullText` is '' — so the
+                  chevron's reward would be a blank box. */}
+              {expanded && !fullText && images.length > 0 && shown.length === 0 && (
+                <span className="flex my-1">
+                  <ImageOff size={28} aria-hidden className="text-muted" />
+                </span>
+              )}
+              <p
+                ref={textRef}
+                // The fold outranks `expanded`. Both can be true at once: the reader can
+                // click the chevron while the card is mid-fold. `expanded` caps the text
+                // at 40vh, but the fold is holding the BOX at the pinned row's remaining
+                // height, so an expanded cap inside a taller box leaves opaque empty card
+                // over unread lines — the exact hole this fold exists to close. While
+                // folding the text always wraps in full, so the box stays full of text;
+                // the cap resumes the moment the fold ends.
+                className={`my-1 leading-6 ${folding
+                  ? 'whitespace-pre-wrap break-words overflow-hidden'
+                  : expanded
+                    ? 'whitespace-pre-wrap break-words max-h-[40vh] overflow-y-auto'
+                    : 'overflow-hidden'}`}
+                style={expanded || folding ? { overflowWrap: 'anywhere' } : {
+                  // Tailwind ships `line-clamp-<n>` only for a literal n, and the
+                  // line counts are shared with the geometry module — so set the
+                  // clamp from the constants rather than duplicating them in a class
+                  // name. One line at rest, PINNED_PREVIEW_LINES while peeking.
+                  display: '-webkit-box',
+                  WebkitBoxOrient: 'vertical',
+                  WebkitLineClamp: clampLines,
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {/* Collapsed: thumbnails are INLINE LEADING CONTENT of the same
+                    paragraph, sized in `em` so they sit in the first line's box and
+                    add no height to the card — which is what preserves the card's
+                    pixel equality with the bubble it replaces. They also fall inside
+                    the line clamp, so a prompt with many images cannot grow the card.
+                    Rendering them here (rather than dropping them, as promptPreview
+                    does to the text) is what stops an image-only prompt pinning as a
+                    blank card.
+
+                    When there is NO text, the em-sized thumbnail is the only content
+                    and 1.4em of it is unreadable — so it gets two lines' worth of
+                    height instead. Nothing is traded away: parity with the bubble is
+                    already unattainable for an image-only prompt, whose bubble is a
+                    full-size image, and the taller card only moves the hand-off line
+                    DOWN (see PINNED_RESTING_LINES). */}
+                {!expanded && shown.map(src => (
                   // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- onError is an image-load lifecycle event (drop the 404'd src so `shown` falls back to the ImageOff glyph), not a user interaction; there is nothing here for a keyboard to reach
                   <img key={src} src={pinnedImageUrl(src)} alt="" loading="lazy"
                     onError={() => markFailed(src)}
-                    className={`h-20 w-auto max-w-[160px] rounded object-cover p-0.5 ${THUMB_FRAME}`} />
+                    className={`inline-block align-middle mr-1.5 rounded-sm object-cover p-px ${THUMB_FRAME} ${
+                      text ? 'h-[1.4em] w-[1.4em]' : 'h-[2.8em] w-[3.6em]'}`} />
                 ))}
-              </span>
-            )}
-            {/* The same all-failed fallback the collapsed card gets. Without it,
-                expanding an image-only prompt whose files are gone empties the card
-                completely — the strip is skipped and `fullText` is '' — so the
-                chevron's reward would be a blank box. */}
-            {expanded && !fullText && images.length > 0 && shown.length === 0 && (
-              <span className="flex my-1">
-                <ImageOff size={28} aria-hidden className="text-muted" />
-              </span>
-            )}
-            <p
-              ref={textRef}
-              // The fold outranks `expanded`. Both can be true at once: the reader can
-              // click the chevron while the card is mid-fold. `expanded` caps the text
-              // at 40vh, but the fold is holding the BOX at the pinned row's remaining
-              // height, so an expanded cap inside a taller box leaves opaque empty card
-              // over unread lines — the exact hole this fold exists to close. While
-              // folding the text always wraps in full, so the box stays full of text;
-              // the cap resumes the moment the fold ends.
-              className={`my-1 leading-6 ${folding
-                ? 'whitespace-pre-wrap break-words overflow-hidden'
-                : expanded
-                  ? 'whitespace-pre-wrap break-words max-h-[40vh] overflow-y-auto'
-                  : 'overflow-hidden'}`}
-              style={expanded || folding ? { overflowWrap: 'anywhere' } : {
-                // Tailwind ships `line-clamp-<n>` only for a literal n, and the
-                // line counts are shared with the geometry module — so set the
-                // clamp from the constants rather than duplicating them in a class
-                // name. One line at rest, PINNED_PREVIEW_LINES while peeking.
-                display: '-webkit-box',
-                WebkitBoxOrient: 'vertical',
-                WebkitLineClamp: clampLines,
-                overflowWrap: 'anywhere',
-              }}
-            >
-              {/* Collapsed: thumbnails are INLINE LEADING CONTENT of the same
-                  paragraph, sized in `em` so they sit in the first line's box and
-                  add no height to the card — which is what preserves the card's
-                  pixel equality with the bubble it replaces. They also fall inside
-                  the line clamp, so a prompt with many images cannot grow the card.
-                  Rendering them here (rather than dropping them, as promptPreview
-                  does to the text) is what stops an image-only prompt pinning as a
-                  blank card.
-
-                  When there is NO text, the em-sized thumbnail is the only content
-                  and 1.4em of it is unreadable — so it gets two lines' worth of
-                  height instead. Nothing is traded away: parity with the bubble is
-                  already unattainable for an image-only prompt, whose bubble is a
-                  full-size image, and the taller card only moves the hand-off line
-                  DOWN (see PINNED_RESTING_LINES). */}
-              {!expanded && shown.map(src => (
-                // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- onError is an image-load lifecycle event (drop the 404'd src so `shown` falls back to the ImageOff glyph), not a user interaction; there is nothing here for a keyboard to reach
-                <img key={src} src={pinnedImageUrl(src)} alt="" loading="lazy"
-                  onError={() => markFailed(src)}
-                  className={`inline-block align-middle mr-1.5 rounded-sm object-cover p-px ${THUMB_FRAME} ${
-                    text ? 'h-[1.4em] w-[1.4em]' : 'h-[2.8em] w-[3.6em]'}`} />
-              ))}
-              {/* Every image 404'd (deleted/moved file) AND there is no text: hiding
-                  the broken glyphs would put us back at the blank card this change
-                  exists to fix, so leave a neutral icon standing in for them. */}
-              {!expanded && !text && images.length > 0 && shown.length === 0 && (
-                <ImageOff size={20} aria-hidden className="inline-block align-middle text-muted" />
-              )}
-              {expanded || folding ? fullText : text}
-            </p>
-          </button>
-          {showChevron && (
-            <button
-              type="button"
-              onClick={onToggleExpanded}
-              aria-expanded={expanded}
-              aria-label={expanded
-                ? i18nT('pages.chat.pinnedPrompt.collapse_pinned_prompt')
-                : i18nT('pages.chat.pinnedPrompt.expand_pinned_prompt')}
-              /* my-1 + one line box mirrors the paragraph's own metrics, so the
-                 icon centres on the first line and adds no height to the card. */
-              className="shrink-0 my-1 h-6 flex items-center bg-transparent border-none p-0 m-0 text-muted hover:text-text transition-colors cursor-pointer"
-            >
-              <ChevronDown
-                size={16}
-                className={`transition-transform duration-150 ease-[cubic-bezier(0.2,0,0,1)] ${expanded ? 'rotate-180' : ''}`}
-              />
+                {/* Every image 404'd (deleted/moved file) AND there is no text: hiding
+                    the broken glyphs would put us back at the blank card this change
+                    exists to fix, so leave a neutral icon standing in for them. */}
+                {!expanded && !text && images.length > 0 && shown.length === 0 && (
+                  <ImageOff size={20} aria-hidden className="inline-block align-middle text-muted" />
+                )}
+                {expanded || folding ? fullText : text}
+              </p>
             </button>
-          )}
+            {showChevron && (
+              <button
+                type="button"
+                onClick={onToggleExpanded}
+                aria-expanded={expanded}
+                aria-label={expanded
+                  ? i18nT('pages.chat.pinnedPrompt.collapse_pinned_prompt')
+                  : i18nT('pages.chat.pinnedPrompt.expand_pinned_prompt')}
+                /* my-1 + one line box mirrors the paragraph's own metrics, so the
+                   icon centres on the first line and adds no height to the card. */
+                className="shrink-0 my-1 h-6 flex items-center bg-transparent border-none p-0 m-0 text-muted hover:text-text transition-colors cursor-pointer"
+              >
+                <ChevronDown
+                  size={16}
+                  className={`transition-transform duration-150 ease-[cubic-bezier(0.2,0,0,1)] ${expanded ? 'rotate-180' : ''}`}
+                />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

@@ -395,6 +395,13 @@ export default function SetupCard({ cardId, placement = 'inline' }: { cardId: st
       // compact result line are this same box changing shape, so `layout`
       // animates the collapse rather than swapping one card for another.
       layout={!reduceMotion}
+      // In the transcript, only the card's own change may animate it. Without a
+      // dependency `layout` re-measures on every render, and a transcript row
+      // re-renders on every streamed chunk: each pin or reflow above it read as
+      // the card moving, so it slid back over the gap on a transform. That
+      // transform is scrollable overflow, and the snapshot resetting it shrank
+      // the content under a follower mid-commit, clamping them off the bottom.
+      layoutDependency={placement === 'transcript' ? card : undefined}
       layoutId={sharedLayoutId}
       transition={{ layout: { duration: 0.2, ease: [0.2, 0.8, 0.2, 1] } }}
       aria-label={t('components.setupCard.region_label', { title })}

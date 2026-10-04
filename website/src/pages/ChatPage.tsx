@@ -5572,22 +5572,18 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     return true
   }, [messages, navToDisplayIndex, setHighlightTs])
   // The setup-card tray's bar: scroll to the card's own row and light it up.
-  // A card is proposed mid-turn, so a finished turn usually holds its row
-  // behind "Worked through N steps": open that fold first (the same host-owned
-  // disclosure a click sets), bring the turn into the window, then centre the
-  // row itself once the fold has opened.
+  // A card row never folds into "Worked through N steps" (TurnBlock renders it
+  // in place), so bring its turn into the window, then centre the row itself.
   const locateSetupCard = useCallback((cardId: string, behavior: ScrollBehavior) => {
     const msgIdx = messagesRef.current.findIndex(m => setupCardRefOf(m.meta)?.id === cardId)
     const di = msgIdx < 0 ? undefined : messageToDisplayIdxRef.current.get(msgIdx)
     if (di === undefined) return
-    const item = displayItems[di]
-    if (item?.kind === 'turn') setTurnDisclosureFor(virtualKey(item, di), true)
     navToDisplayIndex(di, { behavior, align: 'center' })
     window.setTimeout(() => {
       document.querySelector(`[data-setup-card-row="${CSS.escape(cardId)}"]`)?.scrollIntoView({ behavior, block: 'center' })
       highlightSetupCardRow(cardId)
     }, behavior === 'smooth' ? 320 : 0)
-  }, [displayItems, navToDisplayIndex, setTurnDisclosureFor, virtualKey])
+  }, [navToDisplayIndex])
   const handleJumpToPinnedMessage = useCallback((messageTs: string, mid: string | undefined, { origin }: { origin: PendingJumpOrigin }) => {
     if (jumpToLoadedPinnedMessage(messageTs, mid)) return
     if (activeSlot && (!cursorIsForActiveSlot || (slotHasMore && slotOldestIndex > 0))) {

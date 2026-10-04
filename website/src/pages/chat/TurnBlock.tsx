@@ -14,6 +14,7 @@ import { isReasoningBurst } from './groupDisplayItems'
 import { isDiffToolMessage } from './toolDiff'
 import { findOptionMarkers, stripOptionMarkers } from '../../app-sdk/protocol/optionMarker'
 import { hasKeepVisibleMarker } from '../../app-sdk/protocol/keepVisibleMarker'
+import { setupCardRefOf } from '../../api/setupCards'
 import { i18nT } from '../../i18n/t'
 import ToolGroupToggle from '../../components/ToolGroupToggle'
 
@@ -143,18 +144,29 @@ const isCrewReply = (it: TurnItem) =>
   it.kind === 'single' && isConclusion(it) &&
   (it.msg.meta?.crew_reply === true || /(^|\s)crew-reply(\s|$)/.test(it.msg.cls || ''))
 
+/**
+ * A setup card's row (one-chat first run): the card the agent put on screen,
+ * pending or decided. It is the owner's decision and the record of it -- a
+ * result line, a moved-in home's "Next time" commands -- so it never folds.
+ * Cards are proposed mid-turn, so before this a decided card usually sat
+ * behind "Worked through N steps", mounted but clipped to nothing.
+ */
+const isSetupCardItem = (it: TurnItem) =>
+  it.kind === 'single' && it.msg.role === 'inject' && setupCardRefOf(it.msg.meta) !== null
+
 /** A renderable assistant message (widget/image), a mid-turn hand-back
  *  ([OPTIONS:] marker), a keep-visible-marked deliverable (#7948), a legacy
  *  crew-mode answer, a role that must surface inline (mcp_oauth, error), a
  *  workflow_run / spawn_run / workflow-completion / sub-agent-completion card,
- *  or an MCP App-bearing tool call (interactive iframe anchored to the row).
+ *  an MCP App-bearing tool call (interactive iframe anchored to the row), or a
+ *  setup card row.
  *  All bypass the collapse pane. */
 const isVisibleInline = (it: TurnItem, appToolCallIds: ReadonlySet<string>) =>
   isRenderable(it) || isHandBack(it) || isKeepVisible(it) || isAlwaysVisible(it) || isCrewReply(it) ||
   isWorkflowRunItem(it) || isSpawnRunItem(it) ||
   isSubagentCompletionItem(it) ||
   isWorkflowCompletionItem(it) || isMcpAppItem(it, appToolCallIds) ||
-  isDiffCardItem(it)
+  isDiffCardItem(it) || isSetupCardItem(it)
 
 /** One ordered run of the collapse split: a contiguous run of items that hide
  *  behind the toggle, or a single item that must render in place. */

@@ -11,6 +11,7 @@ import {
   distanceFromBottom,
   bottomTarget,
   isSelfScroll,
+  clampedBelowWrite,
   heightAnchorStillUsable,
   resolveUserScrollStick,
   evaluateAutoPin,
@@ -66,6 +67,31 @@ describe('isSelfScroll', () => {
   it('never self-attributes when nothing was written this session (lastWriteTop < 0)', () => {
     expect(isSelfScroll(0, -1)).toBe(false)
     expect(isSelfScroll(600, -1)).toBe(false)
+  })
+})
+
+describe('clampedBelowWrite — the engine clamped a follower to a shrunk bottom', () => {
+  it('is flush at the bottom and below our write', () => {
+    // Wrote 583 at the old bottom; the content shrank by 440 and the engine
+    // moved the reader to the new maximum.
+    expect(clampedBelowWrite({ scrollTop: 143, scrollHeight: 860, clientHeight: 717 }, 583)).toBe(true)
+  })
+
+  it('is not a reader who scrolled up: they leave a gap under them', () => {
+    expect(clampedBelowWrite({ scrollTop: 283, scrollHeight: 1300, clientHeight: 717 }, 583)).toBe(false)
+  })
+
+  it('forgives the gap a shrinking box left under a clamped reader, and only that', () => {
+    // Clamped to 576 in a 717px box, then the box shrank by 44.
+    const geom = { scrollTop: 576, scrollHeight: 1293, clientHeight: 673 }
+    expect(clampedBelowWrite(geom, 583, 44)).toBe(true)
+    expect(clampedBelowWrite(geom, 583)).toBe(false)
+    expect(clampedBelowWrite({ ...geom, scrollTop: 556 }, 583, 44)).toBe(false)
+  })
+
+  it('is not our own write, nor a session with no write yet', () => {
+    expect(clampedBelowWrite({ scrollTop: 583, scrollHeight: 1300, clientHeight: 717 }, 583)).toBe(false)
+    expect(clampedBelowWrite({ scrollTop: 143, scrollHeight: 860, clientHeight: 717 }, -1)).toBe(false)
   })
 })
 
@@ -508,6 +534,18 @@ describe('evaluateAutoPin — our own viewport GROWTH clamps a follower below th
 // re-fires the pin on every ResizeObserver tick even though the viewport is
 // visually pinned. atBottomEpsilon() scales to the device pixel (never below 1
 // CSS px).
+describe('evaluateAutoPin — the engine lifted a follower below our write', () => {
+  const geom = { scrollTop: 590, scrollHeight: 1407, clientHeight: 717 }
+  it('carries an idle follower anchoring moved down, with no input since our write', () => {
+    expect(evaluateAutoPin({ stick: true, geom, lastWriteTop: 583, runActive: false, readerMovedSinceWrite: false }))
+      .toEqual({ pin: true, stick: true, target: 690 })
+  })
+  it('still releases an idle reader who gave input, or who sits above our write', () => {
+    expect(evaluateAutoPin({ stick: true, geom, lastWriteTop: 583, runActive: false, readerMovedSinceWrite: true }).stick).toBe(false)
+    expect(evaluateAutoPin({ stick: true, geom: { ...geom, scrollTop: 570 }, lastWriteTop: 583, runActive: false, readerMovedSinceWrite: false }).stick).toBe(false)
+  })
+})
+
 describe('evaluateAutoPin — a restore owns the position', () => {
   // Captured on a phone: `WRITE autopin 3091->4245` answered in the same
   // decisecond by `WRITE settle 4245->3091`, twice inside 120ms, 1,154px each

@@ -194,6 +194,41 @@ describe('TurnBlock — file role visibility', () => {
   })
 })
 
+describe('TurnBlock — setup card rows stay out of the steps fold', () => {
+  // The proof run's turn: the agent proposes a job card mid-turn, the owner
+  // keeps it, the home card goes up, and the turn ends on a sign-off. Each card
+  // row is the owner's decision and its record (a moved-in home's "Next time"
+  // commands among it), so none may sit behind "Worked through N steps".
+  const card = (id: string, kind: string, idx: number, ts: string): TurnItem => ({
+    kind: 'single',
+    msg: { role: 'inject', content: `(Setup card shown to the user: ${kind})`, ts, meta: { setupCard: { id, kind } } },
+    idx,
+  })
+  const items = (): TurnItem[] => [
+    { kind: 'single', msg: { role: 'assistant', content: 'Good one. I will keep this brief local.', ts: '1' }, idx: 0 },
+    { kind: 'single', msg: { role: 'tool', content: '🔧 Running: @kirocrew-core/setup_card', ts: '2' }, idx: 1 },
+    card('sc_cron', 'cron', 2, '3'),
+    { kind: 'single', msg: { role: 'inject', content: '[Setup card result] cron card: committed.', ts: '4', meta: { injectKind: 'setup_result' } }, idx: 3 },
+    card('sc_home', 'home', 4, '5'),
+    { kind: 'single', msg: { role: 'assistant', content: 'Dev brief is kept. Last setup step: where your crew lives.', ts: '6' }, idx: 5 },
+  ]
+  const renderItem = (it: TurnItem, i: number) => (
+    <div data-testid={`item-${i}`}>{it.kind === 'single' ? it.msg.content : 'group'}</div>
+  )
+
+  it('renders every card row in place in collapseAll mode', () => {
+    const { container } = render(<TurnBlock turn={makeTurn(items())} renderItem={renderItem} collapseAll={true} />)
+    for (const i of [2, 4]) {
+      const row = container.querySelector(`[data-testid="item-${i}"]`)
+      expect(row).not.toBeNull()
+      expect(row?.closest('[data-collapsed="true"]')).toBeNull()
+      expect(row?.closest('[style*="overflow"]')).toBeNull()
+    }
+    // The steps around them still fold: the setting is the owner's.
+    expect(container.querySelector('[data-collapsed="true"]')).not.toBeNull()
+  })
+})
+
 describe('TurnBlock — renderable content stays visible in collapseAll mode', () => {
   it('mcwidget emitted between tool calls is not folded into the reasoning pane', () => {
     const widgetBody = '<mcwidget title="Hello">\n<div>hi</div>\n</mcwidget>'

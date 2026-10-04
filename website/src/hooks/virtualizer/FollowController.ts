@@ -103,6 +103,31 @@ export function isSelfScroll(
 }
 
 /**
+ * Did the layout engine clamp a follower below our last write? Content that
+ * shrinks under a flush reader (a regroup folding rows into one turn, a tail
+ * remount) lowers the maximum scrollTop, and the engine moves the reader to it
+ * with no write of ours. Flush at the new bottom and below `lastWriteTop` is
+ * that clamp's exact signature: a reader's own scroll-up leaves a gap under them.
+ *
+ * `viewportShrink` is how much the scroller's box has shrunk since the write
+ * (the setup tray mounting below the transcript). The clamp lands against the
+ * box the reader was flush in, so the shrink's own pixels of gap are ours too.
+ *
+ * The clamp's scroll event re-baselines the reference, but it dispatches a frame
+ * later, and output growing the content first turns the stale reference into a
+ * scroll-up signature. A caller that sees this at commit time re-baselines there.
+ */
+export function clampedBelowWrite(
+  geom: ScrollGeom,
+  lastWriteTop: number,
+  viewportShrink = 0,
+  epsilon: number = SELF_SCROLL_EPSILON,
+): boolean {
+  if (lastWriteTop < 0 || geom.scrollTop >= lastWriteTop - epsilon) return false
+  return distanceFromBottom(geom) - Math.max(0, viewportShrink) <= epsilon
+}
+
+/**
  * Is a height-sync anchor captured at `capturedScrollTop` still usable now that
  * the scroller reads `liveScrollTop`?
  *
@@ -516,7 +541,14 @@ export function evaluateAutoPin(args: {
     // ...or exactly where our own viewport growth clamped them (see viewportGrowth).
     || (viewportGrowth > epsilon && Math.abs(geom.scrollTop - clampedWriteTop) <= epsilon)
   )
-  if (!readerMovedSinceWrite && restingOnOurWrite) {
+  // ...or BELOW it. A reader cannot move without input, and a reveal takes a
+  // follower UP, to what it shows; the one thing that moves a follower down with
+  // no input is the engine -- native scroll anchoring lifting them by a row that
+  // settled above, as a setup card lands in its row. Off our write that way read
+  // as the idle rule's "the reader left", so the first run's scripted steps, where
+  // nothing runs, released follow before the hello had begun.
+  const liftedByEngine = lastWriteTop >= 0 && geom.scrollTop > lastWriteTop + epsilon
+  if (!readerMovedSinceWrite && (restingOnOurWrite || liftedByEngine)) {
     return { pin: distanceFromBottom(geom) > atBottomEpsilon(), stick: true, target }
   }
   // Idle: release rather than merely skip the pin. Skipping would leave follow

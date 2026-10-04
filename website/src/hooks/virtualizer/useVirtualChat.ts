@@ -113,6 +113,7 @@ import {
   resolveAnchorRow,
   computeAtBottom,
   isSelfScroll,
+  clampedBelowWrite,
   SELF_SCROLL_EPSILON,
   heightAnchorStillUsable,
   repriceAboveFoldDelta,
@@ -3329,6 +3330,60 @@ export function useVirtualChat<T>(
     // for TRIGGER 6, which moves neither of the other two.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- trigger set is deliberate (see comment above)
   }, [windowRange, itemCount, spliceCommit, scrollerRef, writeScrollTop, recomputeWindow])
+
+  // A commit that SHRINKS the content under a follower is clamped by the engine
+  // during layout, and nothing of ours sees it: no write, no ResizeObserver tick
+  // yet, and the clamp's scroll event dispatches a frame later. Output growing
+  // the content before then made the next pin read the stale reference as a
+  // scroll-up and release follow, with the reply streaming on below the fold
+  // (the first run's hello, 581px short at 1440x900 on the real build).
+  //
+  // Two shapes, both re-baselined here:
+  //   - the clamp is still standing: the reader is flush at the shrunk bottom
+  //     (`clampedBelowWrite`) -- a turn regrouping its rows, a remount priced by
+  //     estimates;
+  //   - the commit itself MOVED the reader: they stood on our write as it began
+  //     and stand off it now. Framer measures a `layoutId` node as it unmounts,
+  //     so a regroup that remounts the setup cards forced a layout on a
+  //     half-removed transcript and clamped the follower to the top of it; and
+  //     native scroll anchoring lifts a follower by whatever a row above them
+  //     settled to as a card lands. Off our write with no run live is the idle
+  //     rule's "the reader left", so the scripted first-run steps released
+  //     follow before the hello had begun. No reader input can land inside a
+  //     commit, and no programmatic reveal writes inside one, so with no input
+  //     since its render the move was the commit's, and the reader is carried
+  //     back to the bottom before the frame paints.
+  // Only the reference moves for the first, and an upward input in the settle
+  // window leaves both alone, so a reader's own scroll-up still releases through
+  // the scroll handler. A restore owns the position while its gate is up.
+  const commitStartTopRef = useRef(-1)
+  const commitRenderAtRef = useRef(0)
+  // Render phase: read before any of this commit's mutations.
+  commitStartTopRef.current = stickRef.current && scrollerRef.current ? scrollerRef.current.scrollTop : -1
+  commitRenderAtRef.current = performance.now()
+  useLayoutEffect(() => {
+    const el = scrollerRef.current
+    if (!el || !stickRef.current || smoothPinActiveRef.current || settleGateRef.current || scrollerCollapsed(el)) return
+    if (performance.now() - lastUpwardInputAtRef.current < SCROLL_SETTLE_MS) return
+    const lastWrite = lastWriteTopRef.current
+    const geom = { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }
+    const viewportShrink = lastWriteClientHRef.current >= 0 ? lastWriteClientHRef.current - geom.clientHeight : 0
+    const startTop = commitStartTopRef.current
+    const movedByCommit =
+      startTop >= 0
+      && isSelfScroll(startTop, lastWrite)
+      && !isSelfScroll(geom.scrollTop, lastWrite)
+      && lastHardInputAtRef.current < commitRenderAtRef.current
+    if (!movedByCommit && !clampedBelowWrite(geom, lastWrite, viewportShrink)) return
+    if (inspectorOn()) devLog('CLAMP', `${Math.round(lastWrite)}->${Math.round(geom.scrollTop)}${movedByCommit ? ' commit' : ''}`)
+    lastWriteTopRef.current = geom.scrollTop
+    // The reader is flush in the box the reference was written for. When that
+    // box has since shrunk (chrome mounting below), keep it: the pin that
+    // follows owes the reader the shrink, and pinAuto measures it from there.
+    if (viewportShrink <= 0) lastWriteClientHRef.current = geom.clientHeight
+    lastPinAtRef.current = performance.now()
+    if (movedByCommit) pinAuto()
+  })
 
   // Same correction for a HEIGHT-SYNC commit (spacer repricing), keyed on the
   // owner's announced version. See heightAnchorPendingRef for why this cannot
