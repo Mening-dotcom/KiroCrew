@@ -9286,6 +9286,7 @@
     "setupCardHint": {
       "review": "確認する",
       "decline_label": "今はしない: {{title}}",
+      "review_label": "確認する: {{title}}",
       "more_other": "ほか {{count}} 件",
       "import_instructions_other": "指示ファイル {{count}} 件",
       "import_memories_other": "記憶 {{count}} 件",

@@ -9542,6 +9542,7 @@
     "setupCardHint": {
       "review": "Rivedi",
       "decline_label": "Non ora: {{title}}",
+      "review_label": "Rivedi: {{title}}",
       "more_one": "{{count}} in più",
       "more_many": "{{count}} in più",
       "more_other": "{{count}} in più",

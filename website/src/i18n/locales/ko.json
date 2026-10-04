@@ -9286,6 +9286,7 @@
     "setupCardHint": {
       "review": "검토",
       "decline_label": "나중에: {{title}}",
+      "review_label": "검토: {{title}}",
       "more_other": "외 {{count}}개",
       "import_instructions_other": "지침 파일 {{count}}개",
       "import_memories_other": "기억 {{count}}개",

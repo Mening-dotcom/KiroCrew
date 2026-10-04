@@ -3831,6 +3831,7 @@
     "setupCardHint": {
       "review": "Review",
       "decline_label": "Not now: {{title}}",
+      "review_label": "Review: {{title}}",
       "more_one": "{{count}} more",
       "more_other": "{{count}} more",
       "import_instructions_one": "{{count}} instruction file",

@@ -9174,6 +9174,7 @@
     "setupCardHint": {
       "review": "[Ŕèṽìèẁ ·········]",
       "decline_label": "[Ñøţ ñøẁ: {{title}} ··············]",
+      "review_label": "[Ŕèṽìèẁ: {{title}} ············]",
       "more_one": "[{{count}} ɱøŕè ········]",
       "more_other": "[{{count}} ɱøŕè ········]",
       "import_instructions_one": "[{{count}} ìñşţŕùçţìøñ ƒìĺè ···············]",

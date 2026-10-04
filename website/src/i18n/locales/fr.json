@@ -9542,6 +9542,7 @@
     "setupCardHint": {
       "review": "Examiner",
       "decline_label": "Pas maintenant : {{title}}",
+      "review_label": "Examiner : {{title}}",
       "more_one": "{{count}} de plus",
       "more_many": "{{count}} de plus",
       "more_other": "{{count}} de plus",

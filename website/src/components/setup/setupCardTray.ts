@@ -6,6 +6,7 @@
  */
 import { useEffect, useSyncExternalStore } from 'react'
 
+import { setupCardRefOf } from '../../api/setupCards'
 import { isSystemNoticeKind } from '../../lib/systemNotice'
 import { TURN_OPENER_ROLES } from '../../pages/chat/groupDisplayItems'
 import { injectOpensTurn } from '../../pages/chat/RecoveryCard'
@@ -34,6 +35,26 @@ export function conversationMoves(messages: readonly ChatMessage[]): number {
   let n = 0
   for (const m of messages) if (movesConversation(m)) n++
   return n
+}
+
+/**
+ * The card the latest turn proposed: the newest card row in the transcript whose
+ * card is still live, else the newest live card. It is what the owner most likely
+ * came to the tray for, so the folded hint names it and Review opens it, and not
+ * the oldest card still waiting: with the home card waiting, a job card the owner
+ * had just asked for opened below it, out of frame.
+ */
+export function latestProposedCard<C extends { id: string }>(
+  live: readonly C[],
+  messages?: readonly ChatMessage[],
+): C | undefined {
+  const rows = messages ?? []
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const id = setupCardRefOf(rows[i].meta)?.id
+    const found = id ? live.find(c => c.id === id) : undefined
+    if (found) return found
+  }
+  return live[live.length - 1]
 }
 
 // ── A highlight one surface asks another to show ──────────────────────────────

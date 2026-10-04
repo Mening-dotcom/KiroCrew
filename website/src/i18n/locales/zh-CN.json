@@ -9286,6 +9286,7 @@
     "setupCardHint": {
       "review": "查看",
       "decline_label": "暂不：{{title}}",
+      "review_label": "查看：{{title}}",
       "more_other": "还有 {{count}} 个",
       "import_instructions_other": "{{count}} 个指令文件",
       "import_memories_other": "{{count}} 条记忆",

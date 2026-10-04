@@ -9414,6 +9414,7 @@
     "setupCardHint": {
       "review": "দেখো",
       "decline_label": "এখন নয়: {{title}}",
+      "review_label": "দেখো: {{title}}",
       "more_one": "আরও {{count}}টি",
       "more_other": "আরও {{count}}টি",
       "import_instructions_one": "{{count}}টি নির্দেশনা ফাইল",

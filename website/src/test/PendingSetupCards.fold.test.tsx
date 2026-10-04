@@ -5,7 +5,8 @@
  * The hint carries the kind's icon (the shield for a high-stakes card), the
  * title, a short summary from the payload or the card's live state, "N more"
  * when several wait, Not now when the card may be declined, and Review, which
- * opens the full card in place. Nothing commits from the hint. Open, the tray
+ * opens the full card in place: one card at a time, the one the latest turn
+ * proposed, while the others stay hints. Nothing commits from the hint. Open, the tray
  * folds back on Hide, once the conversation moves on, or on a scroll up, except
  * while the owner is using a card. It is capped at a third of its chat pane.
  * Driven through MSW with the real SetupCard.
@@ -20,7 +21,7 @@ import { useRef } from 'react'
 import { server } from '../../integration/mocks/server'
 import PendingSetupCards from '../components/setup/PendingSetupCards'
 import SetupCardRow from '../components/setup/SetupCardRow'
-import { conversationMoves, highlightSetupCardRow } from '../components/setup/setupCardTray'
+import { conversationMoves, highlightSetupCardRow, latestProposedCard } from '../components/setup/setupCardTray'
 import { applySetupCardUpdate, type SetupCard as Card, type SetupDecideBody } from '../api/setupCards'
 import { mergeRenderers, resolveRenderer, type MessageRenderContext } from '../app-sdk/messageRenderers'
 import { createTranscriptRenderers } from '../pages/chat/transcriptRenderers'
@@ -185,7 +186,7 @@ describe('a pending card arrives as a one-line hint', () => {
     expect(screen.queryByTestId('setup-card-hint-text')).toBeNull()
   })
 
-  it('names the first of several cards and counts the rest', async () => {
+  it('names the card the latest turn proposed and counts the rest', async () => {
     serveCards([
       PROFILE,
       card({ id: 'sc-cron', kind: 'cron', payload: { name: 'Morning brief', schedule_human: 'every weekday at 08:00' } }),
@@ -230,6 +231,85 @@ describe('Review opens the card in place; Hide folds it back', () => {
     expect(toggle()).toHaveTextContent('Hide')
     fireEvent.click(toggle())
     expectFolded()
+  })
+})
+
+describe('several live cards: Review opens the one the latest turn proposed', () => {
+  // E2E run 2: with the home card still waiting, the owner asked for a job card.
+  // Review opened BOTH, stacked under the third-of-the-pane cap, and the card
+  // they had just asked for sat out of frame below the older one.
+  const CRON = card({
+    id: 'sc-cron', kind: 'cron', created_ts: 1790000100,
+    payload: { name: 'Morning brief', schedule_human: 'every weekday at 08:00' },
+  })
+  const BOTH = [...HOME_ASKED, say('The home card can wait; here is the brief.'), cardRow('sc-cron', 'cron')]
+  const slot = (id: string) => cards().querySelector(`[data-tray-card="${id}"]`)
+  const rows = () => screen.queryAllByTestId('setup-card-hint-row')
+
+  beforeEach(() => { serveCards([HOME, CRON]) })
+
+  it('names that card in the folded hint, counts the other, and opens only it', async () => {
+    renderSurface({ messages: BOTH })
+    await loaded()
+    expect(hint()).toHaveAttribute('data-kind', 'cron')
+    expect(screen.getByTestId('setup-card-hint-more')).toHaveTextContent('1 more')
+    expect(rows()).toHaveLength(0)
+    fireEvent.click(toggle())
+    expectOpen()
+    expect(slot('sc-cron')).not.toHaveAttribute('inert')
+    expect(slot('sc-home')).toHaveAttribute('inert')
+    // The older card stays a one-line hint with its own Not now and Review.
+    expect(rows().map(r => r.getAttribute('data-kind'))).toEqual(['home'])
+    expect(within(rows()[0]).getAllByRole('button').map(b => b.getAttribute('data-testid')))
+      .toEqual(['setup-card-hint-row-decline', 'setup-card-hint-row-review'])
+    expect(within(rows()[0]).queryByTestId('setup-card-primary')).toBeNull()
+  })
+
+  it('opens another card from its own hint, and the open one folds to a hint', async () => {
+    renderSurface({ messages: BOTH })
+    await loaded()
+    fireEvent.click(toggle())
+    fireEvent.click(within(rows()[0]).getByTestId('setup-card-hint-row-review'))
+    expectOpen()
+    expect(slot('sc-home')).not.toHaveAttribute('inert')
+    expect(slot('sc-cron')).toHaveAttribute('inert')
+    expect(hint()).toHaveAttribute('data-kind', 'home')
+    expect(rows().map(r => r.getAttribute('data-kind'))).toEqual(['cron'])
+  })
+
+  it('declines a card from its hint while another is open', async () => {
+    const gw = serveCards([HOME, CRON])
+    renderSurface({ messages: BOTH })
+    await loaded()
+    fireEvent.click(toggle())
+    fireEvent.click(within(rows()[0]).getByRole('button', { name: 'Not now: Your home in the cloud' }))
+    await waitFor(() => expect(gw.decided).toEqual([{ id: 'sc-home', body: { decision: 'decline', hash: 'b'.repeat(64) } }]))
+    await waitFor(() => expect(rows()).toHaveLength(0))
+    expectOpen()
+    expect(slot('sc-cron')).not.toHaveAttribute('inert')
+  })
+
+  it('keeps the card the owner is using open through the next turn', async () => {
+    const { update } = renderSurface({ messages: BOTH })
+    await loaded()
+    fireEvent.click(toggle())
+    fireEvent.pointerDown(within(slot('sc-cron') as HTMLElement).getByTestId('setup-card'))
+    update({ messages: [...BOTH, ...NEXT_TURN] })
+    expectOpen()
+    expect(slot('sc-cron')).not.toHaveAttribute('inert')
+  })
+})
+
+describe('latestProposedCard', () => {
+  const live = [card({ id: 'sc-1', kind: 'home' }), card({ id: 'sc-2', kind: 'cron' }), card({ id: 'sc-3', kind: 'connect' })]
+  it('is the newest card row whose card is still live', () => {
+    expect(latestProposedCard(live, [cardRow('sc-1'), cardRow('sc-3'), cardRow('sc-2'), say('ok')])?.id).toBe('sc-2')
+    expect(latestProposedCard(live, [cardRow('sc-2'), cardRow('sc-gone')])?.id).toBe('sc-2')
+  })
+  it('falls back to the newest live card when no row names one', () => {
+    expect(latestProposedCard(live, [say('hello')])?.id).toBe('sc-3')
+    expect(latestProposedCard(live)?.id).toBe('sc-3')
+    expect(latestProposedCard([])).toBeUndefined()
   })
 })
 
@@ -325,6 +405,9 @@ describe('an open card folds when the chat moves past it, unless the owner is us
     expectOpen()
     act(() => { applySetupCardUpdate(qc, { ...PROFILE, status: 'committed' }, SLOT) })
     await waitFor(() => expectFolded())
+    // Folded, the hint names the card left; no hint rows linger for a card that is gone.
+    expect(hint()).toHaveAttribute('data-kind', 'service')
+    expect(screen.queryAllByTestId('setup-card-hint-row')).toHaveLength(0)
   })
 })
 

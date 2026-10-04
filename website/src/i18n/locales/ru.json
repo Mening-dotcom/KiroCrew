@@ -9670,6 +9670,7 @@
     "setupCardHint": {
       "review": "Открыть",
       "decline_label": "Не сейчас: {{title}}",
+      "review_label": "Открыть: {{title}}",
       "more_one": "ещё {{count}}",
       "more_few": "ещё {{count}}",
       "more_many": "ещё {{count}}",

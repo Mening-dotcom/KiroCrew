@@ -18,6 +18,11 @@
  * to open the card in place. Consent stays in the open card: every decision
  * but Not now is made there, against the details the click is bound to.
  *
+ * The hint names the card the latest turn proposed (`latestProposedCard`), the
+ * one the owner most likely came for, and Review opens that card alone: one card
+ * is open at a time, and every other live card stays a one-line hint, pinned at
+ * the foot of the open tray, with its own Not now and its own Review.
+ *
  * Open, the tray is capped at a third of its chat pane and scrolls inside;
  * Hide folds it back to the hint. It also folds once the conversation moves on
  * after the owner opened it (`conversationMoves`: a user message, a later turn
@@ -40,7 +45,7 @@
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion, type Transition } from 'framer-motion'
 import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, Loader2, ShieldCheck } from 'lucide-react'
 import type React from 'react'
@@ -64,6 +69,7 @@ import { cardDeclinableFromHint, cardHint, cardIcon, cardTitle } from './setupCa
 import {
   conversationMoves,
   highlightTrayCard,
+  latestProposedCard,
   useSetupCardOpenRequests,
   useTrayCardHighlighted,
 } from './setupCardTray'
@@ -132,9 +138,11 @@ export default function PendingSetupCards({
   const live = (list.data?.cards ?? []).filter(c => !isTerminalSetupStatus(c.status))
   const hasLive = !!slot && live.length > 0
 
-  // ── When the tray is open ─────────────────────────────────────────────────
-  // Only the owner opens it (Review, or the transcript row's "open it below").
-  const [userOpen, setUserOpen] = useState(false)
+  // ── When the tray is open, and on which card ──────────────────────────────
+  // Only the owner opens it (Review on a hint, or the transcript row's "open it
+  // below"), and on ONE card: the rest stay hints. Stacking every live card
+  // under the cap put the one just asked for out of frame below an older one.
+  const [openId, setOpenId] = useState<string | null>(null)
   // How many times the conversation had moved on when the owner opened it: once
   // that number grows, the chat has moved past what they opened and it folds.
   const moves = useMemo(() => (messages ? conversationMoves(messages) : 0), [messages])
@@ -153,13 +161,13 @@ export default function PendingSetupCards({
 
   useEffect(() => {
     setReadingBack(false)
-    setUserOpen(false)
+    setOpenId(null)
     setEngagedId(null)
     lastIntentRef.current = null
   }, [slot])
 
   useEffect(() => {
-    if (moves > openedAtRef.current) setUserOpen(false)
+    if (moves > openedAtRef.current) setOpenId(null)
   }, [moves])
 
   useEffect(() => {
@@ -178,7 +186,7 @@ export default function PendingSetupCards({
       lastIntentRef.current = dir
       if (dir === 'up') {
         setReadingBack(true)
-        setUserOpen(false)
+        setOpenId(null)
         setEngagedId(null)
       } else if (atBottomRef.current) {
         setReadingBack(false)
@@ -207,19 +215,37 @@ export default function PendingSetupCards({
     }
   }, [scrollerRef, hasLive])
 
-  const expanded = engaged || (userOpen && !readingBack)
+  const openLive = !!openId && live.some(c => c.id === openId)
+  const expanded = engaged || (openLive && !readingBack)
+  // The open card: the one in use holds; otherwise the one the owner opened.
+  const shownId = engaged ? engagedId : openLive ? openId : null
+  // What the open tray holds, kept while it folds away so the fold animates the
+  // same rows instead of emptying first.
+  const showingRef = useRef<string | null>(null)
+  if (expanded && shownId) showingRef.current = shownId
+  const showing = expanded ? shownId : showingRef.current
+  const primary = latestProposedCard(live, messages)
+  const primaryId = primary?.id ?? null
 
-  const open = useCallback(() => {
+  const open = useCallback((cardId: string) => {
     openedAtRef.current = moves
     setReadingBack(false)
-    setUserOpen(true)
+    setOpenId(cardId)
+    // A deliberate switch to another card ends the hold on the one in use.
+    setEngagedId(prev => (prev === cardId ? prev : null))
   }, [moves])
 
   const toggle = useCallback(() => {
-    if (!expanded) { open(); return }
+    if (!expanded) { if (primaryId) open(primaryId); return }
     setEngagedId(null)
-    setUserOpen(false)
-  }, [expanded, open])
+    setOpenId(null)
+  }, [expanded, open, primaryId])
+
+  // A card opened from a hint starts at the top of the tray, right under the hint.
+  useEffect(() => {
+    const el = sectionElRef.current
+    if (expanded && shownId && el) el.scrollTop = 0
+  }, [expanded, shownId])
 
   // The transcript's "in the tray below" row asks for its card: open the tray,
   // bring the card into the tray's own view once it has unfolded, and light it.
@@ -229,7 +255,7 @@ export default function PendingSetupCards({
   reduceMotionRef.current = reduceMotion
   const onOpenRequest = useCallback((cardId: string) => {
     if (!liveIdsRef.current.includes(cardId)) return
-    open()
+    open(cardId)
     highlightTrayCard(cardId)
     window.setTimeout(() => {
       const slots = sectionElRef.current?.querySelectorAll<HTMLElement>('[data-tray-card]') ?? []
@@ -258,9 +284,13 @@ export default function PendingSetupCards({
   // Measured from the host's `data-setup-tray-pane` element; the `33dvh` class
   // is the fallback where there is none to measure.
   const [cap, setCap] = useState<number | null>(null)
+  // The host's bottom padding on the tray: the pinned hints sit over it, or the
+  // open card scrolls through the strip under them.
+  const [padBottom, setPadBottom] = useState(0)
   const observerRef = useRef<ResizeObserver | null>(null)
   const sectionRef = useCallback((node: HTMLElement | null) => {
     sectionElRef.current = node
+    if (node) setPadBottom(parseFloat(getComputedStyle(node).paddingBottom) || 0)
     observerRef.current?.disconnect()
     observerRef.current = null
     const pane = node?.closest<HTMLElement>('[data-setup-tray-pane]')
@@ -274,23 +304,26 @@ export default function PendingSetupCards({
   }, [])
   useEffect(() => () => observerRef.current?.disconnect(), [])
 
-  if (!hasLive) return null
+  if (!hasLive || !primary) return null
 
-  // The hint names the FIRST card (the oldest, the one to settle first) and
-  // counts the rest.
-  const first = qc.getQueryData<SetupCardData>(setupCardQueryKey(live[0].id)) ?? live[0]
-  const title = cardTitle(first)
-  const hint = cardHint(first)
-  const Icon = first.stakes === 'high' ? ShieldCheck : cardIcon(first)
-  const declinable = !expanded && cardDeclinableFromHint(first)
-  const declineMessage = decline.error && decline.variables?.id === first.id
+  const fresh = (c: SetupCardData) => qc.getQueryData<SetupCardData>(setupCardQueryKey(c.id)) ?? c
+  // The hint names the open card while the tray is open, and the card the latest
+  // turn proposed while it is folded: what Review opens.
+  const barCard = fresh((expanded && live.find(c => c.id === shownId)) || primary)
+  const declineError = (c: SetupCardData) => decline.error && decline.variables?.id === c.id
     ? errorText(
         decline.error instanceof ApiError ? parseErrorCode(decline.error.body) : undefined,
         decline.error instanceof Error ? decline.error.message : '',
       )
     : ''
+  const barDeclinable = !expanded && cardDeclinableFromHint(barCard)
+  const barDeclineMessage = expanded ? '' : declineError(barCard)
+  // Every other live card, in creation order: a one-line hint at the foot of the
+  // open tray. None once the card it was shown around is gone.
+  const others = showing && live.some(c => c.id === showing) ? live.filter(c => c.id !== showing).map(fresh) : []
   const fold = reduceMotion ? { duration: 0 } : { duration: FOLD_MS / 1000, ease: [0.2, 0.8, 0.2, 1] as const }
   const Chevron = expanded ? ChevronDown : ChevronRight
+  const locateFor = (c: SetupCardData) => (onLocate ? () => onLocate(c.id, reduceMotion ? 'auto' : 'smooth') : undefined)
 
   return (
     <section
@@ -307,51 +340,26 @@ export default function PendingSetupCards({
       <div className="sticky top-0 z-10 shrink-0 min-w-0 bg-bg">
         <div
           className={`flex items-center gap-2 min-w-0 rounded-lg border bg-card px-3 py-1 text-[13px] ${
-            first.stakes === 'high' ? 'border-accent' : 'border-border'
+            barCard.stakes === 'high' ? 'border-accent' : 'border-border'
           } ${expanded ? 'mb-2' : ''}`}
           data-testid="setup-card-hint"
-          data-kind={first.kind}
-          data-status={first.status}
-          data-stakes={first.stakes}
+          data-kind={barCard.kind}
+          data-status={barCard.status}
+          data-stakes={barCard.stakes}
         >
-          <Icon className="lucide-inline shrink-0 text-accent" aria-hidden="true" />
-          {/* On a phone the summary wraps under the title rather than squeezing it. */}
-          <div className="min-w-0 flex-1 flex flex-wrap md:flex-nowrap items-baseline gap-x-2">
-            {onLocate ? (
-              <Btn
-                className="min-w-0 max-w-full min-h-11 md:min-h-0 border-none bg-transparent px-0 py-0 font-medium hover:bg-transparent hover:underline"
-                onClick={() => onLocate(first.id, reduceMotion ? 'auto' : 'smooth')}
-                title={t('components.setupCardTray.locate', { title })}
-                aria-label={t('components.setupCardTray.locate', { title })}
-                data-testid="setup-card-tray-locate"
-              >
-                <span className="truncate">{title}</span>
-              </Btn>
-            ) : (
-              <span className="min-w-0 truncate font-medium">{title}</span>
-            )}
-            {hint && (
-              <span
-                className={`min-w-0 inline-flex items-center gap-1 truncate ${hint.state === 'needs-you' ? 'text-accent' : 'text-muted'}`}
-                data-testid="setup-card-hint-text"
-                data-state={hint.state ?? 'summary'}
-              >
-                {hint.state === 'busy' && <Loader2 className="lucide-inline shrink-0 animate-spin" aria-hidden="true" />}
-                <span className="truncate">{hint.text}</span>
-              </span>
-            )}
+          <HintLine card={barCard} onLocate={locateFor(barCard)} locateTestId="setup-card-tray-locate">
             {live.length > 1 && (
               <span className="shrink-0 text-muted" data-testid="setup-card-hint-more">
                 {t('components.setupCardHint.more', { count: live.length - 1 })}
               </span>
             )}
-          </div>
-          {declinable && (
+          </HintLine>
+          {barDeclinable && (
             <Btn
               className="shrink-0 min-h-11 md:min-h-0 py-0.5 border-transparent text-muted hover:text-text"
-              onClick={() => decline.mutate(first)}
+              onClick={() => decline.mutate(barCard)}
               disabled={decline.isPending}
-              aria-label={t('components.setupCardHint.decline_label', { title })}
+              aria-label={t('components.setupCardHint.decline_label', { title: cardTitle(barCard) })}
               data-testid="setup-card-hint-decline"
             >
               {t('components.setupCard.not_now')}
@@ -369,15 +377,15 @@ export default function PendingSetupCards({
           </Btn>
         </div>
         {/* The card holds nothing the owner typed here, so the hand-off loses nothing. */}
-        {declineMessage && !expanded && (
+        {barDeclineMessage && (
           <div className="mt-1">
-            <ErrorNotice message={declineMessage} askAgent testId="setup-card-hint-error" />
+            <ErrorNotice message={barDeclineMessage} askAgent testId="setup-card-hint-error" />
           </div>
         )}
       </div>
       <motion.div
         id={cardsId}
-        className="flex flex-col gap-2 shrink-0 min-w-0"
+        className="flex flex-col shrink-0 min-w-0"
         initial={false}
         animate={expanded
           ? { height: 'auto', opacity: 1, transitionEnd: { overflow: 'visible' } }
@@ -388,48 +396,180 @@ export default function PendingSetupCards({
         {...(expanded ? {} : { inert: '', 'aria-hidden': true })}
         data-testid="setup-card-tray-cards"
       >
-        {/* Creation order, so the newest card sits last, nearest the composer. */}
+        {/* Every live card stays mounted; the ones not open are hidden and inert. */}
         <AnimatePresence initial={false}>
           {live.map(card => (
-            <TrayCard key={card.id} cardId={card.id} reduceMotion={!!reduceMotion} onEngage={setEngagedId} />
+            <TrayCard
+              key={card.id}
+              cardId={card.id}
+              open={card.id === showing}
+              fold={fold}
+              reduceMotion={!!reduceMotion}
+              onEngage={setEngagedId}
+            />
           ))}
         </AnimatePresence>
       </motion.div>
+      {others.length > 0 && (
+        // Pinned at the foot of the tray, so a tall open card cannot push
+        // them out of frame. A child of the scroller itself: inside the
+        // cards' fold, whose overflow is hidden while it moves, it could not stick.
+        <motion.div
+          className="sticky z-10 shrink-0 flex flex-col gap-2 min-w-0 overflow-hidden bg-bg pt-2"
+          // Sticky offsets are measured inside the scroller's padding, so the
+          // hints reach over the host's bottom padding and keep it as their own.
+          style={{ bottom: -padBottom, paddingBottom: padBottom }}
+          initial={false}
+          animate={expanded ? { height: 'auto', opacity: 1 } : { height: 0, opacity: 0 }}
+          transition={fold}
+          {...(expanded ? {} : { inert: '', 'aria-hidden': true })}
+          data-testid="setup-card-tray-others"
+        >
+          {others.map(card => {
+            const message = declineError(card)
+            return (
+              <div key={card.id} className="min-w-0">
+                <div
+                  className={`flex items-center gap-2 min-w-0 rounded-lg border bg-card px-3 py-1 text-[13px] ${
+                    card.stakes === 'high' ? 'border-accent' : 'border-border'
+                  }`}
+                  data-testid="setup-card-hint-row"
+                  data-kind={card.kind}
+                  data-status={card.status}
+                  data-stakes={card.stakes}
+                >
+                  <HintLine card={card} onLocate={locateFor(card)} locateTestId="setup-card-hint-row-locate" />
+                  {cardDeclinableFromHint(card) && (
+                    <Btn
+                      className="shrink-0 min-h-11 md:min-h-0 py-0.5 border-transparent text-muted hover:text-text"
+                      onClick={() => decline.mutate(card)}
+                      disabled={decline.isPending}
+                      aria-label={t('components.setupCardHint.decline_label', { title: cardTitle(card) })}
+                      data-testid="setup-card-hint-row-decline"
+                    >
+                      {t('components.setupCard.not_now')}
+                    </Btn>
+                  )}
+                  <Btn
+                    className="shrink-0 min-h-11 md:min-h-0 py-0.5"
+                    onClick={() => open(card.id)}
+                    aria-label={t('components.setupCardHint.review_label', { title: cardTitle(card) })}
+                    data-testid="setup-card-hint-row-review"
+                  >
+                    {t('components.setupCardHint.review')}
+                    <ChevronRight className="lucide-inline" aria-hidden="true" />
+                  </Btn>
+                </div>
+                {/* Nothing typed here either; the hand-off loses nothing. */}
+                {message && (
+                  <div className="mt-1">
+                    <ErrorNotice message={message} askAgent testId="setup-card-hint-row-error" />
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </motion.div>
+      )}
     </section>
+  )
+}
+
+/**
+ * A hint's text: the kind's icon (the shield on a high-stakes card), the title,
+ * which scrolls the transcript to the card's own row when the host can, and the
+ * summary or live state. `children` trail it inside the same wrapping line.
+ */
+function HintLine({ card, onLocate, locateTestId, children }: {
+  card: SetupCardData
+  onLocate?: () => void
+  locateTestId: string
+  children?: React.ReactNode
+}) {
+  const { t } = useTranslation()
+  const title = cardTitle(card)
+  const hint = cardHint(card)
+  const Icon = card.stakes === 'high' ? ShieldCheck : cardIcon(card)
+  return (
+    <>
+      <Icon className="lucide-inline shrink-0 text-accent" aria-hidden="true" />
+      {/* On a phone the summary wraps under the title rather than squeezing it. */}
+      <div className="min-w-0 flex-1 flex flex-wrap md:flex-nowrap items-baseline gap-x-2">
+        {onLocate ? (
+          <Btn
+            className="min-w-0 max-w-full min-h-11 md:min-h-0 border-none bg-transparent px-0 py-0 font-medium hover:bg-transparent hover:underline"
+            onClick={onLocate}
+            title={t('components.setupCardTray.locate', { title })}
+            aria-label={t('components.setupCardTray.locate', { title })}
+            data-testid={locateTestId}
+          >
+            <span className="truncate">{title}</span>
+          </Btn>
+        ) : (
+          <span className="min-w-0 truncate font-medium">{title}</span>
+        )}
+        {hint && (
+          <span
+            className={`min-w-0 inline-flex items-center gap-1 truncate ${hint.state === 'needs-you' ? 'text-accent' : 'text-muted'}`}
+            data-testid="setup-card-hint-text"
+            data-state={hint.state ?? 'summary'}
+          >
+            {hint.state === 'busy' && <Loader2 className="lucide-inline shrink-0 animate-spin" aria-hidden="true" />}
+            <span className="truncate">{hint.text}</span>
+          </span>
+        )}
+        {children}
+      </div>
+    </>
   )
 }
 
 /** Height-fold duration of the hint opening and closing. */
 const FOLD_MS = 200
 
-/** One card in the open tray: marks the owner's engagement, carries the "opened from the chat" highlight. */
-function TrayCard({ cardId, reduceMotion, onEngage }: {
+/**
+ * One card in the tray: open, or out of the layout while another card is open.
+ * It stays mounted either way, so a half-filled card keeps its input. Marks the
+ * owner's engagement and carries the "opened from the chat" highlight.
+ */
+function TrayCard({ cardId, open, fold, reduceMotion, onEngage }: {
   cardId: string
+  open: boolean
+  fold: Transition
   reduceMotion: boolean
   onEngage: (cardId: string) => void
 }) {
   const highlighted = useTrayCardHighlighted(cardId)
   return (
     <motion.div
-      className="relative min-w-0"
+      className="min-w-0 shrink-0"
       data-tray-card={cardId}
-      // Capture phase, so the card's own handlers cannot hide the touch.
-      onPointerDownCapture={() => onEngage(cardId)}
-      onKeyDownCapture={() => onEngage(cardId)}
-      onFocusCapture={() => onEngage(cardId)}
-      initial={reduceMotion ? false : { opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={false}
+      animate={{ opacity: open ? 1 : 0 }}
       exit={reduceMotion ? undefined : { opacity: 0 }}
-      transition={{ duration: 0.18 }}
+      transition={fold}
+      // Not a height fold of its own: nested inside the tray's fold, a second
+      // height animation kept both from settling to `overflow: visible`, which
+      // clipped the open card. A card not open is simply out of the layout.
+      hidden={!open}
+      {...(open ? {} : { inert: '', 'aria-hidden': true })}
     >
-      <SetupCard cardId={cardId} placement="tray" />
-      {highlighted && (
-        <span
-          aria-hidden="true"
-          data-testid="setup-card-tray-highlight"
-          className="pointer-events-none absolute inset-0 rounded-lg animate-msg-highlight"
-        />
-      )}
+      <div
+        className="relative min-w-0 pb-2"
+        // Capture phase, so the card's own handlers cannot hide the touch.
+        onPointerDownCapture={() => onEngage(cardId)}
+        onKeyDownCapture={() => onEngage(cardId)}
+        onFocusCapture={() => onEngage(cardId)}
+      >
+        <SetupCard cardId={cardId} placement="tray" />
+        {highlighted && (
+          <span
+            aria-hidden="true"
+            data-testid="setup-card-tray-highlight"
+            className="pointer-events-none absolute inset-0 rounded-lg animate-msg-highlight"
+          />
+        )}
+      </div>
     </motion.div>
   )
 }
