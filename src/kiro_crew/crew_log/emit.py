@@ -107,6 +107,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from kiro_crew.constants import CREW_LOG_ENV, crew_log_enabled
+from kiro_crew.crew_teams import is_team_id
 from kiro_crew.executors import crew_log_executor
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 
@@ -3691,6 +3692,7 @@ def on_session_opened(
     resumed: bool = False,
     parent_slot: str = "",
     parent_sid: str = "",
+    team: str = "",
     memory: str = "",
     app: str = "",
     channel: bool = False,
@@ -3750,6 +3752,13 @@ def on_session_opened(
     crew log in an entry that can never be corrected. Both empty means nobody
     created this session (a person's own tab, a fork) and no ``parent`` is
     written at all, so a fold can tell "no creator" from "creator unknown".
+
+    ``team`` is the crewmate team this session works for, as ``session_create``
+    stamped it at mint from the root of the creation chain. It is a fact about the
+    moment the session was made: a later change to the team's members does not
+    reach an entry already written, which is what lets a fold total a team's
+    history without re-reading the team document. Written only when it has the
+    shape a team id is minted in; anything else is dropped rather than recorded.
 
     ``memory``, ``app`` and ``channel`` record WHAT KIND of session this log
     belongs to: the slot's memory mode verbatim, the app that owns it if one does,
@@ -4029,6 +4038,8 @@ def on_session_opened(
             if parent_sid:
                 parent["sid"] = parent_sid
             data["parent"] = parent
+        if team and is_team_id(team):
+            data["team"] = team
         if memory:
             # The class of session this log belongs to, as facts. Written only when
             # the caller supplied ``memory``, which every live slot has: that makes

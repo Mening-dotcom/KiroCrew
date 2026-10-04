@@ -583,6 +583,18 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
                 ),
             ),
             Field(
+                "team",
+                JSON_STRING,
+                note=(
+                    "The id of the crewmate team this session works for, stamped by "
+                    "session_create at mint when the root of the creation chain is a "
+                    "team member's own thread. A fact about that moment: a later change "
+                    "to the team's members does not rewrite it. Absent when the root is "
+                    "on no team, on any session session_create did not make, and on a "
+                    "child whose gateway restarted before its first turn."
+                ),
+            ),
+            Field(
                 "class",
                 JSON_OBJECT,
                 fields=_SESSION_CLASS_FIELDS,

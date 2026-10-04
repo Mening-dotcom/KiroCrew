@@ -2763,6 +2763,7 @@ class _ChatSlot:
         "_created_by",
         "_created_by_sid",
         "_lineage_minted",
+        "_crew_log_team",
         "_revived_by",
         "_artifact",
         "_channel_folder_filed",
@@ -3311,6 +3312,12 @@ class _ChatSlot:
         #: ``parent`` -- ``_created_by`` alone is restored for authorization, never
         #: promoted to lineage.
         self._lineage_minted: bool = False
+        #: The crewmate team id this session works for, stamped at mint by the
+        #: session-control create and fork verbs when the creation chain's root is a team
+        #: member's own thread, else "". Carried on ``session/opened.team`` only when
+        #: ``_lineage_minted`` is set, and never persisted or restored, for the same
+        #: reason as ``_created_by_sid``.
+        self._crew_log_team: str = ""
         #: Slot key of the session-control caller that REVIVED this slot from
         #: history, or "". Cap attribution only: ``creator_slot_count`` counts it
         #: beside ``_created_by`` for the per-caller slot cap, since a revive keeps

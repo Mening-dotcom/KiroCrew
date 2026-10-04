@@ -49,6 +49,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew import crew_teams
+from kiro_crew import members as members_mod
 from kiro_crew import model_registry
 from kiro_crew.agent_sdk.capabilities import MODEL_NAMESPACE_ACP, capabilities_for
 from kiro_crew.agent_sdk.provider_identity import is_claude_code
@@ -112,7 +114,7 @@ from kiro_crew.execution_context import (
     revouch_at_verified_admission,
 )
 from kiro_crew.history import metadata_now_iso, transcript_stem
-from kiro_crew.members import select_provider_backend
+from kiro_crew.members import DM_SLOT_MODE, select_provider_backend
 from kiro_crew.memory_stores import named_store_or_empty
 from kiro_crew.messaging.link import CHAT_TYPE_DIRECT, ChannelLink, parse_session_key
 from kiro_crew.messaging.transport import DM_TARGET_PREFIX, sole_direct_target
@@ -1967,6 +1969,75 @@ def _broadcast_resolution_slots(
     return out
 
 
+def _is_root_member_thread(caller: Any) -> bool:
+    """Whether *caller* claims to be a crewmate's own thread that no session created.
+
+    A claim only: ``mode`` and ``agent`` are restored from the agent-writable
+    transcript, so :func:`_root_member_team` corroborates them before a team is
+    taken from them.
+    """
+    return not bool(getattr(caller, "_lineage_minted", False)) and (
+        getattr(caller, "mode", "") == DM_SLOT_MODE
+    )
+
+
+def _root_member_team(slot_key: str, agent: str) -> str:
+    """The team of the crewmate whose pinned thread is *slot_key*, or ``""``. Blocking.
+
+    The thread is identified the way the member thread endpoint identifies it: the
+    key derives from the crewmate's slug, the DM binding for that slug names this
+    key and this crewmate, and the registry folds the crewmate to that slug. A slot
+    that merely says ``mode="member"`` passes none of these.
+    """
+    slug = members_mod.slug_from_dm_slot_key(slot_key)
+    if not slug or not agent:
+        return ""
+    binding = members_mod.read_dm_binding_for_slot(slot_key)
+    if binding is None or binding.get("member") != agent:
+        return ""
+    if members_mod.member_slug(agent) != slug:
+        return ""
+    return crew_teams.team_of_crewmate(crew_teams.read_teams(), agent)
+
+
+async def _root_team_for_stamp(caller: Any) -> str:
+    """The team a child of *caller* is stamped from when *caller* is a root, or ``""``.
+
+    Read off the loop, and only for a caller that claims to be a member thread. A
+    failed read stamps nothing: the field is optional, and a create must not fail
+    over a record a reader can live without.
+    """
+    if not _is_root_member_thread(caller):
+        return ""
+    try:
+        return await asyncio.to_thread(
+            _root_member_team,
+            str(getattr(caller, "key", "") or ""),
+            str(getattr(caller, "agent", "") or ""),
+        )
+    except Exception:
+        logger.debug("member thread team unreadable; child carries no team", exc_info=True)
+        return ""
+
+
+def _crew_log_team_stamp(caller: Any, root_team: str) -> str:
+    """The team id a child of *caller* records on ``session/opened.team``, or ``""``.
+
+    The id belongs to the ROOT of the creation chain. A caller this process minted
+    passes on its own stamp, so a whole tree under a member carries that member's
+    team. A root member thread passes on *root_team*, which
+    :func:`_root_team_for_stamp` resolved for it. Any other root -- a person's own
+    tab, a slot restored after a restart -- stamps nothing, because its chain cannot
+    be traced in memory and the transcript that could name it is agent-writable.
+    """
+    if bool(getattr(caller, "_lineage_minted", False)):
+        stamp = str(getattr(caller, "_crew_log_team", "") or "")
+        return stamp if crew_teams.is_team_id(stamp) else ""
+    if not _is_root_member_thread(caller):
+        return ""
+    return root_team if crew_teams.is_team_id(root_team) else ""
+
+
 async def create_session(
     state: "DashboardState",
     *,
@@ -2515,6 +2586,11 @@ async def create_session(
     # decision input to the allocation and everything above this point was read
     # before the coroutine suspended.
 
+    # The team document, read off the loop HERE: ahead of the folder confirmation
+    # below, because nothing from that confirmation to the allocation may suspend.
+    # Only a root member thread needs it (see `_crew_log_team_stamp`).
+    caller_root_team = await _root_team_for_stamp(caller_slot)
+
     if folder_id:
         # Confirmed under the folder-store lock -- the only place existence and
         # inherited project intent cannot go stale against a concurrent delete,
@@ -2682,6 +2758,9 @@ async def create_session(
         # the child's first turn therefore loses the link rather than trusting
         # metadata for it.
         slot._lineage_minted = True
+        # The team this child works for, decided at mint and never re-read: a later
+        # change to the team's members does not move a session that already exists.
+        slot._crew_log_team = _crew_log_team_stamp(live_caller, caller_root_team)
         # The creator's interactive auto-approve grant follows the work it is
         # handing off. Without this a trusted operator dispatches a worker that
         # then blocks on an approval prompt nobody is watching -- the same failure
@@ -3128,6 +3207,10 @@ async def fork_session(
     )
     if not isinstance(fork_source, ForkSource):
         raise _fork_refusal(fork_source)
+    # Same team stamp as `create_session`: the fork's creator is the caller, so
+    # the caller's chain decides it. Read here, before `fork_slot`, whose
+    # `_recheck` re-asserts every gate at the mint.
+    caller_root_team = await _root_team_for_stamp(caller_slot)
 
     # The session-control half of the child's identity, mirrored from
     # `create_session`. Applied INSIDE `fork_slot`, on the child, before its
@@ -3212,6 +3295,7 @@ async def fork_session(
         child._created_by = caller_key
         child._created_by_sid = _creator_sid if len(_creator_sid) <= MAX_ACP_SESSION_ID_LEN else ""
         child._lineage_minted = True
+        child._crew_log_team = _crew_log_team_stamp(live_caller, caller_root_team)
         posture["trust"] = bool(getattr(live_caller, "_trust", False))
         posture["trust_reads"] = bool(getattr(live_caller, "_trust_reads", False))
         child._trust = posture["trust"]

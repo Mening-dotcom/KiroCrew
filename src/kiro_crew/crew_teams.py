@@ -554,6 +554,25 @@ def prune_unknown(teams: list[Team], known: set[str]) -> list[Team]:
     return [Team(id=t.id, name=t.name, members=[m for m in t.members if m in known]) for t in teams]
 
 
+def is_team_id(value: object) -> bool:
+    """Whether *value* has the shape :func:`_new_team_id` mints."""
+    return isinstance(value, str) and _TEAM_ID_RE.fullmatch(value) is not None
+
+
+def team_of_crewmate(teams: list[Team], name: str) -> str:
+    """The id of the team that lists crewmate *name*, or ``""`` when none does.
+
+    A crewmate is on at most one team (the store enforces it on every write), so
+    the first match is the only one. An empty *name* matches nothing.
+    """
+    if not name:
+        return ""
+    for team in teams:
+        if name in team.members:
+            return team.id
+    return ""
+
+
 def _validate_names(members: object) -> list[str]:
     """Shape and bounds only -- the list a write may RETAIN, registry aside."""
     if not isinstance(members, list):

@@ -1621,6 +1621,17 @@ def _crew_log_lineage(slot: Any) -> tuple[str, str]:
     )
 
 
+def _crew_log_team(slot: Any) -> str:
+    """The team id a session's ``session/opened`` may record, or ``""``.
+
+    Same witness as :func:`_crew_log_lineage`: the stamp is used only on a slot THIS
+    process minted, so nothing restored from disk can put a team on the record.
+    """
+    if not bool(getattr(slot, "_lineage_minted", False)):
+        return ""
+    return str(getattr(slot, "_crew_log_team", "") or "")
+
+
 async def _crew_log_seed_tree(slot: Any) -> None:
     """Seed the crew log's session tree off the loop, for :func:`_crew_log_inherited_parent`.
 
@@ -9764,6 +9775,7 @@ async def _run_chat(
             resumed=bool(resumed),
             parent_slot=_creator_key,
             parent_sid=_creator_sid,
+            team=_crew_log_team(slot),
             memory=_class_memory,
             app=_class_app,
             channel=_class_channel,

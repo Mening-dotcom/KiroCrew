@@ -89,6 +89,7 @@ entry's write is the point the interrupted-turn repair runs.
 | `parent` | object | when `session_create` made this session | The creating session, recorded on the child. | |
 | `parent.slot` | string | required inside `parent` | The creating session's slot key. | |
 | `parent.sid` | string | optional | The creator's ACP session id frozen at mint time; absent when no live handle was available or the retained id was unusable. | |
+| `team` | string | when `session_create` made this session under a team member | The id of the crewmate team this session works for, stamped at mint from the root of the creation chain. | |
 
 **Invariants** — At most one per create and one per re-attach. The session's
 *starting* model rides here rather than in a `model/selected` entry, which records
@@ -130,6 +131,8 @@ self-edge would make a chain walker revisit the crew log it started from.
 which crew log the same slot used before. It is absent for a person's own tab, a
 fork, and a `spawn_run` subagent. The edge is written on the child because the child
 learns its ACP session id only when it first runs.
+
+`team` is stamped by `session_create` when the root of the creation chain is a team member's own thread, and a child of a stamped session carries its creator's stamp, so a whole tree under a member records that member's team. It is a fact about the moment of mint: a later change to the team's members does not rewrite it, so a reader can total a team's history without re-reading the team document. It is absent on a person's own tab, on a session no `session_create` made, when the root is on no team, and on a child whose gateway restarted before its first turn, because the stamp is held in memory and never read back from the agent-writable transcript.
 
 The chain walker is `crew_log/session_tree.fold_slot_chain`
 (`crew-log-projection.md` subsection 6.1). It walks this edge newest crew log
