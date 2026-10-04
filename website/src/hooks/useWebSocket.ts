@@ -18,6 +18,11 @@ import {
   refetchSessionProjections,
 } from './websocket/sessionProjection'
 import {
+  onUsageFrame,
+  rereadAllContextTraces,
+  resetContextTraceRefresh,
+} from './websocket/contextTraceRefresh'
+import {
   fetchingAnyFoldQuery,
   invalidateBelowFloor,
   recordSlotProjectionFloor,
@@ -76,6 +81,13 @@ export {
   readSessionProjectionFrame,
   refetchSessionProjections,
 } from './websocket/sessionProjection'
+export {
+  COALESCE_MS as CONTEXT_TRACE_COALESCE_MS,
+  contextTraceKey,
+  onUsageFrame,
+  rereadAllContextTraces,
+  resetContextTraceRefresh,
+} from './websocket/contextTraceRefresh'
 export {
   baselineOrHeld,
   fetchingAnyFoldQuery,
@@ -165,6 +177,8 @@ export function useWebSocket() {
       // which a restarted gateway's frames would all fall below. One re-read per
       // connection re-bases it on the process now serving.
       void queryClient.invalidateQueries({ queryKey: ['crew-log-projections'] }, { cancelRefetch: false })
+      // The Context tab's usage revisions belong to the previous process too.
+      resetContextTraceRefresh()
       // Cache auto-speak preference
       voice.refreshAutoSpeak()
       const catchUp = {
@@ -178,6 +192,9 @@ export function useWebSocket() {
         syncWorkflowRuns,
       }
       if (socket.wasConnectedRef.current) {
+        // No frame could arrive while the socket was down (a gateway restart is
+        // one), so the Context tab's trace may have moved unseen: read it once.
+        rereadAllContextTraces(queryClient)
         runReconnectCatchUp(ws, catchUp)
         return
       }
@@ -605,6 +622,10 @@ export function useWebSocket() {
             if (applySessionProjection(queryClient, frame) === 'refetch') {
               refetchSessionProjections(queryClient, frame.slot)
             }
+            // A `usage` frame also means the Context tab's trace moved. The frame
+            // is one unit's fold and the trace joins the slot's units, so it is a
+            // signal to re-read, not a value to apply.
+            onUsageFrame(queryClient, frame)
             break
           }
           case 'slot_projection/subscribed':

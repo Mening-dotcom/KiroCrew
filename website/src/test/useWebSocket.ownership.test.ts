@@ -31,6 +31,7 @@ import * as bundleReload from '../hooks/websocket/bundleReload'
 import * as attention from '../hooks/websocket/attention'
 import * as slotProjection from '../hooks/websocket/slotProjection'
 import * as sessionProjection from '../hooks/websocket/sessionProjection'
+import * as contextTraceRefresh from '../hooks/websocket/contextTraceRefresh'
 
 const SRC = join(__dirname, '..')
 const WEBSITE = join(SRC, '..')
@@ -50,6 +51,7 @@ const OWNER_MODULES = [
   'chatStream.ts',
   'composerCards.ts',
   'connection.ts',
+  'contextTraceRefresh.ts',
   'frames.ts',
   'reconnectCatchUp.ts',
   'retiredIds.ts',
@@ -87,6 +89,7 @@ describe('the websocket owner directory is fully classified', () => {
 describe('one public surface', () => {
   it('the facade exports exactly its original names', () => {
     expect(Object.keys(facade).sort()).toEqual([
+      'CONTEXT_TRACE_COALESCE_MS',
       'ROW_STALL_MS',
       'ROW_STALL_TICK_MS',
       'UPDATE_RESTART_LATCH_KEY',
@@ -99,16 +102,20 @@ describe('one public surface', () => {
       'askIdsOf',
       'baselineOrHeld',
       'consumeUpdateRestartLatch',
+      'contextTraceKey',
       'crewLogProjectionsKey',
       'emitSlotFocused',
       'fetchingAnyFoldQuery',
       'healRedactionSwitchAfterReconnect',
       'identityOf',
       'invalidateBelowFloor',
+      'onUsageFrame',
       'readSessionProjectionFrame',
       'reconcileQuestions',
       'recordSlotProjectionFloor',
       'refetchSessionProjections',
+      'rereadAllContextTraces',
+      'resetContextTraceRefresh',
       'resetSlotProjectionRevisions',
       'resolvedSince',
       'seedFoldedProjection',
@@ -134,6 +141,11 @@ describe('one public surface', () => {
     expect(facade.consumeUpdateRestartLatch).toBe(bundleReload.consumeUpdateRestartLatch)
     expect(facade.emitSlotFocused).toBe(attention.emitSlotFocused)
     expect(facade.crewLogProjectionsKey).toBe(sessionProjection.crewLogProjectionsKey)
+    // The usage-frame refresh keeps its seen revisions and pending reads in module state.
+    expect(facade.onUsageFrame).toBe(contextTraceRefresh.onUsageFrame)
+    expect(facade.resetContextTraceRefresh).toBe(contextTraceRefresh.resetContextTraceRefresh)
+    expect(facade.rereadAllContextTraces).toBe(contextTraceRefresh.rereadAllContextTraces)
+    expect(facade.contextTraceKey).toBe(contextTraceRefresh.contextTraceKey)
     expect(facade.applySessionProjection).toBe(sessionProjection.applySessionProjection)
     expect(facade.readSessionProjectionFrame).toBe(sessionProjection.readSessionProjectionFrame)
     // The accepted-revision ledger is module state too: a second copy would let a

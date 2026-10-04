@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 
 import { api } from '../api/client'
+import { contextTraceKey } from '../hooks/useWebSocket'
 import ErrorNotice from '../components/ErrorNotice'
 import { fmtNumber } from '../i18n/format'
 import { i18nT } from '../i18n/t'
@@ -694,18 +695,22 @@ function ContextBreakdownCard({ trace, chartWidth }: { trace: ContextTrace; char
  */
 export function ContextBreakdownTab({ slot, subagents }: { slot: string; subagents?: Record<string, SubagentActivity> }) {
   const { data, isLoading, error } = useQuery<ContextTrace>({
-    queryKey: ['context-trace', slot],
+    queryKey: contextTraceKey(slot),
     queryFn: () => api.telemetryContextTrace(slot),
     enabled: !!slot,
-    // The trace grows by one row per turn, so a tab left open goes stale.
-    refetchInterval: 15_000,
+    // Read on every mount, even over a cached value: the app's default staleTime
+    // is Infinity, and frames that landed while the tab was closed refreshed
+    // nothing. After that nothing polls: a pushed `usage` frame for this slot
+    // asks for one re-read (`hooks/websocket/contextTraceRefresh.ts`), and a
+    // reconnect re-reads once.
+    refetchOnMount: 'always',
   })
 
   return (
     <div className="h-full overflow-auto p-3">
       <SessionBreakdownTree subagents={subagents ?? {}} />
       {/* A failed trace read otherwise rendered as an empty panel. Read-only
-          side tab, so the hand-off loses nothing; the poll above retries. */}
+          side tab, so the hand-off loses nothing; the next pushed frame re-reads. */}
       <ErrorNotice message={error ? (error instanceof Error ? error.message : String(error)) : null} askAgent className="mb-3" />
       <ContextBreakdownPanel trace={data} isLoading={isLoading} />
     </div>
