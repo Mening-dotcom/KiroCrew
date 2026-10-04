@@ -10444,6 +10444,11 @@
         "summary_hint": "要約は折りたたまれています — 展開して表示",
         "title": "コンテキストを圧縮しました"
       },
+      "skillLoadCard": {
+        "body_context": "このターンでエージェントに与えられた指示",
+        "body_unavailable": "このターンの指示は保存されませんでした",
+        "title_other": "読み込まれたスキル"
+      },
       "recoveryCard": {
         "action_not_taken": "アクションは実行されませんでした",
         "announced_no_action_continuing": "宣言のみで未実行 · 継続を自動送信しました",

@@ -10734,6 +10734,13 @@
         "summary_hint": "Riepilogo ripiegato: espandi per leggerlo",
         "title": "Contesto compattato"
       },
+      "skillLoadCard": {
+        "body_context": "Istruzioni fornite all’agente per questo turno",
+        "body_unavailable": "Le istruzioni per questo turno non sono state salvate",
+        "title_one": "Skill caricata",
+        "title_many": "Skill caricate",
+        "title_other": "Skill caricate"
+      },
       "recoveryCard": {
         "action_not_taken": "Azione non eseguita",
         "announced_no_action_continuing": "annunciato ma non eseguito · continuazione inviata automaticamente",

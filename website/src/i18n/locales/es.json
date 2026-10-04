@@ -10734,6 +10734,13 @@
         "summary_hint": "Resumen plegado: despliégalo para leerlo",
         "title": "Contexto compactado"
       },
+      "skillLoadCard": {
+        "body_context": "Instrucciones dadas al agente para este turno",
+        "body_unavailable": "No se guardaron las instrucciones de este turno",
+        "title_one": "Habilidad cargada",
+        "title_many": "Habilidades cargadas",
+        "title_other": "Habilidades cargadas"
+      },
       "recoveryCard": {
         "action_not_taken": "Acción no realizada",
         "announced_no_action_continuing": "anunciado pero no realizado · continuación enviada automáticamente",
