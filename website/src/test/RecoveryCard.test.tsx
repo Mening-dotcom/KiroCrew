@@ -519,6 +519,33 @@ describe('resolveInjectCard – which inject rows become notes', () => {
     expect(result?.title).toBe('Setup step answered')
   })
 
+  it('names a refused card as not shown, not as an answered step', async () => {
+    // The gateway's refusal turn rides the same setup_result stamp, but nothing
+    // reached the owner's screen, so "Setup step answered" would claim a
+    // decision they never made. The first line carries the gateway's own marker
+    // (setup_flow._is_refusal_envelope).
+    const content = '[Setup card result] cron card not shown: another setup card is still open\n' +
+      "Nothing is on the user's screen for it. Tell the user in one line, then carry on; do not say it is showing.\n" +
+      '[End of setup card result]'
+    const parsed = resolveInjectCard(row(content, { injectKind: 'setup_result' }))
+    expect(parsed?.kind).toBe('setup_not_shown')
+    expect(parsed?.title).toBe('A setup card couldn’t be shown')
+    expect(parsed?.detail).toBe('reason sent to the agent')
+    render(<RecoveryCard parsed={parsed!} />)
+    const card = screen.getByTestId('recovery-card')
+    expect(card).toHaveAttribute('data-severity', 'routine')
+    expect(card.textContent).not.toContain('Setup step answered')
+    await userEvent.click(screen.getByTestId('recovery-card-toggle'))
+    expect(screen.getByTestId('recovery-card-body').textContent).toContain('another setup card is still open')
+  })
+
+  it('keeps a decided card that merely mentions the words as an answered step', () => {
+    // Only the envelope's FIRST line decides: an outcome further down that
+    // quotes "card not shown:" is still a result the owner chose.
+    const content = '[Setup card result] cron card "Brief": committed.\nNote: a card not shown: earlier one'
+    expect(resolveInjectCard(row(content, { injectKind: 'setup_result' }))?.kind).toBe('setup_result')
+  })
+
   it('draws the first-run notes as routine, folded cards', async () => {
     render(<RecoveryCard parsed={resolveInjectCard(row('kickoff prompt text', { injectKind: 'first_run' }))!} />)
     const card = screen.getByTestId('recovery-card')

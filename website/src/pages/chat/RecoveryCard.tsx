@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { ChevronRight, ClipboardCheck, Info, Layers, RotateCcw, Sparkles, TriangleAlert } from 'lucide-react'
+import { ChevronRight, ClipboardCheck, EyeOff, Info, Layers, RotateCcw, Sparkles, TriangleAlert } from 'lucide-react'
 
 import { i18nT } from '../../i18n/t'
 import { DENY_REASON_MARKER } from '../../utils/denyReason'
@@ -49,6 +49,12 @@ export type RecoveryKind =
    * (`injectKind: 'setup_result'`). Structural only, like `first_run`.
    */
   | 'setup_result'
+  /**
+   * The same envelope when the gateway REFUSED the card the agent asked for: no
+   * card reached the owner's screen, so "answered" would claim a decision they
+   * never made. Told apart by its first line (see {@link isSetupCardRefusal}).
+   */
+  | 'setup_not_shown'
   /**
    * Catch-all for an `inject` row this build has no dedicated prefix for — a
    * gateway newer than the frontend, or a shape nobody has written copy for yet.
@@ -446,6 +452,20 @@ export function injectOpensTurn(m: { role: string; meta?: Record<string, unknown
 }
 
 /**
+ * Is this setup-result envelope the gateway saying it did NOT show a card? Its
+ * first line reads `[Setup card result] <kind> card not shown: <reason>`. The
+ * same rule as `setup_flow._is_refusal_envelope`, the gateway's own reader of
+ * these rows: the marker counts on the FIRST line only, so an outcome further
+ * down that happens to quote it stays a result the owner chose. Both literals
+ * are wire values, byte-identical to `SETUP_RESULT_PREFIX` (state.py) and
+ * `_REFUSAL_MARK` (setup_flow.py); neither reaches the screen.
+ */
+export function isSetupCardRefusal(content: string): boolean {
+  const first = content.split('\n', 1)[0]
+  return first.startsWith('[Setup card result]') && first.includes('card not shown:')
+}
+
+/**
  * Decide which card, if any, an `inject` row gets. The single decision point
  * shared by ChatPage and the transcript-renderer registry, so the surfaces
  * cannot disagree.
@@ -487,6 +507,15 @@ export function resolveInjectCard(m: { content: string; meta?: Record<string, un
       kind: 'first_run',
       title: i18nT('components.setupCard.note_first_run_title'),
       detail: i18nT('components.setupCard.note_first_run_detail'),
+      chip: '',
+      body: m.content ?? '',
+    }
+  }
+  if (kind === 'setup_result' && isSetupCardRefusal(m.content ?? '')) {
+    return {
+      kind: 'setup_not_shown',
+      title: i18nT('components.setupCard.note_setup_not_shown_title'),
+      detail: i18nT('components.setupCard.note_setup_not_shown_detail'),
       chip: '',
       body: m.content ?? '',
     }
@@ -546,19 +575,23 @@ export default memo(function RecoveryCard({ parsed, disclosureKey }: { parsed: P
     kind === 'synthesis' ||
     kind === 'first_run' ||
     kind === 'setup_result' ||
+    kind === 'setup_not_shown' ||
     kind === 'generic'
   // Synthesis is routine, but the retry glyph would misdescribe it — nothing is
   // being retried, several results are being folded into one. Layers says that.
   // A generic notice makes no claim at all about what happened, so it gets the
   // neutral info glyph rather than borrowing another kind's meaning.
-  // The two first-run notes name their own events: setup beginning, and a
-  // decided card being handed back to the agent. Neither is a retry.
+  // The first-run notes name their own events: setup beginning, a decided card
+  // being handed back to the agent, and a card the gateway did not show. None
+  // is a retry, and a card not shown is the agent's to explain, not a fault the
+  // owner must act on.
   const Icon =
     kind === 'synthesis' ? Layers
       : kind === 'first_run' ? Sparkles
         : kind === 'setup_result' ? ClipboardCheck
-          : kind === 'generic' ? Info
-            : routine ? RotateCcw : TriangleAlert
+          : kind === 'setup_not_shown' ? EyeOff
+            : kind === 'generic' ? Info
+              : routine ? RotateCcw : TriangleAlert
 
   return (
     <div

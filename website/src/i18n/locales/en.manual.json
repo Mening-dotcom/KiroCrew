@@ -3594,6 +3594,8 @@
       "not_now": "Not now",
       "note_first_run_detail": "setup guide sent to the agent",
       "note_first_run_title": "First-run setup started",
+      "note_setup_not_shown_detail": "reason sent to the agent",
+      "note_setup_not_shown_title": "A setup card couldn’t be shown",
       "note_setup_result_detail": "your decision sent to the agent",
       "note_setup_result_title": "Setup step answered",
       "profile_intro": "Save these to your profile? You can change them later in Settings.",

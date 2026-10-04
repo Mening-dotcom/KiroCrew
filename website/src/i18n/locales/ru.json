@@ -9429,6 +9429,8 @@
       "not_now": "Не сейчас",
       "note_first_run_detail": "руководство по настройке отправлено агенту",
       "note_first_run_title": "Первая настройка началась",
+      "note_setup_not_shown_detail": "причина отправлена агенту",
+      "note_setup_not_shown_title": "Не удалось показать карточку настройки",
       "note_setup_result_detail": "твоё решение отправлено агенту",
       "note_setup_result_title": "Ответ на шаг настройки",
       "profile_intro": "Сохранить это в профиле? Позже это можно изменить в настройках.",

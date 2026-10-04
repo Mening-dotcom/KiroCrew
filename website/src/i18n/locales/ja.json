@@ -9049,6 +9049,8 @@
       "not_now": "今はしない",
       "note_first_run_detail": "セットアップガイドをエージェントに送信しました",
       "note_first_run_title": "初回セットアップを開始しました",
+      "note_setup_not_shown_detail": "理由をエージェントに送信しました",
+      "note_setup_not_shown_title": "セットアップカードを表示できませんでした",
       "note_setup_result_detail": "決定内容をエージェントに送信しました",
       "note_setup_result_title": "セットアップの手順に回答しました",
       "profile_intro": "プロフィールに保存しますか？後から設定で変更できます。",

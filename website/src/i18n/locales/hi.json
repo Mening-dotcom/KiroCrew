@@ -9177,6 +9177,8 @@
       "not_now": "अभी नहीं",
       "note_first_run_detail": "सेटअप गाइड एजेंट को भेजी गई",
       "note_first_run_title": "पहली बार का सेटअप शुरू हुआ",
+      "note_setup_not_shown_detail": "वजह एजेंट को भेजी गई",
+      "note_setup_not_shown_title": "एक सेटअप कार्ड नहीं दिखाया जा सका",
       "note_setup_result_detail": "तुम्हारा फ़ैसला एजेंट को भेजा गया",
       "note_setup_result_title": "सेटअप चरण का जवाब दिया गया",
       "profile_intro": "इन्हें अपनी प्रोफ़ाइल में सहेजना है? तुम इन्हें बाद में सेटिंग्स में बदल सकते हो।",

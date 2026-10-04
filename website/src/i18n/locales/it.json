@@ -9303,6 +9303,8 @@
       "not_now": "Non ora",
       "note_first_run_detail": "guida di configurazione inviata all'agente",
       "note_first_run_title": "Configurazione iniziale avviata",
+      "note_setup_not_shown_detail": "motivo inviato all'agente",
+      "note_setup_not_shown_title": "Impossibile mostrare una scheda di configurazione",
       "note_setup_result_detail": "la tua decisione è stata inviata all'agente",
       "note_setup_result_title": "Risposta a un passaggio di configurazione",
       "profile_intro": "Salvare questi dati nel tuo profilo? Puoi modificarli più tardi nelle Impostazioni.",

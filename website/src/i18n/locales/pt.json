@@ -9303,6 +9303,8 @@
       "not_now": "Agora não",
       "note_first_run_detail": "guia de configuração enviado ao agente",
       "note_first_run_title": "Configuração inicial em andamento",
+      "note_setup_not_shown_detail": "motivo enviado ao agente",
+      "note_setup_not_shown_title": "Não foi possível mostrar um cartão de configuração",
       "note_setup_result_detail": "sua decisão foi enviada ao agente",
       "note_setup_result_title": "Etapa de configuração respondida",
       "profile_intro": "Salvar isto no seu perfil? Você pode mudar depois em Configurações.",

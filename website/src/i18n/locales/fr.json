@@ -9303,6 +9303,8 @@
       "not_now": "Pas maintenant",
       "note_first_run_detail": "guide de configuration envoyé à l’agent",
       "note_first_run_title": "Configuration initiale lancée",
+      "note_setup_not_shown_detail": "motif envoyé à l’agent",
+      "note_setup_not_shown_title": "Impossible d’afficher une carte de configuration",
       "note_setup_result_detail": "ta décision a été envoyée à l’agent",
       "note_setup_result_title": "Réponse à une étape de configuration",
       "profile_intro": "Enregistrer ces informations dans ton profil ? Tu pourras les modifier plus tard dans les Paramètres.",

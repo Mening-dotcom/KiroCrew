@@ -9049,6 +9049,8 @@
       "not_now": "나중에",
       "note_first_run_detail": "설정 가이드를 에이전트에 보냄",
       "note_first_run_title": "첫 실행 설정 시작됨",
+      "note_setup_not_shown_detail": "이유를 에이전트에 보냄",
+      "note_setup_not_shown_title": "설정 카드를 표시하지 못함",
       "note_setup_result_detail": "결정 내용을 에이전트에 보냄",
       "note_setup_result_title": "설정 단계에 응답함",
       "profile_intro": "프로필에 저장할까요? 나중에 설정에서 변경할 수 있습니다.",

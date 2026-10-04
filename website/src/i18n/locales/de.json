@@ -9177,6 +9177,8 @@
       "not_now": "Nicht jetzt",
       "note_first_run_detail": "Einrichtungsleitfaden an den Agenten gesendet",
       "note_first_run_title": "Ersteinrichtung gestartet",
+      "note_setup_not_shown_detail": "Grund an den Agenten gesendet",
+      "note_setup_not_shown_title": "Eine Einrichtungskarte konnte nicht angezeigt werden",
       "note_setup_result_detail": "deine Entscheidung an den Agenten gesendet",
       "note_setup_result_title": "Einrichtungsschritt beantwortet",
       "profile_intro": "In deinem Profil speichern? Du kannst das später in den Einstellungen ändern.",

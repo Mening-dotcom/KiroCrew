@@ -9049,6 +9049,8 @@
       "not_now": "暂不",
       "note_first_run_detail": "设置指南已发送给代理",
       "note_first_run_title": "首次设置已开始",
+      "note_setup_not_shown_detail": "原因已发送给代理",
+      "note_setup_not_shown_title": "无法显示设置卡片",
       "note_setup_result_detail": "你的决定已发送给代理",
       "note_setup_result_title": "设置步骤已答复",
       "profile_intro": "保存到你的个人资料？之后可以在设置中更改。",
