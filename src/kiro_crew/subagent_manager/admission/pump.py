@@ -51,16 +51,6 @@ class _PumpMixin(ManagerComponent):
             self, info: "SubagentInfo", *, approval_id: str, reason: str
         ) -> "tuple[str, int]": ...
 
-        def _record_crew_log_spawn_approval_decided(
-            self,
-            origin: "tuple[str, int]",
-            *,
-            approval_id: str,
-            decision: str,
-            by: str = "",
-            cause: str = "",
-        ) -> None: ...
-
         @staticmethod
         def entry_is_resident_resume(params: "Mapping[str, Any]") -> bool: ...
 
@@ -951,7 +941,7 @@ class _PumpMixin(ManagerComponent):
         finally:
             # The request's answer, on every exit including the cancelled one.
             # A no-op when no request was written, so the two are all-or-nothing.
-            self._record_crew_log_spawn_approval_decided(
+            self._record_crew_log_approval_decided(
                 _log_origin,
                 approval_id=request_id,
                 decision=_log_decision,

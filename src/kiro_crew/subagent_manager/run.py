@@ -1416,6 +1416,82 @@ class RunEventCoordinator(ManagerComponent):
             "continue with the tools you do have.\n\n"
         )
 
+    def _crew_log_approval_id(self, info: SubagentInfo, request_id: object) -> str:
+        """The id a child's tool prompt is recorded under, scoped to that child.
+
+        ``request_id`` is the JSON-RPC message id of the child's OWN ACP
+        connection, which each backend process counts up from zero on its own.
+        It identifies a request on that connection and nowhere else, while the
+        crew log's pending map is keyed by this id across one PARENT session --
+        and a parent's own prompts share that map. Two children awaiting
+        approval at the same time, an ordinary situation for a fan-out, would
+        both raise id ``0``: the second request would overwrite the first, the
+        first answer would clear the row while the other child is still parked,
+        and the decision would be paired with the wrong tool.
+
+        Prefixing with the child's id makes the recorded id unique per child,
+        which is all the map needs. The transport id is untouched -- it is what
+        answers the call on the wire, and only the log's own key changes.
+        """
+        return f"{info.id}:{request_id}"
+
+    def _record_crew_log_tool_approval_requested(
+        self, info: SubagentInfo, *, approval_id: str, tool: str, reason: str
+    ) -> "tuple[str, int]":
+        """Write a running child's tool prompt as an ``approval/requested`` entry.
+
+        Returns the parent session and asking turn the entry was filed under, so
+        the decision is recorded beside its own request -- hand it to
+        :meth:`ManagerComponent._record_crew_log_approval_decided`, the closer
+        the spawn gate shares. An empty session id means nothing was written and
+        that closer is a no-op too, so the pair is all-or-nothing by
+        construction rather than by two separate checks.
+
+        The entry goes in the PARENT's log, under the turn that asked for the
+        child. A subagent opens no crew log of its own, so that is the only unit
+        that can carry it, and the asking turn comes from the dispatch pin rather
+        than the parent's live turn: a person can take an unbounded time to
+        answer, by which point the parent is very likely on an unrelated turn.
+
+        The origin comes through ``child_origin``, the gated reader, not the
+        ``dispatch_origin`` the spawn gate uses. A prompt raised mid-run happens
+        after the child's ``subagent/spawned`` opener exists, which is the state
+        the gated reader is for; the spawn gate needs the ungated one precisely
+        because its prompt precedes that opener.
+
+        ``approval_id`` is the child-scoped id from
+        :meth:`_crew_log_approval_id`, never the bare transport request id.
+        ``tool`` and ``reason`` are the child's own tool name and the text the
+        human is shown. Both are passed through as the event carries them and the
+        emitter omits an empty one rather than recording that the tool was the
+        empty string.
+
+        Every name is imported inside the body on purpose. This method does NOT
+        end in ``_impl``, so ``bind_component_globals`` leaves it running on this
+        module's own globals -- where the facade's imports, ``logger`` included,
+        exist only under ``TYPE_CHECKING``.
+        """
+        from kiro_crew.crew_log import emit as crew_log_emit
+        from kiro_crew.subagent import logger as _logger
+
+        try:
+            if not crew_log_emit.enabled():
+                return ("", 0)
+            sid, asked_turn = crew_log_emit.child_origin(info.id)
+            if not sid:
+                return ("", 0)
+            crew_log_emit.on_approval_requested(
+                sid,
+                asked_turn,
+                approval_id=approval_id,
+                tool=tool,
+                reason=reason,
+            )
+            return (sid, asked_turn)
+        except Exception:
+            _logger.debug("crew log: recording a child approval request failed", exc_info=True)
+            return ("", 0)
+
     async def _run_inner_impl(
         self,
         info: SubagentInfo,
@@ -2695,6 +2771,30 @@ class RunEventCoordinator(ManagerComponent):
                         # reaper reads a healthy approval wait as a stalled
                         # subagent after the idle threshold.
                         info._awaiting_approval = True
+                        # The crew-log pair for this prompt, which is the only
+                        # record of the wait a fold can read: the SEL audit the
+                        # approve/reject funnels write says how the call ended,
+                        # not that anyone was ever asked. Seeded with the
+                        # reading that holds for an exit the handler below never
+                        # sees -- a user Stop or a reap cancels this task, and a
+                        # CancelledError is not an Exception -- so writing in the
+                        # finally makes the pair total over every exit. An
+                        # unanswered request left in the fold's pending map for
+                        # the life of the log is the same silence as no entry.
+                        _appr_decision = "rejected"
+                        _appr_by = "host"
+                        _appr_id = self._crew_log_approval_id(info, event.request_id)
+                        # Written BEFORE the await on purpose: a fold read while
+                        # the prompt is still open has to show it as pending,
+                        # which is the whole point of recording it. The title is
+                        # read after the annotation above, so a reader sees the
+                        # same unverified-request warning the human was shown.
+                        _appr_origin = self._record_crew_log_tool_approval_requested(
+                            info,
+                            approval_id=_appr_id,
+                            tool=event.tool_name or "",
+                            reason=event.title or "",
+                        )
                         try:
                             if self._manager._on_tool_approval_factory:
                                 approve_cb = self._manager._on_tool_approval_factory(info)
@@ -2703,11 +2803,21 @@ class RunEventCoordinator(ManagerComponent):
                                 approved = bool(
                                     await _child_fallback(event, info.parent_session_key)
                                 )
+                            # A person answered, at a surface this site cannot
+                            # name, so the entry attributes it to nobody.
+                            _appr_decision = "approved" if approved else "rejected"
+                            _appr_by = ""
                         except Exception:
                             logger.exception("child approval callback failed")
                         finally:
                             info._awaiting_approval = False
                             info.last_activity = time.time()
+                            self._record_crew_log_approval_decided(
+                                _appr_origin,
+                                approval_id=_appr_id,
+                                decision=_appr_decision,
+                                by=_appr_by,
+                            )
                         if approved:
                             await self._manager._approve_and_log(
                                 client,
@@ -2795,11 +2905,33 @@ class RunEventCoordinator(ManagerComponent):
                 if self._manager._on_tool_approval_factory:
                     approve_cb = self._manager._on_tool_approval_factory(info)
                     info._awaiting_approval = True
+                    # Same crew-log pair, and same seeded reading for the exits
+                    # no handler here sees: this arm has no `except` at all, so a
+                    # cancelled wait and a callback that raised both leave the
+                    # seeded host decline standing rather than a pending row
+                    # nothing ever closes.
+                    _appr_decision = "rejected"
+                    _appr_by = "host"
+                    _appr_id = self._crew_log_approval_id(info, event.request_id)
+                    _appr_origin = self._record_crew_log_tool_approval_requested(
+                        info,
+                        approval_id=_appr_id,
+                        tool=event.tool_name or "",
+                        reason=event.title or "",
+                    )
                     try:
                         approved = await approve_cb(event)
+                        _appr_decision = "approved" if approved else "rejected"
+                        _appr_by = ""
                     finally:
                         info._awaiting_approval = False
                         info.last_activity = time.time()
+                        self._record_crew_log_approval_decided(
+                            _appr_origin,
+                            approval_id=_appr_id,
+                            decision=_appr_decision,
+                            by=_appr_by,
+                        )
                     if not approved:
                         # The per-subagent approver said no: kiro-cli's "user
                         # denied" is the truth here, so no notice.
@@ -2822,13 +2954,30 @@ class RunEventCoordinator(ManagerComponent):
                     )
                 elif self._manager._on_tool_approval:
                     info._awaiting_approval = True
+                    _appr_decision = "rejected"
+                    _appr_by = "host"
+                    _appr_id = self._crew_log_approval_id(info, event.request_id)
+                    _appr_origin = self._record_crew_log_tool_approval_requested(
+                        info,
+                        approval_id=_appr_id,
+                        tool=event.tool_name or "",
+                        reason=event.title or "",
+                    )
                     try:
                         approved = await self._manager._on_tool_approval(
                             event, info.parent_session_key
                         )
+                        _appr_decision = "approved" if approved else "rejected"
+                        _appr_by = ""
                     finally:
                         info._awaiting_approval = False
                         info.last_activity = time.time()
+                        self._record_crew_log_approval_decided(
+                            _appr_origin,
+                            approval_id=_appr_id,
+                            decision=_appr_decision,
+                            by=_appr_by,
+                        )
                     if not approved:
                         # The gateway-level approver said no: kiro-cli's "user
                         # denied" is the truth here, so no notice --

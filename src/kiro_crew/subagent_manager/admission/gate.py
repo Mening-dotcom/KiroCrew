@@ -1881,9 +1881,11 @@ class _GateMixin(ManagerComponent):
         """Write *info*'s spawn prompt as an ``approval/requested`` entry.
 
         Returns the parent session and asking turn the entry was filed under, so
-        the decision is recorded beside its own request. An empty session id means
-        nothing was written and the caller's decision write is a no-op too -- the
-        pair is all-or-nothing by construction rather than by two separate checks.
+        the decision is recorded beside its own request -- hand it to
+        :meth:`ManagerComponent._record_crew_log_approval_decided`, the shared
+        closer. An empty session id means nothing was written and that closer is
+        a no-op too, so the pair is all-or-nothing by construction rather than by
+        two separate checks.
 
         The origin comes from the pin, read through ``dispatch_origin`` because the
         prompt happens BEFORE the opener: the dispatch has been accepted and the
@@ -1914,46 +1916,6 @@ class _GateMixin(ManagerComponent):
         except Exception:
             _logger.debug("crew log: recording a spawn approval request failed", exc_info=True)
             return ("", 0)
-
-    def _record_crew_log_spawn_approval_decided(
-        self,
-        origin: "tuple[str, int]",
-        *,
-        approval_id: str,
-        decision: str,
-        by: str = "",
-        cause: str = "",
-    ) -> None:
-        """Write how *approval_id* resolved, under the request's own origin.
-
-        *origin* is what ``_record_crew_log_spawn_approval_requested`` returned, so
-        a request that was not written answers itself with nothing and a written one
-        is always answered. Reading the pin again here would not do: a decline and
-        an undeliverable prompt both drop the pin on their way out, and an approved
-        spawn's pin is opened by the start that follows.
-
-        ``by`` and ``cause`` carry the host's own attribution and reason code when
-        the host decided without a human; a person's answer arrives through the
-        approval future from a surface this site cannot name, so both are omitted
-        for it.
-        """
-        from kiro_crew.crew_log import emit as crew_log_emit
-        from kiro_crew.subagent import logger as _logger
-
-        sid, asked_turn = origin
-        if not sid:
-            return
-        try:
-            crew_log_emit.on_approval_decided(
-                sid,
-                asked_turn,
-                approval_id=approval_id,
-                decision=decision,
-                by=by,
-                cause=cause,
-            )
-        except Exception:
-            _logger.debug("crew log: recording a spawn approval decision failed", exc_info=True)
 
     def _announce_rejection_impl(self, info: SubagentInfo) -> SubagentInfo:
         """Route a terminal spawn rejection through the done callback.
