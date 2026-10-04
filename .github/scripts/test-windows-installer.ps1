@@ -11,7 +11,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-$MaxInstallSeconds = 120
+# Sized for a cold windows-latest runner with Defender scanning a fresh install:
+# the same ceiling scripts/smoke-windows-install.ps1 applies to the release smoke.
+$MaxInstallSeconds = 300
 # Healthy boot on the runner is ~12-24 s (observed 2026-09-29). /api/ready does not await
 # the Kiro CLI probe, but a tolerated probe timeout (_PROBE_TIMEOUT_SECS = 10 s in
 # src/kiro_crew/kiro_prerequisite.py) still slowed one boot from 12.8 s to 30.1 s on the

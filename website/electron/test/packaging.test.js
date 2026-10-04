@@ -346,7 +346,7 @@ describe("first-download installer design contract", () => {
       "customFinishPage may diverge from the locked StartApp contract ONLY in its launch target"
     );
     assert.match(buildWorkflow, /test-windows-installer\.ps1/);
-    assert.match(runtimeScript, /^\$MaxInstallSeconds = 120$/m);
+    assert.match(runtimeScript, /^\$MaxInstallSeconds = 300$/m);
     assert.match(runtimeScript, /^\$MaxGatewayReadySeconds = 50$/m);
     assert.match(runtimeScript, /silent-install-seconds=/);
     assert.match(runtimeScript, /gateway-ready-seconds=/);

@@ -154,6 +154,19 @@ def test_the_guide_check_can_actually_fail(guide: str) -> None:
     assert removed not in re.sub(r"\s+", " ", guide)
 
 
+def test_the_pr_gate_install_ceiling_matches_the_release_smoke() -> None:
+    """Both scripts time the same silent install on the same runner class.
+
+    The release smoke's ceiling carries its sizing rationale; a PR gate with a
+    tighter number fails on runner speed for trees that touch no packaging.
+    """
+    pattern = r"^\$MaxInstallSeconds = (\d+)$"
+    release = ROOT / "scripts" / "smoke-windows-install.ps1"
+    pr_gate = re.findall(pattern, _read(INSTALLER_SCRIPT), re.MULTILINE)
+    smoke = re.findall(pattern, _read(release), re.MULTILINE)
+    assert len(pr_gate) == 1 and pr_gate == smoke, (pr_gate, smoke)
+
+
 def test_the_windows_smoke_install_is_gated_on_a_real_artifact() -> None:
     """``needs`` alone cannot see a soft-failed build.
 
