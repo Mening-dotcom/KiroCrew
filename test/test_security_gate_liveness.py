@@ -23,6 +23,7 @@ from kiro_crew import security
 from kiro_crew.security import (
     MAX_SCANNABLE_COMMAND_CHARS,
     MAX_SCANNABLE_SOURCE_BODY_CHARS,
+    is_denied,
     is_sensitive_bash_command,
 )
 
@@ -316,3 +317,110 @@ def test_url_payload_12kb_is_fast() -> None:
     assert 10_000 < len(cmd) <= MAX_SCANNABLE_COMMAND_CHARS
     assert is_sensitive_bash_command(cmd) is None
     assert _gate_seconds(cmd) < 2.0
+
+
+def _expansion_opener_flood(total: int) -> str:
+    """A command that is nothing but ``${`` openers with no closing ``}`` --
+    the shape that made the ``${`` branch rescan to end-of-text at every one of
+    the ``total // 2`` openers (Σ ≈ O(n²)) before the fix bounded the failed
+    scan. Sized to exactly ``MAX_SCANNABLE_COMMAND_CHARS`` so it is SCANNED, not
+    refused by the size ceiling."""
+    return "${" * (total // 2)
+
+
+def _self_kill_expansion_flood(total: int) -> str:
+    """The self-protection-kill floor path Opus timed: a ``kill $(pgrep -f
+    kirocrew)`` clause arms ``_self_floor_can_fire`` so the payload descent runs
+    (``_bare_kill_raw_bodies`` -> ``_iter_shell_chars``), preceded by a flood of
+    unclosed ``${`` openers. Both a zero-``}`` body and a body carrying a single
+    stray ``}`` are exercised by the callers below."""
+    suffix = " ; kill $(pgrep -f " + "kiro" + "crew)"
+    openers = (total - len(suffix)) // 2
+    return "${" * openers + suffix
+
+
+def test_expansion_opener_flood_is_fast() -> None:
+    """A ``"${" * k`` command (all openers, no closer) must not turn the gate's
+    synchronous walk quadratic. Before the fix a single walk took ~40 s; the
+    gate runs it twice, past the 2.0 s liveness bar and into the loop-stall
+    hard-exit range."""
+    cmd = _expansion_opener_flood(MAX_SCANNABLE_COMMAND_CHARS)
+    assert len(cmd) == MAX_SCANNABLE_COMMAND_CHARS
+    assert is_sensitive_bash_command(cmd) is None
+    assert _gate_seconds(cmd) < 2.0
+
+
+def test_self_kill_expansion_flood_is_fast() -> None:
+    """Same flood on the self-protection-kill floor path, which arms the
+    payload descent through ``_iter_shell_chars``. A stray ``}`` in the body
+    must not defeat the bound."""
+    cmd = _self_kill_expansion_flood(MAX_SCANNABLE_COMMAND_CHARS)
+    assert len(cmd) <= MAX_SCANNABLE_COMMAND_CHARS
+    assert _gate_seconds(cmd) < 2.0
+    # A stray ``}`` in the body must not defeat the bound either.
+    body_brace = ("${" * 8) + "}" + ("${" * 8) + " ; kill $(pgrep -f " + "kiro" + "crew)"
+    filler = "${" * ((MAX_SCANNABLE_COMMAND_CHARS - len(body_brace)) // 2)
+    cmd_brace = filler + body_brace
+    assert len(cmd_brace) <= MAX_SCANNABLE_COMMAND_CHARS
+    assert _gate_seconds(cmd_brace) < 2.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The uncapped path: ``is_denied`` applies NO size ceiling before the
+# self-protection floor descends into ``_iter_shell_chars``, so the flood must
+# be timed THROUGH ``is_denied`` and ABOVE ``MAX_SCANNABLE_COMMAND_CHARS``.
+# Timing ``is_sensitive_bash_command`` (above) does NOT exercise the real DoS:
+# that entry point refuses anything past the ceiling before the walk runs, so a
+# ``"${" * 10240 + "}"`` payload (one char over the ceiling) is rejected there
+# and the quadratic walk is never reached -- the test would pass even on the
+# pre-fix build. These time ``is_denied`` directly on exactly that payload.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _deny_seconds(command: str) -> float:
+    started = time.perf_counter()
+    # ``denied_regexes=None`` fails closed to all built-ins enabled -- the gate's
+    # own default -- so the self-protection floor runs and the walk is reached.
+    is_denied(command)
+    return time.perf_counter() - started
+
+
+#: Ceiling for the uncapped-path flood tests below. The property they pin is
+#: "bounded, not quadratic": with the shared work budget this payload is linear
+#: and finishes in well under a second locally, but a loaded shared CI runner is
+#: several times slower, so a sub-second bound only held on fast hardware and
+#: flaked in CI. The real contract is that the walk stays FAR under the gate's
+#: own loop-stall hard-exit (~25 s), so a value a quarter of that catches a true
+#: O(n^2) regression -- which on this 20 KB payload is tens of seconds to minutes
+#: -- while giving a slow runner all the headroom it needs. (A timing assertion
+#: must not rest on a fast clock -- the repo de-flakes these on principle.)
+_FLOOD_SECONDS_BOUND = 15.0
+
+
+def test_is_denied_single_trailing_brace_flood_is_fast() -> None:
+    """Opus's finding #1 payload, on the entry point that has no size ceiling.
+
+    ``"${" * 10240 + "}"`` is 20481 chars -- ONE past
+    ``MAX_SCANNABLE_COMMAND_CHARS`` -- so ``is_sensitive_bash_command`` refuses it
+    without walking. ``is_denied`` does NOT, so the self-protection floor descends
+    into ``_iter_shell_chars``. The lone trailing ``}`` defeats a positional
+    ``last_brace`` opener guard: every one of ~10 240 openers has a ``}`` after it,
+    so each would run a full ``_expansion_span`` that never balances -- Σ ≈ 1e8
+    steps, tens of seconds to minutes. The shared work budget keeps it linear, so
+    it stays far under the gate's loop-stall hard-exit; see
+    ``_FLOOD_SECONDS_BOUND`` for why the bound is generous rather than sub-second."""
+    payload = "${" * 10_240 + "}"
+    assert len(payload) == 2 * 10_240 + 1 > MAX_SCANNABLE_COMMAND_CHARS
+    assert _deny_seconds(payload) < _FLOOD_SECONDS_BOUND
+
+
+def test_is_denied_self_kill_brace_flood_is_fast() -> None:
+    """The same uncapped descent WITH a real self-kill clause, so the floor's
+    payload walk actually runs (``_bare_kill_raw_bodies`` -> ``_iter_shell_chars``),
+    above the ceiling and with a stray ``}`` that a positional guard treats as a
+    ``}`` present for every opener. Must stay bounded AND still deny (the clause
+    names the product)."""
+    payload = "${" * 10_240 + "}" + " ; kill $(pgrep -f " + "kiro" + "crew)"
+    assert len(payload) > MAX_SCANNABLE_COMMAND_CHARS
+    assert _deny_seconds(payload) < _FLOOD_SECONDS_BOUND
+    assert is_denied(payload) is not None
