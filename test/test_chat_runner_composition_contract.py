@@ -746,6 +746,9 @@ _AWAIT_FREE_PHASES = (
     "_drop_superseded_model_access_replay",
     "_drop_superseded_image_recovery",
     "_drop_superseded_refusal_replay",
+    "_image_recovery_vetoed_at_consume",
+    "_model_access_replay_vetoed_at_consume",
+    "_refusal_replay_vetoed_at_consume",
     "_requeue_auth_retry",
     "_requeue_after_prompt_busy",
     "_report_unclaimed_directives",
@@ -778,60 +781,14 @@ def test_an_await_free_phase_never_suspends(name: str) -> None:
     assert not _suspends(fn), f"{name} gained a suspension point"
 
 
-#: Owner phases cut from such blocks whose decision ends the turn with one awaited
-#: ``chat_done`` broadcast. The check and every slot change still run without a
-#: suspension point; nothing after the first one reads the slot or writes any
-#: state, so the check-then-mutate stays atomic and only the broadcast suspends.
-_DECIDE_THEN_SUSPEND_PHASES = ("_refusal_replay_vetoed_at_consume",)
-_STATE_WRITES = frozenset(
-    {"STORE_ATTR", "DELETE_ATTR", "STORE_SUBSCR", "DELETE_SUBSCR", "STORE_GLOBAL"}
-)
-
-
-def _touches_state_after_suspending(fn: Any) -> bool:
-    instructions = list(dis.get_instructions(fn))
-    first = next(index for index, ins in enumerate(instructions) if ins.opname in _SUSPENDING_OPS)
-    for ins in instructions[first:]:
-        if ins.opname in _STATE_WRITES:
-            return True
-        names = ins.argval if isinstance(ins.argval, tuple) else (ins.argval,)
-        if ins.opname.startswith("LOAD_FAST") and "slot" in names:
-            return True
-    return False
-
-
-def test_the_decide_then_suspend_scan_sees_state_after_an_await() -> None:
-    async def decides_then_awaits(slot: Any) -> None:
-        slot.decided = True
-        await asyncio.sleep(0)
-
-    async def awaits_then_writes(slot: Any) -> None:
-        await asyncio.sleep(0)
-        slot.decided = True
-
-    async def awaits_then_reads(slot: Any) -> bool:
-        await asyncio.sleep(0)
-        return bool(slot.decided)
-
-    assert not _touches_state_after_suspending(decides_then_awaits)
-    assert _touches_state_after_suspending(awaits_then_writes)
-    assert _touches_state_after_suspending(awaits_then_reads)
-
-
-@pytest.mark.parametrize("name", _DECIDE_THEN_SUSPEND_PHASES)
-def test_a_phase_suspends_only_after_its_decision(name: str) -> None:
-    fn = getattr(cr, name)
-    assert inspect.iscoroutinefunction(fn)
-    assert Path(fn.__code__.co_filename).resolve().parent == _OWNER_DIR
-    assert _suspends(fn), f"{name} no longer suspends: list it in _AWAIT_FREE_PHASES"
-    assert not _touches_state_after_suspending(fn), f"{name} suspends before its decision"
-
-
 def test_run_chat_keeps_its_entry_signature() -> None:
     sig = inspect.signature(cr._run_chat)
     assert list(sig.parameters) == [
         "state",
         "slot",
+        # Supplied by the exit guard (``_hands_off_queue_on_exit``), never by a
+        # caller; the signature follows ``__wrapped__`` to the turn itself.
+        "turn_exit",
         "message",
         "_prompt_depth",
         "_attachments",
@@ -840,7 +797,9 @@ def test_run_chat_keeps_its_entry_signature() -> None:
         "_refusal_replay",
         "_image_recovery",
         "_session_not_found_recovery",
+        "_model_access_replay",
         "_synthetic_recovery_turn",
+        "_replays_completion",
         "_steer_possibly_delivered",
         "_directive_user_origin",
         "_turn_provenance_restored",
@@ -855,7 +814,7 @@ def test_run_chat_keeps_its_entry_signature() -> None:
         "monitor_completion",
         "_current_message",
     ]
-    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in list(sig.parameters.values())[3:])
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in list(sig.parameters.values())[4:])
     assert inspect.iscoroutinefunction(cr._run_chat)
 
 

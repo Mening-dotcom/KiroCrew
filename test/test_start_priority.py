@@ -858,7 +858,14 @@ def _priority_args(path: str, function: str, callee: str) -> list[str]:
         ("dashboard/stt_stream.py", "_classify", "run_bg_oneliner", "StartPriority.FOREGROUND"),
         # The dashboard runner hands every start the turn's own priority.
         ("dashboard/chat_runner.py", "_run_chat", "run_bg_oneliner", "_turn_priority"),
-        ("dashboard/chat_runner.py", "_run_chat", "schedule_eager_spawn", "_turn_priority"),
+        # The turn's eager respawn runs in its tail, from the priority the turn
+        # recorded in its outcome.
+        (
+            "dashboard/chat_runner.py",
+            "_end_turn_tail",
+            "schedule_eager_spawn",
+            "outcome.start_priority",
+        ),
         # A turn's own background work passes the priority it was given.
         ("dashboard/handlers/side.py", "_run_side_turn", "get_or_create", "start_priority"),
         ("dashboard/chat_threads.py", "_run_thread_turn", "get_or_create", "start_priority"),

@@ -205,10 +205,10 @@ def _settle_consumed_steers(
 def _requeue_unconsumed_steers(state: "DashboardState", slot: "_ChatSlot") -> None:
     """Degrade unconsumed mid-turn steers into ordinary queue cards.
 
-    Called from ``_run_chat``'s finally on every turn-exit path. A steer that
-    kiro-cli never confirmed via ``steering_consumed`` died with the turn
-    (stall-cancel, soft STOP, error, or a steer racing the turn's natural
-    end); without this it would vanish silently.
+    The first step of :func:`_hand_off_queue`, so it runs once on every turn
+    exit. A steer that kiro-cli never confirmed via ``steering_consumed`` died
+    with the turn (stall-cancel, soft STOP, error, or a steer racing the
+    turn's natural end); without this it would vanish silently.
 
     Requeues at the HEAD of the slot queue — steers were meant to be injected
     before any queued item ran — preserving their relative order, and

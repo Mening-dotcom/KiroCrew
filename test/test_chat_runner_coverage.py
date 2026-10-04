@@ -3268,6 +3268,7 @@ class TestFinishQueueCycle:
     @pytest.mark.asyncio
     async def test_idle_cycle_emits_done_and_refreshes_the_sidebar(self, tmp_path):
         state, slot = _state(tmp_path), _slot()
+        slot._cycle_reached_provider = True  # a provider served this cycle
 
         with patch.object(chat_runner, "title_then_refresh", new=AsyncMock()):
             await chat_runner._finish_queue_cycle(state, slot)
@@ -3279,6 +3280,7 @@ class TestFinishQueueCycle:
         state.broadcast_ws.assert_any_call(
             "chat_done", {"slot": slot.key, "continuing": False, "needs_input": False}
         )
+        assert slot._cycle_reached_provider is False, "the next cycle starts unserved"
 
 
 class TestTtftMetric:
@@ -3877,14 +3879,18 @@ class TestRunChatRecoveryLadders:
         client.last_compaction_transient = True
         _set_stream(client, [_complete(STOP_REASON_COMPACTION_FAILED)])
 
-        await _drive(state, slot, "do the thing")
+        slot._empty_response_retries = 2
+        with _quiet_sel():
+            await chat_runner._run_chat(state, slot, "do the thing")
+        # The requeue is proven by the follow-up turn the finally DISPATCHED
+        # from it. Asserting on slot._queue cannot see it: that dispatch is the
+        # drain, so the entry is already gone by the time the turn returns. Read
+        # before settling: a settled follow-up's own tail releases slot.task.
+        assert slot.task is not None
+        await _settle(slot)
 
         assert slot._compaction_failed_retries == 1
         assert any("Compaction failed — retrying" in err for err in _errors(slot)), _errors(slot)
-        # The requeue is proven by the follow-up turn the finally DISPATCHED
-        # from it. Asserting on slot._queue cannot see it: that dispatch is the
-        # drain, so the entry is already gone by the time the turn returns.
-        assert slot.task is not None
         # Still not pipe-death: that budget and its card stay untouched.
         assert slot._acp_pipe_death_retries == 0
         assert not any("Connection lost" in err for err in _errors(slot))
