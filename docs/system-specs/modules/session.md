@@ -3828,9 +3828,10 @@ a trust root on its own; publication therefore also writes a
   task.
 - **Shell audit log cap** (`SessionCleanup._sweep_shell_audit_log` →
   `shell_audit_log.rotate_shell_audit_log`): the bundled `postToolUse` hook in
-  `config/defaults.json` records every `execute_bash` call by appending a stamp
-  line, the hook-event JSON kiro-cli hands it on stdin (the tool call — its
-  command and, on this event, its result) and a blank line to
+  `config/defaults.json` records every `execute_bash` call as a single line — a
+  UTC stamp, then ` BASH: `, then the hook-event JSON kiro-cli hands it on stdin
+  (the tool call — its command and, on this event, its result) with every CR and
+  LF stripped — appended to
   `<data home>/audit.log`, and the command bounds nothing — measured at 4.4 MB
   over about five weeks on a default install, one file, no sibling generation.
   The bound is applied from the gateway side, not the hook: the shipped command
