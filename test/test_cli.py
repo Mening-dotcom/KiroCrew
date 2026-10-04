@@ -5954,6 +5954,58 @@ class TestSpawnCliAuth:
         headers_lower = {k.lower(): v for k, v in dict(req.headers).items()}
         assert headers_lower["x-internal-secret"] == "test-secret-xyz"
 
+    def test_spawn_list_queued_row_prints_no_terminal_controls(self, monkeypatch, capsys):
+        """A queued row's id and task are agent-authored: an escape sequence or
+        newline in either must not reach the operator's terminal live."""
+        monkeypatch.setattr("kiro_crew.cli_commands.read_local_secret", lambda _port, **_kw: "")
+        answer = {
+            "agents": [],
+            "queued": [{"id": "q1\x1b]0;pwned\x07", "task": "work\x1b[2J\nfake row"}],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(answer).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("kiro_crew.cli_commands.loopback_urlopen", lambda *_a, **_k: mock_resp)
+
+        from kiro_crew.cli_commands import _spawn
+
+        _spawn(argparse.Namespace(spawn_action="list", port=5476))
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "\x07" not in out
+        rows = [line for line in out.splitlines() if "🕒" in line]
+        assert len(rows) == 1 and "fake row" in rows[0]
+        assert out.count("\n") == 1
+
+    @pytest.mark.parametrize(
+        ("state", "icon"),
+        [({"done": True}, "✅"), ({"awaiting_approval": True}, "🔐"), ({}, "⏳")],
+    )
+    def test_spawn_list_agent_row_prints_no_terminal_controls(
+        self, monkeypatch, capsys, state, icon
+    ):
+        """A running, approval-waiting or done row's id and task are agent-authored
+        too, so they get the same one-line, no-control-sequence treatment."""
+        monkeypatch.setattr("kiro_crew.cli_commands.read_local_secret", lambda _port, **_kw: "")
+        agent = {"id": "a1\x1b]0;pwned\x07", "task": "work\x1b[2J\nfake row", **state}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"agents": [agent]}).encode()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("kiro_crew.cli_commands.loopback_urlopen", lambda *_a, **_k: mock_resp)
+
+        from kiro_crew.cli_commands import _spawn
+
+        _spawn(argparse.Namespace(spawn_action="list", port=5476))
+
+        out = capsys.readouterr().out
+        assert "\x1b" not in out
+        assert "\x07" not in out
+        assert out.count("\n") == 1
+        assert out.lstrip().startswith(icon) and "fake row" in out
+
     def test_spawn_run_sends_internal_secret_header(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(
             "kiro_crew.cli_commands.read_local_secret", lambda _port, **_kw: "run-secret-abc"

@@ -2183,7 +2183,9 @@ Delegation guidance is injected from `src/kiro_crew/config/prompt.md`; no dedica
 
 Posts to the dashboard API on the configured `--port`. By default it polls until
 the run finishes and prints the result; `--async` returns immediately with the
-subagent ID. `kirocrew spawn list` lists current runs.
+subagent ID. `kirocrew spawn list` lists current runs. Every row's id and task
+are agent-authored, so each passes through `safe_terminal_line`: one terminal
+line, no live control sequences, for queued, running and done rows alike.
 
 The CLI sends the internal secret and nothing else: no `X-Session-Key`, no
 `parent_session` and no `X-Internal-Caller`. An internal-secret request of that
