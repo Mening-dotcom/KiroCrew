@@ -239,7 +239,6 @@ class _GateMixin(ManagerComponent):
         target_member: str | None = None,
         delegation: dict[str, str] | None = None,
         _execution_context: dict | None = None,
-        _stage_boundary_owner: str = "",
         _parent_spawn_policy: "ParentSpawnPolicy | None" = None,
         _agent_check: "AgentCheck | None" = None,
         _recovering_row: bool = False,
@@ -652,7 +651,6 @@ class _GateMixin(ManagerComponent):
             # in the ordinary case, and a full parse only when the memo
             # declines to pin.
             "crew": crew,
-            "_stage_boundary_owner": _stage_boundary_owner,
             "_memory_mode": _memory_mode,
             # Same rule for the asking turn: `spawn_async` re-enters from this
             # dict (prepare -> write -> re-enter), so a follow-up whose asking
@@ -1308,7 +1306,7 @@ class _GateMixin(ManagerComponent):
                     # Charged at its checked price while the claim is pending,
                     # and carried to the re-entry that registers it.
                     self._manager._claim_prices[agent_id] = (candidate_price, priced_shared)
-                return ClaimPoint(agent_id, parent_session_key, _stage_boundary_owner)
+                return ClaimPoint(agent_id, parent_session_key)
             taskq_generation, proceed, claim_reason = self._manager._admission.taskq_claim(agent_id)
         if not proceed and claim_reason in (self.CLAIM_UNAVAILABLE, self.CLAIM_RETAINED):
             # A pre-claim outage leaves the row QUEUED and needs an ordinary
