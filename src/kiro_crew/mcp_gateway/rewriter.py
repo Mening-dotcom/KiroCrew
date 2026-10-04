@@ -68,6 +68,7 @@ from kiro_crew.mcp_gateway.launch_approval import (
     launch_fingerprint,
 )
 from kiro_crew.mcp_gateway.manager import is_credential_env_key
+from kiro_crew.mcp_gateway.read_limits import config_read_buffer_limit
 from kiro_crew.mcp_utils import mcp_server_alias
 from kiro_crew.sandbox import scrub_agent_denied_env
 from kiro_crew.security import is_sensitive_path
@@ -784,6 +785,7 @@ def _build_stub_entry(
     poolable: bool = False,
     identity_keys: Collection[str] = (),
     notes: _RewritePassNotes | None = None,
+    read_buffer_limit: int = 0,
 ) -> dict[str, Any]:
     """Return the rewritten ``mcpServers[name]`` entry.
 
@@ -813,6 +815,18 @@ def _build_stub_entry(
         "--work-dir", str(work_dir),
         "--approval-mode", approval_mode,
         "--socket", str(socket_path),
+        # The per-stream read ceiling. A stub that reads it off argv never
+        # imports the config package, which is roughly 140 modules in a process
+        # that exists once per session per MCP server. Carried like the other
+        # config-derived values above (socket, approval mode, sandbox mode).
+        #
+        # Resolved ONCE per rewrite by the caller and passed in, not read here:
+        # this value is baked into the overlay, so it is an input to
+        # ``_rewrite_inputs_fingerprint`` as well, and the two must be the same
+        # number. Reading config per entry would also let one pass write two
+        # ceilings if the file changed under it, and the daemon sizes its own
+        # reader from a single answer.
+        "--read-limit", str(read_buffer_limit),
     ]
     if poolable:
         stub_args.append("--poolable")
@@ -1053,6 +1067,7 @@ def _rewrite_single_spec(
     pooling_enabled: bool = True,
     forward_env: bool = False,
     identity_keys: Collection[str] = (),
+    read_buffer_limit: int = 0,
     inject_servers: dict[str, Any] | None = None,
     target_env: dict[str, str] | None = None,
     sidecars_written: _SidecarLedger | None = None,
@@ -1247,6 +1262,7 @@ def _rewrite_single_spec(
             # per-server decision, so there is nothing further to consult here.
             poolable=pooling_enabled,
             identity_keys=identity_keys,
+            read_buffer_limit=read_buffer_limit,
             notes=notes,
         )
         wrapped += 1
@@ -1364,6 +1380,7 @@ def _rewrite_single_spec(
             sidecars_written=sidecars_written,
             poolable=pooling_enabled,
             identity_keys=identity_keys,
+            read_buffer_limit=read_buffer_limit,
             notes=notes,
         )
         wrapped += 1
@@ -1713,6 +1730,7 @@ def _rewrite_inputs_fingerprint(
     pooling_enabled: bool,
     forward_env: bool,
     identity_keys: Collection[str],
+    read_buffer_limit: int,
 ) -> dict[str, Any]:
     """Return a JSON-serializable snapshot of every input that can change
     :func:`rewrite_agents`'s output.
@@ -1754,6 +1772,9 @@ def _rewrite_inputs_fingerprint(
       unrelated input changed, and until then the stub would keep hashing the old
       set while gatewayd hashed the new one — the coherence gate would refuse to
       forward, so the feature would silently not work.
+    * ``read_buffer_limit`` — the per-stream read ceiling stamped into every
+      stub's ``--read-limit``, for the same reason as ``pool_identity_env``:
+      a kept overlay would keep launching stubs with the old ceiling.
     * ``schema`` / ``package`` — invalidate on rewriter logic changes.
     """
     sources: dict[str, list[Any] | None] = {
@@ -1770,6 +1791,12 @@ def _rewrite_inputs_fingerprint(
         "path_augment": mcp_search_path(""),
         "forward_declared_env": bool(forward_env),
         "pool_identity_env": sorted(frozenset(identity_keys)),
+        # Written onto every stub's argv as ``--read-limit``, so raising
+        # ``mcp_gateway.read_buffer_limit_bytes`` has to regenerate the overlays.
+        # Without it a kept overlay keeps handing stubs the previous ceiling and
+        # the new setting silently does nothing until some unrelated input
+        # changes -- the same failure mode ``pool_identity_env`` above records.
+        "read_buffer_limit": int(read_buffer_limit),
         "source_dir": str(source_dir),
         "overlay_dir": str(overlay_dir),
         "socket_path": str(socket_path),
@@ -2211,6 +2238,12 @@ def rewrite_agents(
     # the fingerprint, handed to every consumer in it. gatewayd re-reads the same
     # helper at spawn rather than taking the stub's word for it.
     identity_keys = pool_identity_env_keys()
+    # And for the read ceiling: ONE resolved value per pass, recorded in the
+    # fingerprint and written onto every stub's argv. Resolving it per entry
+    # would let a config edit mid-pass write two different ceilings, and leaving
+    # it out of the fingerprint would let a kept overlay keep launching stubs
+    # with the previous one after the operator raised the key.
+    read_buffer_limit = config_read_buffer_limit()
     current_inputs = _rewrite_inputs_fingerprint(
         source_dir=source_dir,
         settings_path=kiro_settings_json,
@@ -2223,6 +2256,7 @@ def rewrite_agents(
         pooling_enabled=pooling_enabled,
         forward_env=forward_env,
         identity_keys=identity_keys,
+        read_buffer_limit=read_buffer_limit,
     )
     if approvals is not None:
         current_inputs["launch_approvals"] = approvals.digest()
@@ -2515,6 +2549,7 @@ def rewrite_agents(
                 pooling_enabled=pooling_enabled,
                 forward_env=forward_env,
                 identity_keys=identity_keys,
+                read_buffer_limit=read_buffer_limit,
                 inject_servers=settings_poolable,
                 target_env=target_env,
                 sidecars_written=written_sidecars,

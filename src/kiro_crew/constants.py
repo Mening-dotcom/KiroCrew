@@ -1604,3 +1604,13 @@ STEER_NOTICE_BOUND_SECS = 5.0
 # wait (``acp.liveness.ToolCallState.declared_wait_verdict``), so raising it in one
 # place cannot leave a long wait badged as stalled.
 WAIT_TOOL_MAX_SECS = 1800
+
+# Longest retained STRING for a name, id or category. It lives here rather than
+# beside the other length caps in ``validation`` because ``execution_context``
+# needs exactly this one: ``validation`` reaches ``artifact_store``,
+# ``computer_use``, ``config.sections``, ``monitoring`` and ``project_scope``
+# (and ``security`` behind it), which is about 8 MB and 86 modules to learn one
+# integer -- and ``execution_context`` is on the identity path every MCP stub
+# takes at startup, so that graph lands once per session per server.
+# ``validation`` re-exports it, so every other reader is unaffected.
+MAX_SHORT_STRING = 500  # names, IDs, categories

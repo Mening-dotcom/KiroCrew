@@ -449,3 +449,49 @@ def hash_effective_env(env_pairs: Mapping[str, str], *, identity_keys: Collectio
     """
     filtered = non_secret_env(env_pairs, identity_keys=identity_keys)
     return hash_declared_env(filtered)
+
+
+#: Fields :func:`format_pool_label` reads. Both producers hold all of them: a
+#: Register payload by construction, and a
+#: :class:`~kiro_crew.mcp_gateway.pool.PoolKey` as dataclass fields.
+_LABEL_FIELDS = (
+    "agent_name",
+    "server_name",
+    "os_uid",
+    "sandbox_mode",
+    "command_args_hash",
+    "effective_env_hash",
+    "work_dir",
+)
+
+
+def format_pool_label(fields: Mapping[str, Any]) -> str:
+    """Short log-friendly label for a pool identity. NOT collision-resistant.
+
+    Reads a Register payload or a :class:`PoolKey`'s own fields, whichever the
+    caller holds, and both produce the same string for the same identity --
+    which is the point, because the stub and the daemon log the same session
+    and an operator matches the two by eye.
+
+    It lives in this leaf rather than on ``PoolKey`` so a caller that needs the
+    label does not have to import ``pool``: that module's body resolves the
+    read-buffer ceiling, which reads config, and ``mcp_gateway.stub`` wants the
+    label for one log line per process. ``PoolKey.human_readable`` calls this,
+    so there is one formatter and not two spellings to drift apart.
+
+    Raises :class:`ValueError` naming every field it did not find.
+    """
+    missing = [name for name in _LABEL_FIELDS if name not in fields]
+    if missing:
+        raise ValueError(f"pool label fields missing: {missing}")
+
+    def short(value: object) -> str:
+        text = str(value)
+        return (text[:8] + "\u2026") if len(text) > 8 else text
+
+    return (
+        f"{fields['agent_name']}:{fields['server_name']} "
+        f"uid={fields['os_uid']} sbx={fields['sandbox_mode']} "
+        f"cmd={short(fields['command_args_hash'])} "
+        f"env={short(fields['effective_env_hash'])} ws={fields['work_dir']}"
+    )

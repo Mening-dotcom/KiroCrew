@@ -40,11 +40,17 @@ from kiro_crew.artifact_store.rules import normalize_tag as _normalize_artifact_
 # reads as "the computer-use vocabulary" rather than bare names.
 from kiro_crew.computer_use import types as _cu_types
 from kiro_crew.config.sections import SUBAGENT_MAX_TURNS_CEILING
+
+# ``MAX_SHORT_STRING`` is re-exported, not just used: it is part of this
+# module's surface and 15 other modules read it from here. It is DEFINED in
+# ``constants`` so ``execution_context`` can have it without this module's
+# import graph -- see the comment at its definition.
 from kiro_crew.constants import (
     ARTIFACT_MAX_CONTENT_BYTES,
     AWS_PROFILE_NAME_RE,
     CHANNEL_OWNER_DM_NAMESPACES,
     MAX_BANNER_CHARS,
+    MAX_SHORT_STRING,
     SLACK_NAMESPACE,
     WAIT_TOOL_MAX_SECS,
     WINDOWS_DEVICE_STEMS,
@@ -77,7 +83,6 @@ from kiro_crew.work_vocab import WORK_ITEM_STATES, WORK_VERDICTS, WORK_WORKER_ST
 
 # Max lengths for string inputs
 MAX_TOOL_NAME_LEN = 256
-MAX_SHORT_STRING = 500  # names, IDs, categories
 MAX_SKILL_KEY_CHARS = 32768  # nested catalog keys, transported in JSON for exact reads
 MAX_MEDIUM_STRING = 5_000  # messages, rules
 MAX_LONG_STRING = 50_000  # task specs, inline content

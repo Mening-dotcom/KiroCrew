@@ -222,7 +222,7 @@ def test_from_env_resolves_session_key(topo, monkeypatch, view) -> None:
     _wire_common(monkeypatch, topo, view)
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
     # from_env imports config_dir lazily from the loader module.
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
 
     ctx = mcp_caller.CallerContext.from_env()
     assert ctx.session_key == SESSION_KEY
@@ -240,7 +240,7 @@ def test_mcp_core_resolves_session_key(topo, monkeypatch, view) -> None:
 
     _wire_common(monkeypatch, topo, view)
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
 
     assert mcp_core._resolve_session_key() == SESSION_KEY
 
@@ -273,7 +273,7 @@ def test_mcp_shared_policy_walk_resolves_but_fails_closed_without_dialling(
 
     monkeypatch.setattr(mcp_shared, "resolve_client_port_src", lambda port: (5476, "config"))
     monkeypatch.setattr(mcp_shared, "config_dir", lambda: topo.cfg_dir)
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
     (topo.cfg_dir / ".local_secret").write_text("s")
 
     topo.write_session_pid(KIRO_CLI)  # direct parent of MCP_SERVER
@@ -320,7 +320,7 @@ def test_stub_caller_block_carries_session_key(topo, monkeypatch, view) -> None:
 
     _wire_common(monkeypatch, topo, view)
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
 
     caller = stub._build_caller_block(None)
     assert caller["session_key"] == SESSION_KEY
@@ -420,7 +420,7 @@ def _wire_shared_caller(monkeypatch, topo: ProcessTopology, *, token: str = "") 
 
     _wire_shared(monkeypatch, topo, token=token)
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup("host"))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
 
 
 def _published(tmp_path: Path, monkeypatch, *, co_tenants) -> str:
@@ -540,7 +540,7 @@ def test_mcp_core_refuses_a_co_tenants_key(shared_topo, monkeypatch, caplog) -> 
 
     _wire_shared(monkeypatch, shared_topo)
     monkeypatch.setattr(mcp_caller, "_parent_pid", shared_topo.parent_lookup("host"))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: shared_topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: shared_topo.cfg_dir)
     with caplog.at_level(logging.WARNING):
         assert mcp_core._resolve_session_key() == ""
     assert "co-tenant" in caplog.text
@@ -551,7 +551,7 @@ def test_mcp_core_names_the_co_tenant_from_its_own_token(shared_topo, monkeypatc
 
     _wire_shared(monkeypatch, shared_topo, token=CO_TENANT_TOKEN)
     monkeypatch.setattr(mcp_caller, "_parent_pid", shared_topo.parent_lookup("host"))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: shared_topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: shared_topo.cfg_dir)
     assert mcp_core._resolve_session_key() == CO_TENANT_KEY
 
 
@@ -567,7 +567,7 @@ def _wire_shared_policy(monkeypatch, topo: ProcessTopology, *, token: str = "") 
     monkeypatch.setattr(mcp_shared, "_failure_count", 0)
     monkeypatch.setattr(mcp_shared, "resolve_client_port_src", lambda port: (5476, "config"))
     monkeypatch.setattr(mcp_shared, "config_dir", lambda: topo.cfg_dir)
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
     (topo.cfg_dir / ".local_secret").write_text("s")
     _wire_shared(monkeypatch, topo, token=token)
     response = MagicMock()
@@ -623,7 +623,7 @@ def test_mcp_shared_policy_still_proceeds_when_nothing_has_named_the_session(
     empty.mkdir()
     (empty / ".local_secret").write_text("s")
     monkeypatch.setattr(mcp_shared, "config_dir", lambda: empty)
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: empty)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: empty)
 
     policy = mcp_shared._resolve_tool_policy()
     assert policy.unresolved == "no_session_key"
@@ -818,7 +818,7 @@ def test_the_token_outranks_a_stale_pid_mapping(topo, monkeypatch, resolver) -> 
     topo.write_session_pid(KIRO_CLI, SESSION_KEY)
     _wire_common(monkeypatch, topo, "host")
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup("host"))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
     monkeypatch.setattr(
         session_token_sig,
         "verify_session_token",
@@ -853,7 +853,7 @@ def _wire_protected(monkeypatch, topo, answer, *, raises: bool = False) -> None:
 
     _wire_common(monkeypatch, topo, "host")
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup("host"))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
 
     def probe(pid):
         if raises:
@@ -948,7 +948,7 @@ def test_from_env_host_pid_env_resolves_in_any_view(topo, monkeypatch, view) -> 
 
     _wire_common(monkeypatch, topo, view)
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
     # The launcher (session host) exported its HOST pid before unshare.
     monkeypatch.setenv("KIROCREW_HOST_PID", str(SESSION_HOST))
 
@@ -963,7 +963,7 @@ def test_mcp_core_host_pid_env_resolves_in_any_view(topo, monkeypatch, view) -> 
 
     _wire_common(monkeypatch, topo, view)
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup(view))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
     monkeypatch.setenv("KIROCREW_HOST_PID", str(SESSION_HOST))
 
     assert mcp_core._resolve_session_key() == SESSION_KEY
@@ -1013,7 +1013,7 @@ def test_from_env_refuses_symlinked_pid_file(topo, monkeypatch) -> None:
     _plant_symlink(topo, SESSION_HOST)
     _wire_common(monkeypatch, topo, "host")
     monkeypatch.setattr(mcp_caller, "_parent_pid", topo.parent_lookup("host"))
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
 
     ctx = mcp_caller.CallerContext.from_env()
     assert ctx.session_key == ""
@@ -1029,7 +1029,7 @@ def test_mcp_shared_refuses_symlinked_pid_file(topo, monkeypatch) -> None:
 
     monkeypatch.setattr(mcp_shared, "resolve_client_port_src", lambda port: (5476, "config"))
     monkeypatch.setattr(mcp_shared, "config_dir", lambda: topo.cfg_dir)
-    monkeypatch.setattr("kiro_crew.config.loader.config_dir", lambda: topo.cfg_dir)
+    monkeypatch.setattr("kiro_crew.config.paths.config_dir", lambda: topo.cfg_dir)
     (topo.cfg_dir / ".local_secret").write_text("s")
 
     # Symlink at the DIRECT parent's path (where the resolvable-case test

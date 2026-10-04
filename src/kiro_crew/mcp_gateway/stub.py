@@ -12,7 +12,11 @@ inheriting this process's stdio (see :func:`_fallback_spawn_child`).
 Register fields match :meth:`PoolKey.from_register`; hashes use SHA-256
 (stdlib). Bridge phase is NOT wrapped in a timeout (learned correction
 — a single timeout around a long-lived session silently kills healthy
-streams). Import budget: stdlib + pool + mcp_caller only.
+streams). Import budget: stdlib, ``transport`` and the stdlib-only leaves it
+needs to connect. The stub runs once per session per MCP server, so anything
+else -- pool, config, metrics, the caller and cleanup helpers -- is imported by
+the function that uses it (see :data:`_DEFERRED`), and
+``test_mcp_gateway_stub_import_budget.py`` holds the line.
 """
 
 from __future__ import annotations
@@ -39,31 +43,45 @@ from typing import Any, Callable, Mapping, NoReturn, Optional
 from kiro_crew import platform_compat
 from kiro_crew.executors import configure_default_executor, subprocess_executor
 from kiro_crew.json_line import parse_json_object_line
-from kiro_crew.jsonl_util import bounded_records, rotate_jsonl_at
-from kiro_crew.mcp_caller import (
-    POOLING_REQUIRES_TENANT_NONCE,
-    CallerContext,
-    _parent_pid,
-)
+from kiro_crew.mcp_caller import CallerContext, _parent_pid
 from kiro_crew.mcp_cleanup import KIROCREW_BIN_MCP_SERVERS
 from kiro_crew.mcp_gateway import transport
 from kiro_crew.mcp_gateway.claim import STUB_SESSION_TOKEN_ENV
 from kiro_crew.mcp_gateway.hashing import (
     decode_target_args,
     expand_stub_flags,
+    format_pool_label,
     hash_command,
     hash_effective_env,
     runs_install_code,
 )
-from kiro_crew.mcp_gateway.pool import (
+from kiro_crew.mcp_gateway.read_limits import (
     _DEFAULT_READ_BUFFER_LIMIT,
-    READ_BUFFER_LIMIT_BYTES,
-    PoolKey,
+    read_buffer_limit_from_flag,
 )
 from kiro_crew.mcp_gateway.shutdown_budget import TOTAL_SHUTDOWN_BUDGET_SECS
-from kiro_crew.metrics.events import MCP_RECONNECTS, emit_counter
 
 logger = logging.getLogger(__name__)
+
+# --- Import budget ----------------------------------------------------------
+# The stub runs once per session per MCP server, so what it loads is multiplied
+# by every session on the host. Two rules keep that bounded, and they are
+# different rules because they bound different things:
+#
+# * The modules ABOVE are the ones every run reaches anyway -- it builds a
+#   Register payload and connects on every start -- so importing them here
+#   rather than inside a function changes when, not whether, and the eager
+#   spelling is the readable one.
+# * ``mcp_gateway.pool``, ``metrics.events`` and ``jsonl_util`` are NOT on that
+#   path, and ``pool`` in particular costs the whole config package (its body
+#   resolves the read-buffer ceiling, which reads config). They are imported by
+#   the function that needs them: a reconnect counter, a fallback record, a
+#   degrade check. ``test_mcp_gateway_stub_import_budget.py`` holds that line.
+#
+# The ceiling the stub DOES need comes from the stdlib-only ``read_limits``
+# leaf, and the pool label it logs comes from ``hashing.format_pool_label``, so neither
+# requires ``pool`` itself.
+
 
 _HANDSHAKE_TIMEOUT_SECS = 3.0
 
@@ -203,8 +221,49 @@ _STDIN_QUEUE_MAXSIZE = 256
 # reader was willing to return can never trip it alone, and is floored at the
 # SHIPPED read limit so tuning ``mcp_gateway.read_buffer_limit_bytes`` down (1 KiB
 # is accepted) cannot tighten the hold along with it.
+#
+# All three start at the SHIPPED default and are replaced by
+# :func:`_adopt_read_ceiling` before the stub opens anything. The default is a
+# plain integer from a stdlib-only leaf, so this module's body still reads no
+# config -- which is the whole point, since a config read costs roughly 140
+# modules in a process that exists once per session per MCP server.
+READ_BUFFER_LIMIT_BYTES = _DEFAULT_READ_BUFFER_LIMIT
 _HELD_FRAME_BYTES = READ_BUFFER_LIMIT_BYTES
 _HELD_TOTAL_BYTES = max(_DEFAULT_READ_BUFFER_LIMIT, _HELD_FRAME_BYTES)
+
+
+def _adopt_read_ceiling(args: argparse.Namespace) -> int:
+    """Bind the read ceiling this stub was LAUNCHED with, before it connects.
+
+    The rewriter resolves the ceiling when it writes the overlay -- it has
+    config loaded anyway -- and stamps the answer into ``--read-limit``.
+    Adopting it off argv is what keeps a running stub out of the config package.
+
+    Called from the entry point, because a launch parameter is adopted once, by
+    whoever read argv. A stub whose overlay predates the flag adopts nothing
+    usable and :func:`read_buffer_limit_from_flag` resolves the long way, so the
+    precedence an operator sees -- env var, then the config key, then the
+    default -- is the same either way.
+
+    Writes the two retention bounds as well, so every reader of them sees one
+    answer. ``_HELD_TOTAL_BYTES`` is floored at the SHIPPED default on purpose:
+    tuning the key DOWN (1 KiB is accepted) must not tighten what a disconnected
+    stub may hold, or a reconnect would drop frames it could have replayed.
+    """
+    raw = getattr(args, "read_limit", None)
+    flag_value: Optional[int] = None
+    if raw is not None:
+        try:
+            flag_value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("ignoring unparsable --read-limit %r", raw)
+    value = read_buffer_limit_from_flag(flag_value)
+    globals()["READ_BUFFER_LIMIT_BYTES"] = value
+    globals()["_HELD_FRAME_BYTES"] = value
+    globals()["_HELD_TOTAL_BYTES"] = max(_DEFAULT_READ_BUFFER_LIMIT, value)
+    return value
+
+
 # Coupled to the DEFAULT of ``mcp_gateway.spawn_queue_wait_secs``
 # (``config/integration_sections.py``): the daemon holds a queued stub for about that long
 # before a capacity refusal, and this budget is how long the stub keeps
@@ -396,6 +455,13 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=os.environ.get("KIROCREW_MCP_SOCKET") or os.environ.get("MC_MCP_SOCKET") or _default_socket_path(),
     )
     p.add_argument("--real-stub", default=None, dest="real_stub")
+    # The read ceiling, pre-resolved from config by the rewriter that wrote this
+    # overlay. Taking it on argv is what keeps a running stub out of the config
+    # package: see :func:`_adopt_read_ceiling`. Absent on an overlay written
+    # before the flag existed, which the resolver handles. ``type=str`` and not
+    # ``int``: an unparsable value must degrade to the resolver, and argparse's
+    # own int conversion would exit the process instead.
+    p.add_argument("--read-limit", default=None, dest="read_limit")
     return p.parse_args(argv)
 
 
@@ -628,6 +694,7 @@ def _ancestor_pids() -> list[int]:
     lookup failure, or the depth cap. Always contains at least
     ``os.getppid()`` when resolvable.
     """
+
     chain: list[int] = []
     pid = os.getppid()
     seen: set[int] = set()
@@ -651,6 +718,7 @@ def _build_caller_block(channel_id: Optional[str]) -> dict[str, str]:
     al.) that need session identity. Sharing the backend-side resolver keeps
     both ends of the wire in agreement. If the key is still unknown at register
     (claim hasn't happened yet), the recaller loop repairs it later."""
+
     session_key = CallerContext.from_env().session_key
     # Diagnostic identity only — the OS user. USERNAME is the Windows spelling
     # of USER; check both so this dimension is not empty on one platform.
@@ -680,6 +748,7 @@ def build_register_payload(args: argparse.Namespace) -> dict:
 
     The result is accepted verbatim by :meth:`PoolKey.from_register` —
     callers do not post-process."""
+
     target_args = _resolve_target_args(args)
     binary_version, stub_code_fingerprint = _pool_binary_identity(args.target_command, target_args)
     # Prefer --env-json when present (commas/equals round-trip intact);
@@ -930,6 +999,8 @@ def must_degrade_nonce_blind(
     by a nonce-blind daemon, and degrading all of them would spend one process per
     session on any host whose daemon outlived a package upgrade.
     """
+    from kiro_crew.mcp_caller import POOLING_REQUIRES_TENANT_NONCE
+
     if server not in POOLING_REQUIRES_TENANT_NONCE:
         return False
     return poolable and "tenant_nonce" not in capabilities
@@ -2323,6 +2394,8 @@ async def _reconnect(
                 return None
             session.note_init_result(json.loads(forward))
         session.reconnects += 1
+        from kiro_crew.metrics.events import MCP_RECONNECTS, emit_counter
+
         emit_counter(MCP_RECONNECTS, {"pool": bool(pool_label)})
         logger.info(
             "stub reconnected to a restarted gateway (%s, reconnect #%d) pool=%s",
@@ -2401,6 +2474,8 @@ def log_fallback(
         # unopenable lock file degrades to not rotating), so the append below
         # always still runs; only a failure of the append itself may drop the
         # record, caught by this function's own handler.
+        from kiro_crew.jsonl_util import rotate_jsonl_at
+
         rotate_jsonl_at(log_path, _FALLBACK_LOG_MAX_BYTES)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
@@ -2437,6 +2512,8 @@ def fallback_counts() -> dict[str, Any]:
     were.
     """
     cutoff = time.time() - _FALLBACK_COUNT_WINDOW_SECS
+    from kiro_crew.jsonl_util import bounded_records
+
     total = 0
     by_server: dict[str, int] = {}
     by_reason: dict[str, int] = {}
@@ -2700,6 +2777,7 @@ def _fallback_target_is_own_control_plane(
     module-level SSL setup) into every third-party fallback that the vetting
     then refuses on its first line anyway.
     """
+
     server_name = str(getattr(args, "server", "") or "")
     if server_name not in KIROCREW_BIN_MCP_SERVERS:
         return False
@@ -2921,6 +2999,7 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
     )
     args = _parse_args(argv)
+    _adopt_read_ceiling(args)
     # build_register_payload -> _build_caller_block -> CallerContext.from_env
     # does a synchronous /proc ancestry walk + file reads (and _binary_version
     # hashes the target binary), so offload the whole cold-start resolution to
@@ -2930,10 +3009,10 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
     payload = await loop.run_in_executor(subprocess_executor(), build_register_payload, args)
 
     try:
-        pool_label = PoolKey.from_register(payload).human_readable()
+        pool_label = format_pool_label(payload)
     except ValueError as exc:
         # Defensive — our own payload should never be malformed.
-        logger.warning("built malformed PoolKey payload: %s", exc)
+        logger.warning("built an unlabelable Register payload: %s", exc)
         pool_label = f"{args.agent}:{args.server}"
 
     stop_event = asyncio.Event()

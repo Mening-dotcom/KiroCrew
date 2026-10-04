@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, replace
 from threading import RLock
 from typing import Any, Literal, Mapping, overload
 
-from kiro_crew.validation import MAX_SHORT_STRING
+from kiro_crew.constants import MAX_SHORT_STRING
 
 EXECUTION_CONTEXT_KEY = "execution_context"
 MEMORY_MODES = ("persistent", "incognito", "temporary")
