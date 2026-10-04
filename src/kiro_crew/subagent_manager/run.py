@@ -6,6 +6,7 @@ import asyncio
 import logging as _logging
 import secrets as _secrets
 import time as _time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..subagent_persistence import (
@@ -14,12 +15,17 @@ from ..subagent_persistence import (
     write_run_agent,
 )
 from ._component import ManagerComponent
+from .admission.types import WINDOW_ENTRY_RECOVERING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ..subagent import (
         _CANCEL_RESUME_PREFIX,
+        _DEDICATED_TOPUP_POLL_SECS,
+        _DEDICATED_TOPUP_WAIT_SECS,
+        _HEADLESS_DENY_REASON,
+        _LOW_FIDELITY_DENY_REASON,
         _ON_DONE_TIMEOUT,
         _RECOVERY_SLOT_WAIT_SECS,
         _RESET_TIMEOUT,
@@ -27,6 +33,8 @@ if TYPE_CHECKING:
         _SYSTEM_PREFIX,
         _TRANSIENT_CONTINUE_MSG,
         _TURN_LIMIT,
+        DENY_CAUSE_POLICY,
+        DENY_CAUSE_SURFACE_POLICY,
         EVENT_AGENT_SWITCHED,
         EVENT_COMPLETE,
         EVENT_PERMISSION_REQUEST,
@@ -53,10 +61,17 @@ if TYPE_CHECKING:
         Stats,
         SubagentInfo,
         _context_groups_of,
+        _cost_bucket,
+        _dedicated_start_price_gb,
         _describe_exception,
+        _host_available_gb_off_loop,
         _redact,
         _resolved_model_of,
         _RunCreditAccounting,
+        _selection_kind,
+        _SharingPlan,
+        _spawn_memory_floor_and_cost,
+        _startup_memory_reserve_gb,
         _subagent_default_effort,
         _subagent_default_model,
         _timeout_context,
@@ -83,8 +98,10 @@ if TYPE_CHECKING:
         join_failures,
         kill_set,
         logger,
+        mark_result_complete,
         name_grant,
         permission_pre_tool_block,
+        platform_compat,
         process_survived_async,
         provider_fallback_active,
         read_tombstone,
@@ -102,6 +119,47 @@ if TYPE_CHECKING:
         with_kill_failure,
         write_result_chunk,
     )
+
+#: Delayed re-reads armed, one after another, while the store cannot answer the
+#: queue depth; the last one that still fails says so at WARNING.
+_QUEUE_DEPTH_RETRIES = 3
+#: Seconds between those re-reads.
+_QUEUE_DEPTH_RETRY_SECS = 10.0
+#: The longest a burst of depth requests may keep discarding reads it overlapped
+#: before the latest read is published anyway (and read again behind it).
+_QUEUE_DEPTH_MAX_WITHHOLD_SECS = 1.0
+#: The burst's clock for that cap (monotonic; a seam for tests).
+_queue_depth_clock = _time.monotonic
+
+
+def _one_wave(batch_ids: set[str]) -> str:
+    """The one wave a frame answers for, or ``""`` when it answers for several."""
+    return next(iter(batch_ids)) if len(batch_ids) == 1 else ""
+
+
+@dataclass(slots=True, eq=False)
+class _PendingDepthEmit:
+    """The one in-flight ``subagent_queued`` emit (a burst) for a parent.
+
+    ``again`` is set by a request the burst's current read does not answer;
+    ``batch_ids`` collects the waves those requests named; ``attempt`` is the
+    retry budget already spent on an unreadable store; ``task`` runs the burst
+    (set right after construction, so it is left out of the repr).
+    """
+
+    batch_ids: set[str]
+    attempt: int
+    again: bool = False
+    task: asyncio.Task[None] = field(init=False, repr=False)
+
+
+@dataclass(slots=True, eq=False)
+class _PendingDepthRetry:
+    """The one armed delayed re-read for a parent whose depth read failed."""
+
+    handle: asyncio.TimerHandle
+    attempt: int
+    batch_ids: set[str]
 
 
 class RunEventCoordinator(ManagerComponent):
@@ -368,6 +426,47 @@ class RunEventCoordinator(ManagerComponent):
         """Get agent info by ID."""
         return self._manager._agents.get(agent_id)
 
+    def is_queued_impl(self, agent_id: str) -> bool:
+        """Whether *agent_id* names a spawn accepted but not yet started.
+
+        A spawn admitted behind the concurrency / adaptive cap -- or deferred by
+        the memory or posture guard, at accept or at drain time -- returns its
+        real id to the caller but has no ``_agents`` entry until it starts. A
+        serial-lock done-probe that read such an id as finished (``_agents``
+        miss) would release the caller's guard and let a duplicate of
+        not-yet-run work be queued. Three places can hold it:
+
+        * the in-memory ``_queue`` (a params dict), while it is windowed;
+        * ``_dispatch_window_ids``, across the pump's pop-to-claim /
+          retained-claim window -- the only record of a popped row that has no
+          durable one (``incognito`` / ``temporary``, or no store at all);
+        * the durable task store, for every durable row: the store's own
+          unstarted-row index (``TaskStore.is_unstarted``), written through by
+          the same commit that moves the row, so every path that leaves a row
+          waiting on disk (the cap's store-only branch, a pressure deferral, a
+          drain-time deferral, the window eviction, a retained claim) is named,
+          and every path that ends one (settle, cancel, boundary, cancel-tree,
+          wait expiry) unnames it, with no bookkeeping of the manager's own to
+          miss a path. The index is in memory: NEVER a SQLite read here, since a
+          done-probe runs on the gateway loop.
+
+        A ``_resume_id`` entry reuses an existing ``_agents`` row, so it is not a
+        fresh queued spawn; an id-less entry has no handle; and an id with a
+        live ``_agents`` row is a run, not a queued spawn, even while its row is
+        claimable on disk (a woken wait lands in ``retry_wait``).
+        """
+        if not agent_id or agent_id in self._manager._agents:
+            return False
+        for params in self._manager._queue:
+            if params.get("_resume_id"):
+                continue
+            if params.get("_preassigned_id", "") == agent_id:
+                return True
+        if agent_id in self._manager._dispatch_window_ids:
+            return True
+        store = getattr(self._manager, "_taskq", None)
+        return store is not None and bool(store.is_unstarted(agent_id))
+
     async def _teardown_run_session_impl(self, info: SubagentInfo, session_key: str) -> None:
         """Release and reset the run's own session (skipped when reaped).
 
@@ -614,7 +713,78 @@ class RunEventCoordinator(ManagerComponent):
                     self._manager._write_tombstone(info, "cancelled")
             logger.info("Subagent %s cancelled", info.id)
         except Exception as exc:
-            if info._reap_started and is_runtime_death(exc):
+            if getattr(exc, "context_overflow", False):
+                # The native session that raised this cannot shrink the envelope
+                # it was already rejected on, so replaying there reproduces the
+                # rejection. A zero-activity first turn on a SHARED runtime is
+                # safe to retry once on a FRESH dedicated runtime, which
+                # rebuilds session and projection state from scratch; that
+                # rebuild is best-effort, not a diagnosis of why the first
+                # envelope was too large. A first attempt that already ran
+                # dedicated is terminal: no transition is evidenced that would
+                # be expected to make a replacement's envelope small enough or
+                # different enough to fit, so another teardown, capacity and
+                # spawn cycle is not justified. Any observed text or tool call
+                # forbids replay, and the one-shot makes a second overflow
+                # terminal.
+                can_rebuild = (
+                    not info._context_overflow_retry_used
+                    and info._session_sharing
+                    and not info.conversation_key
+                    and info.turns == 0
+                    and info.tool_count == 0
+                    and not info.streaming_text
+                    and not info.result
+                    and not info.user_stopped
+                    and not info._reap_started
+                    and not self._manager._shutting_down
+                )
+                if can_rebuild:
+                    info._context_overflow_retry_used = True
+                    info._force_dedicated = True
+                    info._recovering = True
+                    logger.warning(
+                        "Subagent %s startup context overflowed on a shared runtime; "
+                        "retrying once on a fresh dedicated runtime: %s",
+                        info.id,
+                        exc,
+                    )
+                    self._manager._schedule_cancel_recovery(info, reason="context_overflow")
+                else:
+                    if not info.result and info.streaming_text:
+                        info.result = info.streaming_text
+                    detail = _redact(str(exc))[:MAX_ERROR_DETAIL_LEN]
+                    if info._context_overflow_retry_used:
+                        info.error = f"Dedicated-session recovery also overflowed: {detail}"
+                    elif info.tool_count:
+                        # A tool ran: the fresh runtime has no ledger of what it
+                        # changed, so replay could repeat a side effect (the
+                        # same gate the unexpected-cancel arm applies).
+                        info.error = (
+                            "Agent context overflowed after tools executed; it was "
+                            "not replayed because that could repeat side effects. "
+                            f"{detail}"
+                        )
+                    elif info.streaming_text or info.result or info.turns:
+                        # Text, a result or a completed turn without any tool
+                        # call is side-effect-free, exactly as the
+                        # unexpected-cancel arm treats it. Replay is still
+                        # withheld, but only because the work already produced
+                        # is preserved and running the prompt again would
+                        # duplicate it -- not because state changed.
+                        info.error = (
+                            "Agent context overflowed after it had already produced "
+                            "work; that work was preserved and it was not replayed "
+                            "to avoid duplicating it. "
+                            f"{detail}"
+                        )
+                    else:
+                        info.error = detail
+                    info.done = True
+                    Stats().inc_subagent_failed()
+                    self._manager._write_tombstone(info, "error")
+                    logger.warning("Subagent %s context overflow: %s", info.id, exc)
+            elif info._reap_started and is_runtime_death(exc):
                 # The ECHO of our own teardown, not a fault of the run.
                 # ``_force_reap`` resets the run's session (or shuts its shared
                 # handle) BEFORE it cancels this task, so the in-flight stream
@@ -812,29 +982,48 @@ class RunEventCoordinator(ManagerComponent):
             except Exception:
                 logger.warning("on_event failed for %s/%s", etype, info.id, exc_info=True)
 
-    def _queued_depth_impl(self, parent_session_key: str, *, for_dispatch: bool = False) -> int:
+    def _queued_depth_impl(self, parent_session_key: str) -> int:
         """Number of spawns currently queued for *parent_session_key* (waiting
         behind the concurrency cap / stagger gate, not yet started).
 
-        *for_dispatch* is the chip's reading: a row the pump has popped and is
-        about to claim is not shown as waiting. Every other caller -- the
-        reset-deferral guards above all -- keeps the default and counts it, since
-        it is still this parent's accepted work until the claim lands."""
-        in_window = sum(
-            1 for q in self._manager._queue if q.get("parent_session_key", "") == parent_session_key
-        )
+        A row the pump has popped and is about to claim still counts: it is
+        this parent's accepted work until the claim lands, which is what the
+        reset-deferral guards ask. The chip's reading leaves it out
+        (:meth:`_read_queue_depth`)."""
+        in_window = self._window_depth(parent_session_key)
         # Rows queued in the store but outside the in-memory window are still
         # this parent's waiting work; the chip and the reset-deferral guards
         # must see them.
-        return in_window + self._manager._admission.taskq_overflow(
-            parent_session_key, for_dispatch=for_dispatch
+        return in_window + self._manager._admission.taskq_overflow(parent_session_key)
+
+    def _window_depth(self, parent_session_key: str, *, include_recovering: bool = True) -> int:
+        """Unstarted spawns *parent_session_key* holds in the in-memory window.
+
+        A ``_resume_id`` entry is not one: it is a RESIDENT run asking for its
+        lane slot back, already counted where running runs are, and it leaves
+        the window without a depth emit (withdrawn by its run's ``finally``, or
+        popped by the pump once that run has ended). Counting it here would
+        leave "1 waiting to start" on the card for work that has started. An
+        approval-released start (``_startup_release``) has not started its run
+        yet, so it is still waiting and still counts.
+
+        *include_recovering* False is the chip's reading: it also leaves out an
+        entry hydrated from a ``recovering`` row (``WINDOW_ENTRY_RECOVERING``),
+        a run being rebuilt after a restart, exactly as its store half does.
+        The reset-deferral guards keep it: it is still work this parent is owed.
+        """
+        resident = self._manager._admission.entry_is_resident_resume
+        return sum(
+            1
+            for q in self._manager._queue
+            if q.get("parent_session_key", "") == parent_session_key
+            and not resident(q)
+            and (include_recovering or not q.get(WINDOW_ENTRY_RECOVERING))
         )
 
     async def _queued_depth_async_impl(self, parent_session_key: str) -> int:
         """:meth:`_queued_depth_impl` with its store count on the writer thread."""
-        in_window = sum(
-            1 for q in self._manager._queue if q.get("parent_session_key", "") == parent_session_key
-        )
+        in_window = self._window_depth(parent_session_key)
         overflow = await self._manager._admission.taskq_overflow_async(parent_session_key)
         return in_window + overflow
 
@@ -858,7 +1047,13 @@ class RunEventCoordinator(ManagerComponent):
         """
         return await self._manager._queued_depth_async(parent_session_key)
 
-    def _has_live_parent_run_task(self, parent_session_key: str) -> bool:
+    def _in_window_count(self, parent_session_key: str) -> int:
+        """This parent's spawns in the in-memory dispatch window."""
+        return sum(
+            1 for q in self._manager._queue if q.get("parent_session_key", "") == parent_session_key
+        )
+
+    def _has_live_parent_run_task(self, parent_session_key: str, *, exclude_id: str = "") -> bool:
         """Whether a parent-owned run can still register its terminal report.
 
         ``_run_inner`` publishes ``info.done`` before ``_run_impl`` resumes its
@@ -868,7 +1063,7 @@ class RunEventCoordinator(ManagerComponent):
         registered in ``_report_owners`` and the delivery barrier owns the wait.
         """
         for info in self._manager._agents.values():
-            if info.parent_session_key != parent_session_key:
+            if info.parent_session_key != parent_session_key or info.id == exclude_id:
                 continue
             task = self._manager._tasks.get(info.id)
             if task is not None and not task.done():
@@ -883,6 +1078,30 @@ class RunEventCoordinator(ManagerComponent):
             not task.done() and parents.get(run_id) == parent_session_key
             for run_id, task in watchers.items()
         )
+
+    def has_in_memory_pending_work_for_impl(
+        self, parent_session_key: str, *, exclude_id: str = ""
+    ) -> bool:
+        """The terms of :meth:`has_pending_work_for_impl` that need no store read.
+
+        A spawn in the dispatch window, a run whose terminal report is still
+        waiting on its teardown (*exclude_id* leaves out the run asking, whose
+        own task is live while its completion is delivered), and a live
+        follow-up watcher. With ``running_agents_for`` this is everything the
+        synthesis ARM consults: the store half is the fire gate's, so the
+        delivery path never waits on the task store's writer.
+        """
+        return (
+            self._in_window_count(parent_session_key) > 0
+            or self._has_live_parent_run_task(parent_session_key, exclude_id=exclude_id)
+            or self._has_live_parent_followup_watcher(parent_session_key)
+        )
+
+    async def queued_count_or_none_async_impl(self, parent_session_key: str) -> int | None:
+        """:meth:`queued_count_for_async_impl`, None when the store could not be read."""
+        in_window = self._in_window_count(parent_session_key)
+        overflow = await self._manager._admission.taskq_overflow_or_none_async(parent_session_key)
+        return None if overflow is None else in_window + overflow
 
     def has_pending_work_for_impl(self, parent_session_key: str) -> bool:
         """True while a parent has queued, running, or finalizing sub-agents.
@@ -923,79 +1142,176 @@ class RunEventCoordinator(ManagerComponent):
         *,
         wait: dict[str, Any] | None = None,
     ) -> None:
-        """Emit the current queued depth for *parent_session_key* as a
-        ``subagent_queued`` lifecycle event.
+        """Publish *parent_session_key*'s queued depth as a ``subagent_queued``
+        lifecycle event: the "N waiting to start" count on the parent's card.
 
-        The chip is otherwise driven only by agents that have actually started
-        (``subagent_spawn``), so agents sitting behind the concurrency cap /
-        stagger gate are invisible and the chip can appear late or flicker.
-        This advisory count lets the UI show "N waiting to start" the moment a
-        wave is accepted, and stay mounted across the staggered ramp.
-
-        *wait* is the gate's label for WHY the rows wait (``reason`` one of the
-        ``QUEUED_REASON_*`` kinds, plus ``available_gb`` / ``required_gb`` for the
-        memory kinds). The gate passes it on the emit that follows its verdict;
-        it is remembered per parent and rides on every later emit for that
-        parent -- the drain's, the claim path's (once a claimed row registers, so
-        a started row leaves the count) and the cancel path's re-emits carry no
-        verdict of their own -- until the parent's depth reaches 0, when it is
-        forgotten and the event is once again the bare ``{"queued": 0}``. Absent
-        on an event exactly when nothing was labelled, so a client reading only
-        the count is unaffected and one reading the reason never sees a stale
-        one.
-
-        Fire-and-forget: scheduled on the running loop; a no-op in sync/test
-        contexts without a loop (the count is advisory UI signal, not state).
+        *wait* is the gate's label for WHY the rows wait (a ``QUEUED_REASON_*``
+        ``reason``, plus ``available_gb`` / ``required_gb`` for the memory
+        kinds; ``memory_pressure`` carries no figures). It is recorded per parent with the request and rides on every
+        later non-zero frame for that parent until a depth-0 read that no
+        request overlapped forgets it; an overlapped 0 read is published bare
+        and keeps the label, since the overlapping request may have written it.
+        The request is coalesced per parent into a burst whose last frame is
+        read after its last request; a store that cannot be read publishes
+        nothing and is re-read later. The mechanics are specified in
+        ``subagent.md`` (the ``subagent_queued`` paragraph). Fire-and-forget,
+        and a no-op without a running loop: the count is an advisory UI signal.
         """
-        manager = self._manager
         if wait is not None:
-            manager._queue_wait[parent_session_key] = dict(wait)
+            self._manager._queue_wait[parent_session_key] = dict(wait)
+        self._request_queue_depth(parent_session_key, {batch_id} if batch_id else set())
+
+    def _live_depth_emit(self, parent_session_key: str) -> _PendingDepthEmit | None:
+        """The parent's burst while its task still runs (its entry is dropped
+        a loop turn after the task ends, by the done-callback)."""
+        emit = self._manager._queue_depth_emits.get(parent_session_key)
+        return emit if emit is not None and not emit.task.done() else None
+
+    def _request_queue_depth(
+        self, parent_session_key: str, batch_ids: set[str], attempt: int = 0
+    ) -> None:
+        """Join the parent's burst, or start one."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # no running loop (sync/test context) — advisory event skipped
-        info = SubagentInfo(
-            id="_queue",
-            task="",
-            parent_session_key=parent_session_key,
-            batch_id=batch_id,
-        )
-
-        def _extra(depth: int) -> dict[str, Any]:
-            if depth <= 0:
-                manager._queue_wait.pop(parent_session_key, None)
-                return {"queued": depth}
-            return {"queued": depth, **manager._queue_wait.get(parent_session_key, {})}
-
-        admission = manager._admission
-        store = admission.taskq_store()
-        if store is None or not type(admission).pump_off_loop:
-            depth = manager._queued_depth(parent_session_key, for_dispatch=True)
-            loop.create_task(manager._fire_event("subagent_queued", info, _extra(depth)))
+        manager = self._manager
+        emit = self._live_depth_emit(parent_session_key)
+        if emit is not None:
+            emit.again = True
+            emit.batch_ids |= batch_ids
+            # A fresh request restores the retry budget a failing burst spent.
+            emit.attempt = min(emit.attempt, attempt)
             return
-        # The store half of the count (rows outside the window) runs on the
-        # writer thread; the window half and the emit stay on the loop.
-        from kiro_crew.taskq import KIND_SUBAGENT
+        emit = _PendingDepthEmit(set(batch_ids), attempt)
+        emit.task = loop.create_task(self._queue_depth_burst(parent_session_key, emit))
+        manager._queue_depth_emits[parent_session_key] = emit
 
-        in_window = sum(
-            1 for q in manager._queue if q.get("parent_session_key", "") == parent_session_key
-        )
-        exclude_ids = admission.taskq_dispatch_excluded_ids()
-        live_store = store
+        def _forget(_done: asyncio.Task[None]) -> None:
+            if manager._queue_depth_emits.get(parent_session_key) is emit:
+                del manager._queue_depth_emits[parent_session_key]
 
-        async def _emit() -> None:
-            try:
-                overflow = await live_store.run(
-                    live_store.count_pending,
-                    KIND_SUBAGENT,
-                    exclude_ids=exclude_ids,
-                    session_key=parent_session_key,
+        # Dropped by the task's own completion, so a burst cancelled before
+        # its first step cannot leave later requests waiting on it.
+        emit.task.add_done_callback(_forget)
+
+    async def _queue_depth_burst(self, parent_session_key: str, emit: _PendingDepthEmit) -> None:
+        """Read until no request is left unanswered, publishing as it goes.
+
+        A read answers every request made before it started: it is queued on
+        the store's writer thread behind every write those requests followed
+        (a posted write is queued by the call that posts it), and it takes the
+        window and the exclusions as they stand then. A request made during a
+        read is not answered by it, so the read is discarded and the burst
+        reads again -- unless frames have been withheld for
+        :data:`_QUEUE_DEPTH_MAX_WITHHOLD_SECS`, when it is published first.
+        """
+        since = _queue_depth_clock()
+        while True:
+            emit.again = False
+            answering, emit.batch_ids = emit.batch_ids, set()
+            depth = await self._read_queue_depth(parent_session_key)
+            if emit.again and _queue_depth_clock() - since < _QUEUE_DEPTH_MAX_WITHHOLD_SECS:
+                emit.batch_ids |= answering
+                continue
+            overlapped = emit.again
+            if depth is None:
+                self._arm_queue_depth_retry(parent_session_key, emit.attempt, answering)
+            else:
+                self._disarm_queue_depth_retry(parent_session_key)
+                await self._publish_queue_depth(
+                    parent_session_key, depth, _one_wave(answering), forget_label=not overlapped
                 )
-            except Exception:
-                overflow = 0
-            await manager._fire_event("subagent_queued", info, _extra(in_window + int(overflow)))
+            if not emit.again:
+                return
+            # Asked during the read (past the withhold cap) or while the frame
+            # was being sent: not answered yet.
+            since = _queue_depth_clock()
 
-        loop.create_task(_emit())
+    async def _publish_queue_depth(
+        self, parent_session_key: str, depth: int, batch_id: str, *, forget_label: bool
+    ) -> None:
+        # Imported here: this helper is not an ``_impl``, so it keeps this
+        # module's namespace, where the facade's names are only type hints.
+        from ..subagent import SubagentInfo
+
+        manager = self._manager
+        if depth <= 0:
+            # Not on a read a request overlapped: that request may be the
+            # verdict which wrote the label, for a row the read predates.
+            if forget_label:
+                manager._queue_wait.pop(parent_session_key, None)
+            extra: dict[str, Any] = {"queued": depth}
+        else:
+            extra = {"queued": depth, **manager._queue_wait.get(parent_session_key, {})}
+        info = SubagentInfo(
+            id="_queue", task="", parent_session_key=parent_session_key, batch_id=batch_id
+        )
+        await manager._fire_event("subagent_queued", info, extra)
+
+    def _arm_queue_depth_retry(
+        self, parent_session_key: str, attempt: int, batch_ids: set[str]
+    ) -> None:
+        """Arm the parent's one delayed re-read after a read the store could
+        not answer: nothing else may ask again once the burst that asked is
+        over, so without it a card whose rows are really stopped during a
+        store lock keeps its old count until a reconnect. Bounded; an already
+        armed one is kept, with the fuller of the two budgets."""
+        from ..subagent import logger
+
+        manager = self._manager
+        if manager._shutting_down:
+            return
+        armed = manager._queue_depth_retries.get(parent_session_key)
+        if armed is not None:
+            armed.attempt = min(armed.attempt, attempt + 1)
+            armed.batch_ids |= batch_ids
+            return
+        if attempt >= _QUEUE_DEPTH_RETRIES:
+            logger.warning(
+                "queue depth for %s unreadable after %d retries; its card keeps its last count",
+                parent_session_key,
+                attempt,
+            )
+            return
+        handle = asyncio.get_running_loop().call_later(
+            _QUEUE_DEPTH_RETRY_SECS, self._fire_queue_depth_retry, parent_session_key
+        )
+        manager._queue_depth_retries[parent_session_key] = _PendingDepthRetry(
+            handle, attempt + 1, set(batch_ids)
+        )
+
+    def _fire_queue_depth_retry(self, parent_session_key: str) -> None:
+        manager = self._manager
+        retry = manager._queue_depth_retries.pop(parent_session_key, None)
+        if retry is None or manager._shutting_down:
+            return
+        self._request_queue_depth(parent_session_key, retry.batch_ids, retry.attempt)
+
+    def _disarm_queue_depth_retry(self, parent_session_key: str) -> None:
+        """A frame was published: the parent's armed re-read has been answered.
+
+        Cancelled while still registered, then dropped: the cancel chokepoint
+        recognizes a depth-retry timer by its entry in ``_queue_depth_retries``,
+        so popping first would log a false missing-marker ERROR."""
+        manager = self._manager
+        retry = manager._queue_depth_retries.get(parent_session_key)
+        if retry is not None:
+            manager._cancel_task_intentionally(retry.handle, reason="queue depth answered")
+            manager._queue_depth_retries.pop(parent_session_key, None)
+
+    async def _read_queue_depth(self, parent_session_key: str) -> int | None:
+        """The chip's depth now, or ``None`` when the store cannot say.
+
+        The window half (:meth:`_window_depth`) is taken on the loop
+        immediately before the store half snapshots its exclusion set, so a
+        row the refill moves into the window during the read is counted once
+        (in the store: the snapshot did not exclude it) and one the pump pops
+        is counted once (in the window half).
+        """
+        in_window = self._window_depth(parent_session_key, include_recovering=False)
+        overflow = await self._manager._admission.taskq_chip_overflow_async(parent_session_key)
+        return None if overflow is None else in_window + overflow
 
     def _warn_unusable_mcp_servers(self, info: SubagentInfo, client: LLMProvider) -> str:
         """Log ONE warning naming the MCP servers this run's session cannot use,
@@ -1115,7 +1431,14 @@ class RunEventCoordinator(ManagerComponent):
         # an arbitrary spawn-approval wait). Must be the first statement.
         info._exec_started = time.time()
         info._first_stream_started = None
+        info._first_stream_mono = None
         info._startup_cotenant_frames = 0
+        # The paused part of the clock belongs to THIS attempt: a recovery respawn
+        # re-runs the same info, and a queue wait the previous attempt accumulated
+        # (or a mark it was cancelled inside) would be subtracted from a clock that
+        # never paid it -- blinding the watchdog, or spending the saturation cap.
+        info._start_queue_wait_ms = 0.0
+        info._gate_wait_started = None
         # The durable row stays ``starting`` until this run's OWN turn produces
         # its first stream event addressed to its session
         # (``ensure_running_marked`` in the stream loop below):
@@ -1276,7 +1599,7 @@ class RunEventCoordinator(ManagerComponent):
             ),
         )
         agent = info.agent or execution.template_id
-        kind = "template" if info.agent else execution.selection_kind
+        kind = _selection_kind(info)
         if info.crew or execution.member_id or (not info.agent and agent):
             policy_agent = info.crew or (execution.selection_name if kind == "member" else agent)
             denial = await asyncio.to_thread(
@@ -1316,7 +1639,11 @@ class RunEventCoordinator(ManagerComponent):
         # configured sub-agent role model (agent.role_models['subagent']). When
         # that role is unpinned the helper returns "" so we omit the kwarg and
         # keep deferring to the provider's configured default, exactly as before.
-        eff_model = info.model or _subagent_default_model()
+        # The one sharing decision (``_sharing_plan``), which admission also read
+        # to price this start: template execution, not ``keep``, the eligibility
+        # predicate, and no model / reasoning-effort pin.
+        plan = self._manager._sharing_plan(info)
+        eff_model = plan.eff_model
         # Record the EFFECTIVE pin (per-spawn OR the role_models['subagent']
         # config pin, via ``_subagent_default_model()``) as the requested side of
         # the downgrade comparison — keying off the bare per-spawn ``model`` would
@@ -1330,7 +1657,7 @@ class RunEventCoordinator(ManagerComponent):
         # Sub-agent reasoning effort (per-call override -> role_efforts['subagent']
         # -> chat default). Passed as an override so it wins over the factory's
         # agent-derived default; "" leaves it to that default.
-        eff_effort = info.reasoning_effort or _subagent_default_effort()
+        eff_effort = plan.eff_effort
         if eff_effort:
             extra_kwargs["reasoning_effort_override"] = eff_effort
         if info.bare:
@@ -1379,17 +1706,7 @@ class RunEventCoordinator(ManagerComponent):
         if info.keep:
             self._manager._sessions.mark_continuable(session_key)
             self._manager._conversations[session_key] = time.time()
-        use_session_sharing = (
-            kind == "template" and not info.keep and self._manager._should_use_session_sharing(info)
-        )
-        # A per-spawn or per-role model / reasoning-effort override cannot be
-        # applied to the parent's already-started shared runtime (it was spawned
-        # with the parent's model and cannot switch model per session). Force the
-        # dedicated process path so the override in extra_kwargs actually reaches
-        # get_or_create -> the provider factory; otherwise a configured sub-agent
-        # model/effort would silently no-op on the default (session-sharing) path.
-        if eff_model or eff_effort:
-            use_session_sharing = False
+        use_session_sharing = plan.shared
         if use_session_sharing:
             # Local import: run.py's ``*_impl`` bodies resolve globals through
             # ``kiro_crew.subagent``, which does not export this name.
@@ -1434,6 +1751,9 @@ class RunEventCoordinator(ManagerComponent):
                 info._session_sharing = False
                 info._shared_provider = None
                 use_session_sharing = False
+                # Admitted at the shared price; the process this launches was
+                # never reserved. Top up (and re-check the floor) first.
+                await self._manager._ensure_dedicated_start_priced(info)
 
                 def _fallback_claim():
                     return self._manager._sessions.get_or_create(
@@ -1477,6 +1797,16 @@ class RunEventCoordinator(ManagerComponent):
             # A kept KAS session whose registered batch auto-approves what a
             # PreToolUse hook now covers is reset first, so the claim re-projects.
             await invalidate_stale_kas_session(self._manager._sessions, session_key, agent)
+            # Admission may have priced this start shared and the decision
+            # turned dedicated since (parent gone, sharing off, a role pin set
+            # while it waited): reserve the process before launching it.
+            await self._manager._ensure_dedicated_start_priced(info)
+            # This arm owns its process: a flag an earlier shared attempt of the
+            # run left (a cancel-recovery respawn) would hand this process's
+            # teardown to the shared arm. The old attempt's teardown, which read
+            # it, has finished before this one runs.
+            info._session_sharing = False
+            info._shared_provider = None
 
             def _claim():
                 return self._manager._sessions.get_or_create(
@@ -1775,6 +2105,8 @@ class RunEventCoordinator(ManagerComponent):
         # On such a backend PreToolUse hooks gate each permission request below;
         # the KAS projection turns every call they cover into one.
         _spec = await turn_spec_hooks(client, agent)
+        # Set when the stream ends on a generate failure after real output.
+        _kept_after_generate_failure = False
 
         async def _stream_with_transient_retry():
             """Yield stream events, retrying transient backend errors.
@@ -1911,6 +2243,19 @@ class RunEventCoordinator(ManagerComponent):
                     # re-run it (duplicate writes/messages). Only a turn with
                     # zero observed activity resends the original prompt.
                     _had_activity = bool(result_text) or turns > 0 or info.tool_count > 0
+                    # The one continue is spent and the backend still fails to
+                    # generate after real output: end the stream and keep that
+                    # output (flagged below) instead of failing a run that answered.
+                    if (
+                        post_activity_attempts >= 1
+                        # A bare [OPTIONS: ...] tag is stripped later, leaving nothing.
+                        and extract_options(result_text)[0].strip()
+                        and "failed to generate a response" in str(exc).lower()
+                    ):
+                        nonlocal _kept_after_generate_failure
+                        _kept_after_generate_failure = True
+                        logger.warning("Subagent %s: kept output after a transient error", info.id)
+                        return
                     # A failure an adapter recognises as a DEPENDENCY condition
                     # (provider throttle, 5xx, connection loss: taskq.dependency)
                     # is not retried here: the run reports it to the per-scope
@@ -2132,12 +2477,16 @@ class RunEventCoordinator(ManagerComponent):
                         # "requests are answered on every queue path"
                         # contract this PR establishes applies to limit
                         # bails too.
+                        # Not a verdict on the call: the run bails here and its
+                        # turn ends, so there is no continuing turn for a deny
+                        # notice to correct.
                         try:
                             await self._manager._reject_and_log(
                                 client,
                                 event.request_id,
                                 session_key,
                                 event,
+                                cause=None,
                                 error="child_escalation_limit",
                             )
                         except Exception:
@@ -2184,9 +2533,16 @@ class RunEventCoordinator(ManagerComponent):
                     # Same contract as the child_escalation_limit bail: the
                     # triggering request is already dequeued and must be
                     # answered before this loop exits, or its oneshot strands.
+                    # Not a verdict on the call: the run bails here (no
+                    # continuing turn for a notice to correct).
                     try:
                         await self._manager._reject_and_log(
-                            client, event.request_id, session_key, event, error="turn_limit"
+                            client,
+                            event.request_id,
+                            session_key,
+                            event,
+                            cause=None,
+                            error="turn_limit",
                         )
                     except Exception:
                         logger.exception("failed to reject turn-limit trigger request")
@@ -2221,11 +2577,16 @@ class RunEventCoordinator(ManagerComponent):
                     logger.warning(
                         "Subagent %s PreToolUse hook blocked a tool: %s", info.id, _spec_block
                     )
+                    # A PreToolUse gate verdict on the call itself (a delivered
+                    # deny, or a gate with no verdict, which blocks): the policy
+                    # cause, with the gate's own reason.
                     await self._manager._reject_and_log(
                         client,
                         event.request_id,
                         session_key,
                         event,
+                        cause=DENY_CAUSE_POLICY,
+                        reason=_spec_block,
                         error="hook_deny",
                         metadata={"subagent_id": info.id, "reason": "spec_hook"},
                     )
@@ -2238,8 +2599,17 @@ class RunEventCoordinator(ManagerComponent):
                     **hook_gate_kwargs(event),
                 )
                 if tool_result.action == TOOL_DENY:
+                    # The hook judged the call itself: a policy verdict, with
+                    # the hook's own reason so the class remediation can key
+                    # off it.
                     await self._manager._reject_and_log(
-                        client, event.request_id, session_key, event, error="hook_deny"
+                        client,
+                        event.request_id,
+                        session_key,
+                        event,
+                        cause=DENY_CAUSE_POLICY,
+                        reason=tool_result.reason or "",
+                        error="hook_deny",
                     )
                     continue
                 if event.child_low_fidelity:
@@ -2351,19 +2721,28 @@ class RunEventCoordinator(ManagerComponent):
                                 info=info,
                             )
                         else:
+                            # The approver said no: kiro-cli's "user denied"
+                            # is the truth here, so no notice.
                             await self._manager._reject_and_log(
                                 client,
                                 event.request_id,
                                 session_key,
                                 event,
+                                cause=None,
                                 error="child_interactive_rejected",
                             )
                         continue
+                    # The SURFACE fails closed: nothing here can judge a
+                    # request with no security context and no approver is
+                    # attached to ask, so the notice says what this run can
+                    # and cannot do rather than offer a sanctioned alternative.
                     await self._manager._reject_and_log(
                         client,
                         event.request_id,
                         session_key,
                         event,
+                        cause=DENY_CAUSE_SURFACE_POLICY,
+                        reason=_LOW_FIDELITY_DENY_REASON,
                         error="child_origin_no_command_context",
                     )
                     continue
@@ -2422,11 +2801,14 @@ class RunEventCoordinator(ManagerComponent):
                         info._awaiting_approval = False
                         info.last_activity = time.time()
                     if not approved:
+                        # The per-subagent approver said no: kiro-cli's "user
+                        # denied" is the truth here, so no notice.
                         await self._manager._reject_and_log(
                             client,
                             event.request_id,
                             session_key,
                             event,
+                            cause=None,
                             metadata={"subagent_id": info.id, "reason": "factory_rejected"},
                         )
                         continue
@@ -2448,8 +2830,11 @@ class RunEventCoordinator(ManagerComponent):
                         info._awaiting_approval = False
                         info.last_activity = time.time()
                     if not approved:
+                        # The gateway-level approver said no: kiro-cli's "user
+                        # denied" is the truth here, so no notice --
+                        # interactive_rejected.
                         await self._manager._reject_and_log(
-                            client, event.request_id, session_key, event
+                            client, event.request_id, session_key, event, cause=None
                         )
                         continue
                     await self._manager._approve_and_log(
@@ -2461,12 +2846,18 @@ class RunEventCoordinator(ManagerComponent):
                         info=info,
                     )
                 else:
-                    # No callback, no auto policy — deny by default
+                    # No callback, no auto policy — deny by default. The
+                    # SURFACE refuses the call, not a rule about the call
+                    # itself: nothing here can approve it, so the notice names
+                    # what this run permits instead of a sanctioned alternative
+                    # the model should run.
                     await self._manager._reject_and_log(
                         client,
                         event.request_id,
                         session_key,
                         event,
+                        cause=DENY_CAUSE_SURFACE_POLICY,
+                        reason=_HEADLESS_DENY_REASON,
                         metadata={"subagent_id": info.id, "reason": "no_policy_deny_default"},
                     )
                     continue
@@ -2616,14 +3007,43 @@ class RunEventCoordinator(ManagerComponent):
         # would mark the fragment complete. The explicit ``_complete_event``
         # check is what tells those two apart. Recorded here because this is the
         # only point that knows. Written after cap_result_file so the flag
-        # describes the file as it will be read. A restart landing between the
-        # complete event and this write leaves a finished result unflagged — it
-        # under-claims, which is the safe direction for a signal whose whole
-        # purpose is not to overstate.
+        # describes the file as it will be read.
+        _result_complete = _complete_event is not None and _stop.is_success
+        # Drop the DURABLE completion marker before the state write below. The
+        # ``result_complete`` flag lives in state.json, written in the separate
+        # step that follows; a restart landing in that gap left a finished
+        # answer on disk with the flag never written, and the orphan reconciler
+        # read the whole answer as a fragment "cut off mid-turn". The marker
+        # lands in the SAME step that finalized result.txt (right after
+        # cap_result_file), so the completeness signal cannot lag the bytes it
+        # describes across a crash. The reconciler treats either signal as proof.
+        # Off the loop like the sibling state write below: a network-backed data
+        # home makes the mkdir + temp-file + rename synchronous filesystem work,
+        # which must not run on the gateway's single event loop. Shielded AND
+        # drained on cancellation for the same reason ``_write_state_off_loop``
+        # is: a cancel arriving during the rename must not return control to a
+        # terminal tombstone arm while the marker is still half-written, or that
+        # arm's ``tombstone_recovery_action`` reads a finished answer as a
+        # fragment. Holding the cancel until the worker settles lands the rename
+        # first, so the marker and the result bytes it certifies agree on disk.
+        if _result_complete:
+            _marker_writer = asyncio.ensure_future(asyncio.to_thread(mark_result_complete, info.id))
+            try:
+                await asyncio.shield(_marker_writer)
+            except asyncio.CancelledError:
+                try:
+                    await _marker_writer
+                except BaseException:
+                    pass
+                raise
+        # A restart landing between the complete event and the state write below
+        # still finds the durable marker above, so a finished result stays a
+        # whole result — while a run that never completed writes neither, which
+        # is the safe direction for a signal whose purpose is not to overstate.
         await self._manager._write_state_off_loop(
             info,
             "result complete",
-            result_complete=_complete_event is not None and _stop.is_success,
+            result_complete=_result_complete,
         )
         # Flag whether the completion-event copy will drop content, so the gateway
         # emits a summary + result_path pointer (read on demand) instead of a lossy
@@ -2637,6 +3057,16 @@ class RunEventCoordinator(ManagerComponent):
             self._manager._completion_keep,
             self._manager._completion_keep_chars,
         )
+        if _kept_after_generate_failure:
+            # Added AFTER the keep cap, so no keep mode can cut it off.
+            _warn = (
+                "_Warning: the backend failed to generate a final response; "
+                "this is the output streamed before that._"
+            )
+            info.result = f"{_warn}\n\n{info.result}"
+            info.partial = True
+            # result.txt is what spawn_status / spawn_run read for a done run.
+            write_result_chunk(info.id, f"\n\n{_warn}\n")
         evict_completed_agents(self._manager._agents)
 
         # ── Per-turn usage row: attribute subagent spend. ──
@@ -3279,6 +3709,8 @@ class RunEventCoordinator(ManagerComponent):
         is ACP/kiro-backed (not CC); not a CC-specific spawn (model/allowed_tools/bare).
         """
         # Member capability and native prompt documents are prepared at launch.
+        if info._force_dedicated:
+            return False
         if info.execution_context is not None and info.execution_context.member_id is not None:
             return False
         try:
@@ -3293,62 +3725,232 @@ class RunEventCoordinator(ManagerComponent):
             return False
         return self._manager._sessions.is_session_sharing_eligible(info.parent_session_key)
 
-    def _gate_exit_reset_impl(self, info: SubagentInfo) -> "Callable[[float], None]":
-        """The ``on_gate_acquired`` callback for *info*'s ``session/new``.
+    def _sharing_plan_impl(self, info: SubagentInfo, *, cfg: Any = None) -> _SharingPlan:
+        """Decide how *info* will start: the ONE decision behind both callers.
 
-        Gate EXIT is the start of this run's start budget: the startup watchdog
-        (``_exec_started``) and the stall clock must not count the time spent
-        queued behind other ``session/new`` requests at the ``SessionStartGate``
-        -- that wait is admission's cost, not this start's. ONE definition for
-        both start paths: ``_create_shared_session`` hands it to the parent
-        runtime's ``create_session`` directly, and ``_run_inner`` threads it
-        through ``get_or_create`` -> provider factory -> ``AcpProvider`` to the
-        dedicated process's own ``create_session``. Without the reset on the
-        dedicated path -- every ``model`` / ``reasoning_effort`` spawn -- a wide
-        fan-out's gate queue time would be charged to the fixed startup deadline
-        and healthy starts reaped as failed. The reset fires only once the
-        permit is HELD; its companion :meth:`_gate_wait_mark_impl` marks gate
-        ENTRY, and between the two the watchdog reads the clock as frozen. So a
-        start wedged before the gate keeps its original, running clock and is
-        caught; one queued at the gate is not charged for the queue; and one
-        wedged after the permit is caught at the base deadline from gate exit.
+        ``_run_inner`` takes the shared-runtime arm exactly when ``shared`` is
+        True, and the admission gate prices the start from the same answer, so
+        the price can never follow a copy of the rule that drifted. Shared needs
+        template execution, no ``keep`` (a kept or continued run owns its
+        process), :meth:`_should_use_session_sharing_impl`, and no per-spawn or
+        per-role model / reasoning-effort pin: a pin cannot be applied to the
+        parent's already-started runtime, so it forces the dedicated process
+        where the override reaches the provider factory. Eligibility is the
+        backend's opt-in membership (``is_session_sharing_eligible``); nothing
+        here names a harness. *cfg* is a config the caller already loaded.
         """
+        kind = _selection_kind(info)
+        eff_model = info.model or _subagent_default_model(cfg)
+        eff_effort = info.reasoning_effort or _subagent_default_effort(cfg)
+        # Not coerced: the eligibility answer is passed through as the run has
+        # always read it, and admission prices a start shared only on a real
+        # ``True``, so an answer it cannot trust is priced dedicated.
+        shared = (
+            kind == "template"
+            and not info.keep
+            and not (eff_model or eff_effort)
+            and self._manager._should_use_session_sharing(info)
+        )
+        return _SharingPlan(eff_model, eff_effort, shared)
 
-        def _on_gate_acquired(queue_wait_ms: float) -> None:
+    async def _ensure_dedicated_start_priced_impl(self, info: SubagentInfo) -> None:
+        """Reserve a dedicated process for a start admitted at the shared price.
+
+        Admission reserved the shared price (:func:`_shared_start_price_gb`) for
+        a start predicted to share its parent's runtime. When the start takes the
+        dedicated arm instead -- the shared runtime was unavailable, or the
+        decision changed while the row waited -- the process it is about to
+        launch costs the dedicated projection, which nobody reserved. Raise the
+        row's price first, so every later admission charges it, then re-check
+        the floor with this row at that price. Below the floor the start waits
+        here with its start clock frozen (it holds its slot, so it is still
+        counted), one such start at a time so waiters do not each count the
+        others and all hold, for at most ``_DEDICATED_TOPUP_WAIT_SECS``; past
+        that it starts anyway and says so. A root start also waits here while the
+        macOS kernel memory-pressure hold applies (subagent.md, *macOS: the
+        kernel memory-pressure hold*), under the same bound: it is an admitted
+        run already starting, not a held start, so it is not ended. A capacity verdict
+        never fails a run that was admitted. A row not admitted at the shared
+        price returns at once;
+        the flag that marks it clears only once the check passed or the wait ran
+        out, so a cancel during the wait leaves the respawn to re-check.
+        """
+        if not info._start_priced_shared:
+            return
+        floor, cost = _spawn_memory_floor_and_cost()
+        settled = self._manager._learned_settled_gb
+        info._start_price_gb = _dedicated_start_price_gb(
+            cost, settled, _cost_bucket(info.agent, info.execution_context)
+        )
+        if floor <= 0:
+            info._start_priced_shared = False
+            return
+        started = time.monotonic()
+        deadline = started + _DEDICATED_TOPUP_WAIT_SECS
+        self._manager._gate_wait_mark(info)()
+        lock = self._manager._dedicated_topup_lock
+        held = False
+        try:
+            info._topup_waiting = True
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=_DEDICATED_TOPUP_WAIT_SECS)
+                held = True
+            except asyncio.TimeoutError:
+                pass
+            info._topup_waiting = False
+
+            def _need() -> float:
+                # Rows still waiting for their turn have launched nothing; each
+                # is counted once it holds the turn, against what went first.
+                rows = list(self._manager._agents.values())
+                queued_behind = sum(a._topup_waiting and not a._slot_released for a in rows)
+                return floor + _startup_memory_reserve_gb(
+                    [a for a in rows if not a._topup_waiting],
+                    running_count=self._manager._running_count - queued_behind,
+                    cost_gb=cost,
+                    next_start_gb=0.0,
+                    settled_gb=settled,
+                    claim_prices=[price for price, _ in self._manager._claim_prices.values()],
+                )
+
+            # A nested child is never held by the kernel pressure hold; this row
+            # itself does not count as a runtime of ours while it waits, since it
+            # is still flagged shared-priced.
+            root = not self._manager._admission.entry_is_child(
+                {"parent_session_key": info.parent_session_key}
+            )
+            while True:
+                asked = _need()
+                avail = await _host_available_gb_off_loop(asked)
+                # Decided here, on the loop, against what the reserve owes NOW:
+                # other rows may have started or settled while the read ran.
+                need = max(asked, _need())
+                pressure = self._manager._memory_pressure_hold(floor_gb=floor) if root else None
+                # -1 is the reader's "unmeasurable": fail open, as the gate does.
+                fits = avail < 0 or avail >= need
+                if fits and pressure is None:
+                    info._start_priced_shared = False
+                    break
+                if time.monotonic() >= deadline and fits:
+                    waited = time.monotonic() - started
+                    logger.warning(
+                        "Subagent %s: starting a dedicated process under macOS memory "
+                        "pressure (%s); waited %.0fs",
+                        info.id,
+                        platform_compat.memory_pressure_name(pressure),
+                        waited,
+                    )
+                    sel().log_tool_invocation(
+                        session_key=info.parent_session_key or "",
+                        source="subagent",
+                        tool_name="spawn_run",
+                        outcome="dedicated_start_under_memory_pressure",
+                        metadata={
+                            "memory_pressure_level": pressure,
+                            "waited_secs": round(waited, 1),
+                            "subagent_id": info.id,
+                        },
+                    )
+                    info._start_priced_shared = False
+                    break
+                if time.monotonic() >= deadline:
+                    waited = time.monotonic() - started
+                    logger.warning(
+                        "Subagent %s: starting a dedicated process with %.2f GB available, "
+                        "below the %.2f GB its start needs; waited %.0fs",
+                        info.id,
+                        avail,
+                        need,
+                        waited,
+                    )
+                    sel().log_tool_invocation(
+                        session_key=info.parent_session_key or "",
+                        source="subagent",
+                        tool_name="spawn_run",
+                        outcome="dedicated_start_below_floor",
+                        metadata={
+                            "available_gb": avail,
+                            "min_gb": need,
+                            "start_price_gb": info._start_price_gb,
+                            "waited_secs": round(waited, 1),
+                            "subagent_id": info.id,
+                        },
+                    )
+                    info._start_priced_shared = False
+                    break
+                await asyncio.sleep(
+                    min(_DEDICATED_TOPUP_POLL_SECS, max(0.0, deadline - time.monotonic()))
+                )
+        finally:
+            info._topup_waiting = False
+            if held:
+                lock.release()
+            # Resume the start clock: the wait was admission's cost, not this
+            # start's -- including a cancel that lands mid-wait, so a respawn
+            # never inherits a paused clock.
+            self._manager._gate_exit_reset(info)(0.0)
+
+    def _gate_exit_reset_impl(self, info: SubagentInfo) -> "Callable[..., None]":
+        """The ``on_gate_acquired`` callback for *info*'s start queues.
+
+        A start's clock PAUSES while it waits for a permit and resumes when it gets
+        one: the startup watchdog (:meth:`_is_startup_stalled`) measures from
+        ``_exec_started`` minus ``_start_queue_wait_ms``, the time spent queued
+        in total, so only real start work counts against the deadline and a start
+        overtaken in a queue is not reaped for the wait. ONE definition for both
+        start paths: the dedicated path (``_run_inner`` -> ``get_or_create`` ->
+        ``AcpProvider``) fires it at all three start queues -- the cold-start
+        semaphore, the spawn admission and the ``session/new`` gate -- and the
+        shared path (``_create_shared_session``) at the ``session/new`` gate and,
+        when it needs the parent's companion runtime, at that runtime's per-parent
+        lock and its spawn's admission (never across the spawn's own work).
+        :meth:`_gate_wait_mark_impl` marks queue ENTRY; between the two the
+        watchdog reads the clock as paused. The paused total is itself bounded
+        (``monitoring._START_QUEUE_MAX_SECS``), so a start parked behind holders
+        no watchdog bounds still ends.
+        """
+        # Imported here: a rebound ``_impl`` resolves globals in ``kiro_crew.subagent``.
+        from kiro_crew.start_priority import START_QUEUE_LOG_MIN_MS, START_QUEUE_SESSION_NEW
+
+        def _on_gate_acquired(queue_wait_ms: float, queue: str = START_QUEUE_SESSION_NEW) -> None:
             now = time.time()
-            info._exec_started = now
+            # The pause is measured on the watchdog's own clock (``time.time()``,
+            # from the mark), not on the queue's monotonic wait: the two disagree
+            # by however long the host was suspended during the wait, and a laptop
+            # that slept in a gate queue would have that sleep charged as start
+            # time. The queue's own measurement is the log's, and the fallback for
+            # a grant whose entry was never marked.
+            marked = info._gate_wait_started
             info._gate_wait_started = None
             info.last_activity = now
-            info._start_queue_wait_ms = float(queue_wait_ms)
-            if queue_wait_ms > 0:
+            info._start_queue_wait_ms += (
+                max(0.0, now - marked) * 1000.0 if marked is not None else float(queue_wait_ms)
+            )
+            if queue_wait_ms >= START_QUEUE_LOG_MIN_MS:
                 logger.info(
-                    "Subagent %s: session-start gate held %.0fms; start clock reset",
+                    "Subagent %s: waited %.0fms at the %s queue (start clock paused; "
+                    "%.0fms queued in total)",
                     info.id,
                     queue_wait_ms,
+                    queue,
+                    info._start_queue_wait_ms,
                 )
 
         return _on_gate_acquired
 
-    def _gate_wait_mark_impl(self, info: SubagentInfo) -> "Callable[[], None]":
-        """The ``on_gate_queued`` callback for *info*'s ``session/new``.
+    def _gate_wait_mark_impl(self, info: SubagentInfo) -> "Callable[..., None]":
+        """The ``on_gate_queued`` callback for *info*'s start queues.
 
-        Fires immediately before the wait for a ``SessionStartGate`` permit
-        begins. It stamps ``_gate_wait_started``, and while that is set the
-        startup watchdog (:meth:`_is_startup_stalled`) reads the start clock as
-        frozen at that moment: a run queued for a permit is not starting, and
-        the queue's length is set by the starts ahead of it, not by anything
-        this run does. Without the freeze a waiter's clock keeps running through
-        the whole queue while the holders ahead of it have theirs reset at
-        acquisition, so the last waiter in a round can be reaped as it is about
-        to be served with nothing wrong. Same ONE definition for both start
-        paths as :meth:`_gate_exit_reset_impl`, which clears the mark at
-        acquisition. The wait is finite: every permit holder is itself on a
-        running clock from acquisition and is reaped at the base deadline if its
-        ``session/new`` has not returned, the request has its own budget, and
-        the gate keeps a headroom of permits no late-start collector may hold.
+        Fires immediately before a wait for a start-queue permit begins. It stamps
+        ``_gate_wait_started``, and while that is set the startup watchdog reads the
+        start clock as paused at that moment: a run queued for a permit is not
+        starting, and the queue's length is set by the starts ahead of it. Same ONE
+        definition for both start paths as :meth:`_gate_exit_reset_impl`, which
+        clears the mark and adds the wait to the paused total.
         """
+        from kiro_crew.start_priority import START_QUEUE_SESSION_NEW
 
-        def _on_gate_queued() -> None:
+        def _on_gate_queued(queue: str = START_QUEUE_SESSION_NEW) -> None:
             info._gate_wait_started = time.time()
 
         return _on_gate_queued
@@ -3369,19 +3971,28 @@ class RunEventCoordinator(ManagerComponent):
         provider.shutdown() instead of SessionManager.release/reset.
         """
 
+        # The clock pauses at queue ENTRY (``_gate_wait_mark``) and resumes at
+        # queue EXIT (``_gate_exit_reset``); the dedicated-process path in
+        # ``_run_inner`` installs the same pair at every start queue.
+        _on_gate_acquired = self._manager._gate_exit_reset(info)
+        _on_gate_queued = self._manager._gate_wait_mark(info)
         runtime = self._manager._get_parent_runtime(info.parent_session_key)
         if runtime is None:
-            runtime = await self._manager._sessions.get_subagent_runtime(info.parent_session_key)
+            # Paused only while this start WAITS for the parent's companion
+            # runtime: on the per-parent lock behind a sibling spawning it, and
+            # at its own spawn's admission. Its own spawn work (kill of a dead
+            # runtime, process spawn, ``initialize``) stays on the running clock,
+            # which the deadline budgets, so a spawn that hangs is reaped.
+            runtime = await self._manager._sessions.get_subagent_runtime(
+                info.parent_session_key,
+                on_gate_queued=_on_gate_queued,
+                on_gate_acquired=_on_gate_acquired,
+            )
         if runtime is None:
             raise RuntimeError("no shared runtime available for session sharing")
         shared_runtime: AcpRuntime = runtime
 
         cwd = info.cwd or str(getattr(self._manager._sessions, "_pool_cwd", ""))
-        # The clock freezes at gate ENTRY (``_gate_wait_mark``) and restarts at
-        # gate EXIT (``_gate_exit_reset``); the dedicated-process path in
-        # ``_run_inner`` installs the same pair.
-        _on_gate_acquired = self._manager._gate_exit_reset(info)
-        _on_gate_queued = self._manager._gate_wait_mark(info)
 
         async def _late_adopter(handle: Any) -> bool:
             # A late session/new answer arrived. Keep the session only when this
@@ -3466,8 +4077,11 @@ class RunEventCoordinator(ManagerComponent):
         if getattr(collector, "outcome", None) == "adopted" and provider is not None:
             info._late_start_provider = None
             now = time.time()
-            # The adopted session is this run's real start.
+            # The adopted session is this run's real start: its clock starts here,
+            # so the queue waits the abandoned attempt accumulated are not its.
             info._exec_started = now
+            info._start_queue_wait_ms = 0.0
+            info._gate_wait_started = None
             info.last_activity = now
             # ``recovering`` is the lost-owner (claimable) state; the adopted
             # session is live under our lease, so the row leaves it now rather

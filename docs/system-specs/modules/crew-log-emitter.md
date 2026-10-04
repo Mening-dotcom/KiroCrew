@@ -189,10 +189,11 @@ unset here -- see "Reconnect is not resume" below for what it is for.
 | `approval/decided` | the same prompt's `finally`, where every exit converges | turn, request id, decision, `by: host` and the host's `cause` for an auto-decline |
 | `plan/updated` | `EVENT_TODO_UPDATE`, inside `slot.set_todo`'s own change gate | turn, the whole task list as `{id, text, state}` |
 | `background/completed` | `run_bg_oneliner` and `background_turn`, at the point they record usage, against an owner pinned BEFORE the call | kind, served model, provider, the billed token dimensions, credits, ms -- no turn |
-| `subagent/spawned` | `_log_spawned`, the one site every started run passes and no rejection does | the turn that ASKED, read from the pin taken at acceptance; child id, agent, model, the three context-scope flags |
+| `subagent/spawned` | `_log_spawned`, the one site every started run passes and no rejection does | the turn that ASKED, read from the pin taken at acceptance; child id, agent, model, the task text redacted and clipped, the three context-scope flags |
 | `subagent/steered` | `steer_run` after the provider accepted, `follow_up_run` after the queue accepted | child id, `interrupt` or `follow_up` |
 | `subagent/completed` | the exclusive terminal report, for outcome `completed` | child id, elapsed ms, credits when billed |
 | `subagent/failed` | the same report, for outcome `failed` or `stopped` | child id, reason, which outcome it was, elapsed ms, credits when billed |
+| `subagent/dismissed` | the dismiss route, for a run the live manager no longer holds | child id |
 | `write/dropped` | writer recovery, before that session's next ordinary append | dropped count and bytes |
 | `object/observed` | `monitoring.controller.MonitorController.tick`, after the service has published a probe's observation whose fingerprint differs from the one it held; into the log of the monitor's OWNER session, named by the host's resolver | `producer` (closed: `probe`), the monitored `kind`, the subject's full `target` URL, the probe's `fingerprint`, the canonical `facts` snapshot verbatim (short by named members in `facts_omitted` only when the line would not fit), `observed_at` -- no turn |
 
@@ -982,8 +983,8 @@ measurement but an OWNER: both helpers knew what the call cost and neither knew 
 for. Both now take a kind and an owning session key, and write nothing unless given both -- because
 a background call is shared infrastructure by default. Titling is charged to the session it titles;
 a tip, a folder icon or a cron label is charged to nobody, and picking a session for one of those
-would put someone else's cost in a user's log. Three kinds are emitted today: `title`, `summary`,
-`memory_consolidation`.
+would put someone else's cost in a user's log. Four kinds are emitted today: `title`, `summary`,
+`memory_consolidation`, and `dynamic_card` for an automatic Dynamic Dashboard card.
 
 `background/completed` names no turn. The call runs after a turn ends, on a separate session, and
 naming the turn that happened to be last would attribute the cost to work that did not cause it.
@@ -1094,7 +1095,6 @@ the finding: an unnamed site records `user`.
 | `chat_runner` synthesis dispatch | the sub-agent synthesis prompt | `subagent` |
 | `issue_radar.crew_runtime` | a crew-composed prompt | `crew` |
 | `handlers/taskrunner` (plan, result) | a task-runner summary | `gateway` |
-| `chat_orchestrator` stage loop | orchestrator stage context | `gateway` |
 
 One shared helper passes no actor on purpose: `spec_builder.runtime.enqueue_or_run_prompt`
 takes both the message and its origin as parameters, so its actor is its CALLER's fact and

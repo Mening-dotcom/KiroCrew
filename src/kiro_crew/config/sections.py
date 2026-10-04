@@ -91,17 +91,17 @@ from kiro_crew.config.memory_sections import (  # noqa: F401
 from kiro_crew.config.resolution import _OBSERVED_DEGRADED_SECTIONS, DEGRADED_TAILSCALE
 from kiro_crew.config.service_sections import (  # noqa: F401
     DEFAULT_MAX_PARALLEL_STEPS,
-    DEFAULT_MAX_PLAN_DURATION,
     DEFAULT_RUNTIME_CEILING_SECS,
     MAX_RUNTIME_CEILING_SECS,
     CronHistoryConfig,
     HeartbeatConfig,
     MessagingConfig,
     MonitoringConfig,
-    OrchestratorConfig,
     TaskRunnerConfig,
     WatchdogConfig,
 )
+from kiro_crew.constants import DEFAULT_SPAWN_MIN_MEMORY_GB as _DEFAULT_SPAWN_MIN_MEMORY_GB
+from kiro_crew.constants import DEFAULT_SUBAGENT_COST_GB as _DEFAULT_SUBAGENT_COST_GB
 from kiro_crew.constants import DEFAULT_SUBAGENT_MAX_TURNS as _DEFAULT_SUBAGENT_MAX_TURNS
 from kiro_crew.constants import SUBAGENT_TIMEOUT_MAX as _SUBAGENT_TIMEOUT_MAX
 from kiro_crew.constants import SUBAGENT_TIMEOUT_MIN as _SUBAGENT_TIMEOUT_MIN
@@ -158,12 +158,12 @@ CONTEXT_WARN_MARGIN_PCT = 10.0
 # invisible on disk — this constant is the only place the value is written.
 DEFAULT_POOL_SIZE = 0
 # Per-session process-tree RSS ceiling (MiB) the cleanup watchdog recycles an
-# idle session at. Non-zero by default so a runaway session tree is bounded
-# out of the box: fleet gateways were observed at several hundred MB with
-# nothing bounding them. 1536 leaves a healthy kiro-cli plus its MCP servers
-# (typically 300-600 MiB) a wide margin while still catching a leak before
-# it takes the host with it. 0 disables.
-DEFAULT_WATCHDOG_RSS_MAX_MB = 1536
+# idle session at. 0 disables, and that is the default: a fixed ceiling cannot
+# tell a leak from a healthy session that loads many MCP servers. An agent with
+# six MCP servers measured ~1.4 GB of tree RSS thirteen seconds after start, so
+# the old 1536 default recycled ordinary sessions after one heavy turn. An
+# operator who wants a bound sets one sized to their own agents.
+DEFAULT_WATCHDOG_RSS_MAX_MB = 0
 # session.reconcile_max_kills — root candidates the runtime reconciler may signal
 # the tree of in one pass. Defaults to the budget the arm already ships with, so an
 # unconfigured host behaves exactly as before; the field's ceiling equals that same
@@ -1116,11 +1116,11 @@ class AgentConfig:
             "when many MCP servers are configured. kiro-cli backend only. "
             "Deferral only starts once the specs cross tool_search_min_pct or "
             "tool_search_min_tokens; disabling reverts to sending full tool "
-            "specs. Kiro Crew's OWN servers are exempt and always send full "
-            "specs, whatever this is set to: loading one mid-turn would change "
-            "the tools list a thinking block's signature is bound to and the "
-            "provider would reject the conversation. No effect on an alternate "
-            "ACP backend.",
+            "specs. Crew's servers defer only when the spawn runs the pinned "
+            "kiro-cli install or its kiro-cli-chat, and both are >= 2.27.0; any "
+            "other executable, an older or unknown version keeps them resident. To override the never-defer list, set "
+            "ASBX_KIRO_MANDATORY_MCPS (comma-separated server names) in the "
+            "gateway's environment. No effect on an alternate ACP backend.",
         ),
     )
     tool_search_min_pct: int = field(
@@ -1179,10 +1179,18 @@ class AgentConfig:
         ),
     )
     spawn_min_memory_gb: float = field(
-        default=4.0,
+        default=_DEFAULT_SPAWN_MIN_MEMORY_GB,
         metadata=_meta(
             "Spawn Min Memory GB",
-            "Minimum available memory (GB) required to spawn a subagent. 0 disables the check.",
+            "Available memory (GB) that must remain after admitting a subagent start. A "
+            "dedicated-process start is priced at what such a runtime settles at (about 1 GB "
+            "until runs of that agent have been measured, then their learned size capped at "
+            "2 GB, never below subagent_cost_gb); one that shares its parent's runtime at "
+            "about 0.35 GB "
+            "less. A spawn that does not fit waits in the durable queue (one with no "
+            "durable queue is refused). On macOS a start also waits while the kernel "
+            "reports memory pressure and one of this gateway's dedicated subagents is "
+            "running. 0 disables the check, that wait included.",
         ),
     )
     resource_pressure_gb: float = field(
@@ -1192,9 +1200,11 @@ class AgentConfig:
             "Available memory (GB) at or below which the agent is told host memory "
             "is 'tight' via a compact [RESOURCES] context line, so it can prefer "
             "the lighter path for heavy work (targeted tests, smaller sub-agent "
-            "waves). Advisory only — not enforced. 0 disables the context line. "
-            "Lower this on small-memory hosts / memory-limited containers (e.g. a "
-            "2-4 GB pod) so the advisory only fires under genuine pressure.",
+            "waves). On macOS the line also fires while the kernel reports memory "
+            "pressure. Advisory only — not enforced. 0 disables the context line, "
+            "that macOS case included. Lower this on small-memory hosts / "
+            "memory-limited containers (e.g. a 2-4 GB pod) so the advisory only fires "
+            "under genuine pressure.",
         ),
     )
     resource_critical_gb: float = field(
@@ -1331,9 +1341,13 @@ class AgentConfig:
             "gateway event loop (the SessionStartGate). session/new blocks while "
             "the backend initializes the session's MCP servers, so a burst of "
             "subagent starts on one shared runtime slows every start until the "
-            "budget is hit; queued starts wait in FIFO order and their queue time "
-            "is not counted against the start budget or the startup watchdog. A "
-            "fixed bound, not adaptive: the adaptive loop is the MCP gateway spawn "
+            "budget is hit; queued starts a person is waiting on are served first, "
+            "except that a waiting background start is let through after a bounded "
+            "run of them so it is never starved, and FIFO within each class. Queue "
+            "time is not charged to the start budget "
+            "or the startup deadline, but a subagent start that stays queued past "
+            "the start-queue cap ends as never started, unless its subagent "
+            "timeout ends it first. A fixed bound, not adaptive: the adaptive loop is the MCP gateway spawn "
             "gate and the execution-cap controller. Clamped to 1..64.",
             restart=True,
         ),
@@ -1573,13 +1587,13 @@ class AgentConfig:
         ),
     )
     subagent_cost_gb: float = field(
-        default=0.5,
+        default=_DEFAULT_SUBAGENT_COST_GB,
         metadata=_meta(
             "SubAgent Memory Cost (GB)",
-            "Free memory (GB) each sub-agent start must find on top of the "
-            "admission floor; also the per-agent fallback used to auto-size the "
-            "cap until a learned value accumulates. Raise it on hosts whose "
-            "runtimes settle heavier.",
+            "The least a dedicated sub-agent start is priced at when admission "
+            "reserves its memory (the measured or learned settled size applies "
+            "when higher); also the per-agent fallback used to auto-size the cap "
+            "until a learned value accumulates.",
         ),
     )
     subagent_cpu_cost_cores: float = field(
@@ -1613,7 +1627,8 @@ class AgentConfig:
             "serialized; the interval only decides how fast a wide fan-out "
             "fills. Raise it if this "
             "host or the model provider is the bottleneck -- a spawn still has "
-            "to clear spawn_min_memory_gb and the host budget, and the adaptive "
+            "to leave spawn_min_memory_gb free after its start and clear the host "
+            "budget, and the adaptive "
             "controller cuts the cap on real pressure, so this is a smoothing "
             "interval rather than the memory guard.",
         ),
@@ -1794,6 +1809,18 @@ class SessionConfig:
             "Context usage percentage at which auto-compaction triggers (5-90).",
         ),
     )
+    compact_wait_secs: float = field(
+        default=0.0,
+        metadata=_meta(
+            "Compaction Wait Budget",
+            "Seconds the automatic-compaction coordinator waits for a "
+            "compaction to finish before giving up and restarting the "
+            "session. 0 (the default) uses the built-in budget. A positive "
+            "value below 60 is raised to 60 and a value above 3600 is capped. "
+            "Raise it on a host where automatic compaction on a large context "
+            "window regularly needs longer than the built-in budget.",
+        ),
+    )
     pool_size: int = field(
         default=DEFAULT_POOL_SIZE,
         metadata=_meta(
@@ -1842,7 +1869,8 @@ class SessionConfig:
         metadata=_meta(
             "Watchdog RSS Limit (MiB)",
             "Recycle a session when its process tree resident memory exceeds "
-            "this many MiB (default 1536). 0 disables. Busy sessions (turn in "
+            "this many MiB. 0 disables (the default); the internal background "
+            "runtime still recycles at 1536 MiB. Busy sessions (turn in "
             "flight) are never recycled.",
         ),
     )
@@ -1976,7 +2004,7 @@ class SlackConfig:
         default=5,
         metadata=_meta(
             "Home Tab Sessions Per Kind",
-            "Max sessions shown per category (main chat / autopilot) in the Slack Home Tab.",
+            "Max sessions shown per category (main chat / task runner) in the Slack Home Tab.",
             tags=["slack"],
         ),
     )
@@ -2412,6 +2440,18 @@ class DashboardConfig:
             "the next request; no restart.",
         ),
     )
+    crewmates_in_agent_picker: bool = field(
+        default=False,
+        metadata=_meta(
+            "Crewmates in the chat agent picker",
+            "List crewmates in the chat composer's agent picker, beside the agent "
+            "templates, so a chat can be switched onto a crewmate (and its own "
+            "workspace and memory) without opening it from the Crew page. Off by "
+            "default: the picker lists templates plus any crewmate no listed "
+            "template already covers. Takes effect when the dashboard is reloaded; "
+            "no gateway restart.",
+        ),
+    )
     qr_session_until_restart: bool = field(
         default=True,
         metadata=_meta(
@@ -2535,6 +2575,7 @@ class DashboardConfig:
             "liveness probe kills at roughly 20s independently, so a value "
             "above that only takes effect for a headless gateway — the desktop "
             "probe wins first and the stack dump is lost.",
+            restart=True,
         ),
     )
     chat_entry_cache_max_entries: int = field(
@@ -2796,6 +2837,21 @@ class DashboardConfig:
                         "help": (
                             "Directory a terminal opens in when the chat passes no project "
                             "directory of its own. Empty = $HOME."
+                        ),
+                    },
+                },
+                "reuse_current": {
+                    "type": "boolean",
+                    "default": False,
+                    "x-meta": {
+                        "label": "Reuse the current terminal",
+                        "help": (
+                            "Run-in-terminal focuses the terminal tab you have "
+                            "selected and copies the command, so you can paste it into "
+                            "that shell and keep its state (working directory, "
+                            "environment, an active login session). With no terminal "
+                            "open, it still copies the command for you to paste — it is "
+                            "never run for you. Off = a fresh terminal each time."
                         ),
                     },
                 },
@@ -3442,7 +3498,7 @@ CHAT_TURN_TIMEOUT_MIN = 300
 CHAT_TURN_TIMEOUT_MAX = 86400
 
 # agent.session_start_timeout_secs — budget for ACP session/new + session/load
-# on the shared runtime (acp/runtime.py ``_SESSION_NEW_TIMEOUT`` is the built-in
+# on the shared runtime (acp/runtime_start.py ``_SESSION_NEW_TIMEOUT`` is the built-in
 # default). kiro-cli blocks the session/new response while it initializes the
 # session's MCP servers, so start time scales with the agent's server count and
 # per-server cold-start cost (observed: a 71-server agent with no pending OAuth
@@ -3504,6 +3560,16 @@ MAX_SUBAGENTS_FIXED_FLOOR = 3
 # read instead.
 AUTOCOMPACT_PCT_MIN = 5.0
 AUTOCOMPACT_PCT_MAX = 90.0
+
+# ``session.compact_wait_secs``: 0 is the sentinel for "use the built-in
+# budget"; any positive value is lifted to at least ``COMPACT_WAIT_SECS_MIN``
+# and capped at ``COMPACT_WAIT_SECS_MAX`` so a hand-edited typo cannot arm a
+# near-zero budget (which would restart every compaction) or an unbounded
+# wait. The load path applies the sentinel-preserving floor
+# (``value if value == 0 else max(value, MIN)``); the resolver treats <= 0 as
+# unset and falls back to the built-in default.
+COMPACT_WAIT_SECS_MIN = 60.0
+COMPACT_WAIT_SECS_MAX = 3600.0
 
 # ── Load/write bound parity ────────────────────────────────────────────────────
 # Ranges for bounded numeric fields the LOAD path clamps, while `_EDITABLE_CONFIG`
@@ -3742,8 +3808,8 @@ def _validated_stt_provider(value: object) -> str:
         logger.warning(
             "STT provider %r is retired; using %r instead. It needed a separate "
             "out-of-band install, which the bundled local engine removes while "
-            "recognising the same speech. Run 'kirocrew config defaults --adopt' "
-            "to drop the stored value and this notice.",
+            "recognising the same speech. Run 'kirocrew config defaults --adopt "
+            "stt.provider' to drop the stored value and this notice.",
             value,
             resolved,
         )
@@ -3752,7 +3818,7 @@ def _validated_stt_provider(value: object) -> str:
             "Unknown STT provider %r; using %r instead, so no recogniser runs until "
             "the value is fixed. Selectable providers: %s. Run "
             "'kirocrew config set stt.provider <provider>' to choose one, or "
-            "'kirocrew config defaults --adopt' to drop the stored value.",
+            "'kirocrew config defaults --adopt stt.provider' to drop the stored value.",
             value,
             resolved,
             ", ".join(_VALID_STT_PROVIDERS),
@@ -3774,6 +3840,65 @@ def _validated_stt_model(value: object) -> str:
         logger.warning("Non-string STT model %r; using %r", value, _STT_DEFAULT_MODEL)
         return _STT_DEFAULT_MODEL
     return _resolve_stt_model(value).name
+
+
+#: Amazon Transcribe's own limit on a custom vocabulary name
+#: (``StartStreamTranscription``'s ``VocabularyName``). The name travels as a
+#: request header on every stream, so a value outside this shape can only ever
+#: fail the request it rides on.
+TRANSCRIBE_VOCABULARY_NAME_MAX = 200
+_TRANSCRIBE_VOCABULARY_NOTICE_VALUE_MAX = 120
+_TRANSCRIBE_VOCABULARY_NAME_RE = _re.compile(r"[0-9A-Za-z._-]+")
+_LAST_WARNED_TRANSCRIBE_VOCABULARY: str | None = None
+
+
+def transcribe_vocabulary_name(value: object) -> str | None:
+    """The custom vocabulary *value* names: ``""`` for none, None when unusable.
+
+    Only surrounding whitespace is dropped. AWS compares vocabulary names
+    case-sensitively, so folding case would select a different vocabulary, or
+    none at all.
+
+    The one rule both writers apply: ``PUT /api/config/stt`` stores only a value
+    this accepts, and the loader keeps only what this accepts, so the name a user
+    reads back is the name every Transcribe request carries.
+    """
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name:
+        return ""
+    if len(name) > TRANSCRIBE_VOCABULARY_NAME_MAX:
+        return None
+    return name if _TRANSCRIBE_VOCABULARY_NAME_RE.fullmatch(name) else None
+
+
+def _validated_transcribe_vocabulary(value: object) -> str:
+    """:func:`transcribe_vocabulary_name` for a stored value: degrades to none, logs once.
+
+    Degrades rather than failing the load, like the provider and model above. A
+    ``null`` is the absent key and says nothing. An unusable name is dropped rather
+    than sent, because Amazon Transcribe would refuse every stream that carried it:
+    dictation keeps working without the vocabulary, and the notice says why.
+    """
+    global _LAST_WARNED_TRANSCRIBE_VOCABULARY
+
+    if value is None:
+        return ""
+    name = transcribe_vocabulary_name(value)
+    if name is not None:
+        return name
+    seen = repr(value)[:_TRANSCRIBE_VOCABULARY_NOTICE_VALUE_MAX]
+    if seen != _LAST_WARNED_TRANSCRIBE_VOCABULARY:
+        _LAST_WARNED_TRANSCRIBE_VOCABULARY = seen
+        logger.warning(
+            "Unusable stt.transcribe_vocabulary %s; dictation runs without a custom "
+            "vocabulary. Amazon Transcribe names are 1-%d letters, digits, '.', '_' or "
+            "'-'. Choose one in Settings -> Voice, or fix the value in config.json.",
+            seen,
+            TRANSCRIBE_VOCABULARY_NAME_MAX,
+        )
+    return ""
 
 
 _VALID_COMPLETION_KEEP = ("head", "tail", "both")
@@ -4186,6 +4311,16 @@ class SttConfig:
     transcribe_profile: str = field(
         default="",
         metadata=_meta("Transcribe Profile", "AWS profile for Transcribe API."),
+    )
+    transcribe_vocabulary: str = field(
+        default="",
+        metadata=_meta(
+            "Transcribe Vocabulary",
+            "Name of a custom vocabulary you created in Amazon Transcribe, in the same "
+            "region, so names and terms it would mishear are recognised (`transcribe` "
+            "provider only). Its language must match the dictation language, or "
+            "Amazon Transcribe refuses it and dictation fails. Empty uses none.",
+        ),
     )
 
     def __post_init__(self) -> None:

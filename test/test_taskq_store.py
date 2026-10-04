@@ -364,6 +364,32 @@ def test_locked_database_is_reported_not_hung(tmp_path: Path) -> None:
 # ── defer / reads / window helpers ────────────────────────────────────────────
 
 
+def test_next_eligible_at_is_a_wake_only_for_rows_time_holds(
+    store: TaskStore, clock: Clock
+) -> None:
+    """The wake is when a row the dispatch reads may claim, and could not,
+    becomes claimable. A row with no deferral and no lease is no wake: read as
+    "due at 0" it re-armed an empty pump pass on every loop turn."""
+    store.accept([_rec("fresh")])
+    assert store.next_eligible_at(model.KIND_SUBAGENT) is None
+
+    store.accept([_rec("root"), _rec("child", parent_id="root")])
+    store.defer("root", clock.t + 10, reason="low memory")
+    store.defer("child", clock.t + 20, reason="low memory")
+    assert store.next_eligible_at(model.KIND_SUBAGENT) == clock.t + 10
+    assert store.next_eligible_at(model.KIND_SUBAGENT, exclude_ids=["root"]) == clock.t + 20
+    assert store.next_eligible_at(model.KIND_SUBAGENT, children_only=True) == clock.t + 20
+    assert store.next_eligible_at(model.KIND_SUBAGENT, exclude_ids=["root", "child"]) is None
+
+    # A leased row is claimable once both its deferral and its lease are past.
+    store.insert_if_absent(
+        _rec(
+            "leased", state=model.RECOVERING, next_run_at=clock.t + 1, lease_expires_at=clock.t + 5
+        )
+    )
+    assert store.next_eligible_at(model.KIND_SUBAGENT) == clock.t + 5
+
+
 def test_defer_keeps_row_queued_but_ineligible_until_clock_passes(
     store: TaskStore, clock: Clock
 ) -> None:
@@ -953,3 +979,102 @@ async def test_a_held_writer_lock_does_not_stall_the_loop(tmp_path: Path, clock:
         release.set()
         holder.join(30)
         store.close()
+
+
+# ── the unstarted-row index (is_unstarted) ────────────────────────────────────
+
+
+def test_unstarted_index_follows_every_state_write(store: TaskStore) -> None:
+    """``is_unstarted`` is True exactly while the row is claimable or ``admitted``.
+
+    Each write that can cross that set updates it after its commit: accept,
+    transition (start, wait, terminal), wake_wait and cancel. A claim stays
+    inside it. The ``running``
+    and ``waiting_children`` reads catch a widening to "not terminal"; each
+    terminal read catches a dropped update on that write.
+    """
+    store.accept([_rec("a"), _rec("b"), _rec("c")])
+    assert all(store.is_unstarted(i) for i in "abc")
+    assert store.is_unstarted("never-accepted") is False
+
+    assert store.claim("a") is not None
+    assert store.is_unstarted("a") is True  # admitted: claimed, no run yet
+    assert store.transition("a", model.STARTING)
+    assert store.is_unstarted("a") is False  # started
+    assert store.transition("a", model.RUNNING)
+    assert store.enter_wait(
+        "a", {"state": model.WAITING_CHILDREN, "reason": "children", "resume_condition": {}}
+    )
+    assert store.is_unstarted("a") is False  # a resident run waiting is not unstarted
+    assert store.wake_wait("a", reason="answered") is not None
+    assert store.is_unstarted("a") is True  # retry_wait: claimable again
+    assert store.claim("a") is not None
+    assert store.transition("a", model.STARTING)
+    assert store.transition("a", model.RUNNING)
+    assert store.finish("a", model.DONE)
+    assert store.is_unstarted("a") is False
+
+    assert store.finish("b", model.FAILED)  # a queued row failed at once
+    assert store.is_unstarted("b") is False
+    assert store.cancel("c", reason="user_stop") == model.QUEUED
+    assert store.is_unstarted("c") is False
+
+
+def test_unstarted_index_ignores_a_write_that_did_not_commit(store: TaskStore) -> None:
+    """The index changes only after a commit. A refused or rolled-back write
+    leaves it as it was."""
+    store.accept([_rec("t")])
+    assert store.cancel("t", reason="stop") == model.QUEUED
+    with pytest.raises(TaskStoreUnavailable):
+        store.accept([_rec("t")])  # duplicate id: rolled back
+    assert store.is_unstarted("t") is False
+    assert store.transition("t", model.QUEUED) is False  # terminal stays terminal
+    assert store.is_unstarted("t") is False
+
+    store.accept([_rec("u")])
+    assert store.claim("u") is not None
+    assert store.claim("u") is None  # already claimed: no write
+    assert store.is_unstarted("u") is True
+
+
+def test_unstarted_index_is_seeded_from_disk_at_open(tmp_path: Path, clock: Clock) -> None:
+    """A row accepted before this open (an earlier incarnation, a boot import)
+    is pending work too, so ``open`` loads the index from the rows on disk."""
+    path = tmp_path / "tasks.db"
+    first = TaskStore(path, clock=clock, network_fs=False).open()
+    first.accept([_rec("queued"), _rec("admitted"), _rec("started"), _rec("ended")])
+    assert first.claim("admitted") is not None
+    assert first.claim("started") is not None
+    assert first.transition("started", model.STARTING)
+    assert first.cancel("ended", reason="stop") is not None
+    first.close()
+
+    second = TaskStore(path, clock=clock, network_fs=False).open()
+    try:
+        assert second.is_unstarted("queued") is True
+        assert second.is_unstarted("admitted") is True
+        assert second.is_unstarted("started") is False
+        assert second.is_unstarted("ended") is False
+        assert second.insert_if_absent(_rec("imported")) is True
+        assert second.is_unstarted("imported") is True
+    finally:
+        second.close()
+
+
+@pytest.mark.asyncio
+async def test_unstarted_index_read_takes_no_connection_on_the_loop(
+    store: TaskStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The serial-lock done-probe reads the index on the gateway loop. That read
+    must never reach the connection: the strict on-loop guard is armed, the
+    connection accessor raises if taken, and the loop counter stays put."""
+    from kiro_crew.taskq import store as store_mod
+
+    await store.run(store.accept_one, _rec("t"))
+    monkeypatch.setenv(store_mod.STRICT_ON_LOOP_ENV, "1")
+    before = store.loop_thread_calls
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(store, "_c", lambda: pytest.fail("is_unstarted took the connection"))
+        assert store.is_unstarted("t") is True
+        assert store.is_unstarted("absent") is False
+    assert store.loop_thread_calls == before

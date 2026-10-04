@@ -516,11 +516,14 @@ def _monitor_config(
                 1,
                 runtime_ceiling,
             ),
+            # Floor 0, not 1: zero is this budget's unlimited sentinel, and
+            # ``_bounded_int`` reads the body by key rather than by truthiness, so
+            # an explicit 0 survives instead of collapsing to the default.
             max_agent_turns=_bounded_int(
                 body,
                 "max_agent_turns",
                 DEFAULT_MONITOR_AGENT_TURNS,
-                1,
+                0,
                 MAX_MONITOR_AGENT_TURNS,
             ),
             max_tokens=_bounded_int(
@@ -1083,6 +1086,14 @@ async def api_autonudge_update(request: web.Request) -> web.Response:
         idle_secs=body.get("idle_secs"),
         max_cycles=body.get("max_cycles"),
         active=body.get("active"),
+        # This route is the user's own press (the goal popover's Play), so a
+        # revival through it is a resume: the service resets only the counter
+        # behind a spent bound (a spent cycle cap zeroes the count, a spent time
+        # budget re-anchors the clock, read from the stored stop reason and the
+        # bounds at the press) and keeps the rest, so the loop resumes from its
+        # breakpoint; a save on a running loop carries ``active: true`` too and
+        # the flag is inert there.
+        fresh_run=True,
         max_runtime_secs=body.get("max_runtime_secs"),
         banner=body.get("banner"),
         source="dashboard",

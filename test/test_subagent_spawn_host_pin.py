@@ -104,6 +104,9 @@ class TestTheSpawnHostMemoryPinRatchet:
         # not break them -- an inner patch lands on top -- but it would state a
         # precondition the opposite of what they exist to vary.
         "test_admission_gate.py": "drives both guards itself, to refused and to admitted",
+        # Runs the REAL memory check over fabricated /proc and cgroup files and
+        # patches the posture tier itself; the pin would replace the check under test.
+        "test_spawn_memory_cause.py": "feeds the real memory check fabricated kernel files",
         # A shared fake, not a collected test module: ``ManagerHarness`` pins
         # both host-memory readings itself for as long as it is open, so every
         # module that spawns through it is pinned without naming the fixture.
@@ -181,7 +184,7 @@ class TestTheHostPinSurvivesTheTestsOwnPatches:
     file is pinned, looks pinned, and is not pinned where it matters.
 
     Measured on a macos-15 nightly backend shard reading 2.58 GB available,
-    under the 4.5 GB floor: ``test_taskq_admission_integration.py``'s drain
+    under the 4.5 GB floor then in force: ``test_taskq_admission_integration.py``'s drain
     deferred a second time. The only failure text was
     ``assert 'queued' == 'starting'``; nothing named memory, and the whole
     nightly publish chain was skipped behind it.

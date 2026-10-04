@@ -3090,6 +3090,7 @@ def test_a_unit_recreated_under_its_id_folds_cold_however_far_its_seq_climbed(tm
     log's seq was still below the cached one, and the stale checkpoint would never be
     offered to the comparison this pins.
     """
+    from kiro_crew.crew_log import eager
     from kiro_crew.crew_log.store import segment_paths
 
     crew, sid = _live_crew(tmp_path)
@@ -3100,8 +3101,15 @@ def test_a_unit_recreated_under_its_id_folds_cold_however_far_its_seq_climbed(tm
     retired_seq = cs._unit_last_seq(sid)
 
     crew_log_emit.reset_caches()
-    for path in segment_paths(KIND_SESSION, sid):
-        path.unlink()
+    # Removed the way retention removes a unit: with the eager folder held between
+    # batches, so none of its folds has a segment open. Windows refuses to unlink a
+    # file any handle holds, and the folder reads this unit on its own thread after
+    # every entry.
+    assert eager.drain(timeout=10.0), "the eager folder never settled"
+    with eager.paused() as held:
+        assert held, "the eager folder could not be held between batches"
+        for path in segment_paths(KIND_SESSION, sid):
+            path.unlink()
     _tick()
     _unit(cid, session_id=sid)
     for number in (11, 13, 15, 17):
@@ -4547,3 +4555,60 @@ def test_the_walk_will_not_run_without_a_declared_bound(tmp_path):
 
     with pytest.raises(TypeError):
         cs._hold_chain_for_by_name_use(tmp_path)  # type: ignore[call-arg]
+
+
+def test_a_read_back_that_misses_the_written_entry_warns_with_seq_unit_and_path(caplog):
+    """The writer said the entry was written, and the read-back does not find it: that
+    is "written but not readable", so it says so at WARNING with the seq it read
+    after, the unit and the file it looked in. A DEBUG line hides the only cause a
+    CI red can show."""
+    import logging
+
+    from kiro_crew.crew_log.schema import Entry
+
+    data = {"crew_id": "c_0a1b2c3d", "owner": OWNER, "repo": REPO, "number": 7}
+    other = Entry(
+        type=cs.LEDGER_ENTRY_TYPE,
+        seq=6,
+        time=1_789_000_000_000,
+        src="gateway",
+        data={**data, "number": 8},
+    )
+    written = Entry(
+        type=cs.LEDGER_ENTRY_TYPE, seq=7, time=1_789_000_000_000, src="gateway", data=data
+    )
+
+    class _Handle:
+        path = Path("crew-log") / "session" / "unit-x.jsonl"
+
+        def iter_from(self, seq, known=None):
+            # The read skips the written entry's seq.
+            return iter(e for e in (other, written) if e.seq >= seq and e.seq != 7)
+
+    class _Projection:
+        KNOWN_TYPES = None
+
+        @staticmethod
+        def open_session_log(session_id):
+            assert session_id == "unit-x"
+            return _Handle()
+
+    with caplog.at_level(logging.WARNING, logger=cs.logger.name):
+        since, landed = cs._landed_since(_Projection(), "unit-x", 5, data)
+    assert landed is False
+    assert since is not None and [e.seq for e in since] == [6]
+    (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    text = record.getMessage()
+    assert "seq 5" in text and "unit-x" in text and "unit-x.jsonl" in text
+
+    # Control: the same read without the skip finds the entry and warns nothing.
+    caplog.clear()
+
+    class _Whole(_Handle):
+        def iter_from(self, seq, known=None):
+            return iter(e for e in (other, written) if e.seq >= seq)
+
+    _Projection.open_session_log = staticmethod(lambda session_id: _Whole())
+    with caplog.at_level(logging.WARNING, logger=cs.logger.name):
+        assert cs._landed_since(_Projection(), "unit-x", 5, data)[1] is True
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]

@@ -240,6 +240,20 @@ strip.
    `http://<dashboard-hostname>:<local>/?token=...` in an iframe, deliberately
    reusing the parent's own hostname so the pane is same-site with the parent and
    `SameSite=Lax` auth cookies are not withheld.
+
+   **Non-loopback dashboard origin.** The pane can embed only when the dashboard
+   is itself open on an origin the CSP `frame-src` admits — the loopback set
+   `127.0.0.1`, `localhost`, `0.0.0.0` (each http or https) plus http
+   `*.localhost`, matched client-side by `isEmbeddableLoopbackOrigin`
+   (`website/src/lib/tunnelOrigin.ts`) against the server's
+   `_LOOPBACK_FRAME_SRC` / `_INSTANCES_FRAME_SRC_EXTRA`
+   (`src/kiro_crew/dashboard/server.py`), including the deliberate `[::1]`
+   omission. On any other origin (a reverse proxy or tunnel hostname, `[::1]`,
+   https `*.localhost`) the browser's CSP would refuse the frame, so the pane
+   mounts **no iframe and arms no load watchdog**; it renders an explanatory card
+   up front (keeping the `InstanceTabBar` strip as the escape hatch back to
+   Local) instead of the misleading 15s "tunnel looks connected" timeout. The
+   same-origin pane carrier that would lift this restriction is out of scope.
 2. **Warm set.** Up to `warm_set_cap` most-recently-used instances
    stay warm: iframe mounted (hide-not-unmount, so switching never reloads or
    re-runs the token handshake) with a live tunnel and WebSocket. The default
@@ -258,18 +272,46 @@ strip.
    token and cold-boots the remote SPA, so from the user's seat an eviction is
    hard to tell apart from a dropped connection — which is why the default
    tracks the registry rather than a fixed number.
-3. **Health probe.** While CONNECTED, a per-tunnel loop polls the loopback
-   forward every `DEFAULT_PROBE_INTERVAL_SECS` (30s, not user-configurable;
-   `<= 0` disables the probe); after `probe_failure_threshold` (3) *consecutive*
-   failures the child is terminated so recovery fires. This is what catches a
-   tunnel that is alive but no longer forwarding.
+3. **Health probe.** While CONNECTED, a per-tunnel loop probes the forward
+   **end-to-end** every `DEFAULT_PROBE_INTERVAL_SECS` (30s, not user-configurable;
+   `<= 0` disables the probe): a `GET` at the transport's own unauthenticated
+   liveness path through the local forward that must return a completed HTTP
+   response within `DEFAULT_PROBE_HEALTH_TIMEOUT_SECS` (4s). Any status line
+   counts as alive — a status code proves bytes traversed to the far end and
+   back — so the code itself is not inspected. The path is the far end's: a
+   gateway forward answers `/api/health` credential-free, and a fargate crew's
+   container answers `FARGATE_HEALTH_PATH` (`/health`); the probe picks the
+   fargate path when `turn_url` is set. It matters that the path is the far
+   end's own liveness route rather than a fixed one, because the fargate
+   container authorises before it routes and would emit a `control` deny record
+   for every probe aimed at a path it does not serve. Only a timeout or
+   connection error (no response) fails a probe; after `probe_failure_threshold`
+   (3) *consecutive* failures the child is terminated so recovery fires. A
+   successful probe also clears the self-heal attempt counter (§4). A bare TCP
+   connect (`_port_reachable`, used only by the readiness wait) is deliberately
+   **not** enough here: for an SSM forward the process accepting the connect is
+   `session-manager-plugin` on loopback, which a zombie forward keeps bound
+   while relaying nothing, so a connect-only probe passes forever on the very
+   stall this catches — a tunnel that is alive but no longer forwarding.
 4. **2-tier self-heal.** On unexpected child exit: **Tier 1** rebuilds the tunnel
    reusing the existing token; **Tier 2** re-mints the token over SSH and then
    rebuilds. Capped at `max_recovery_attempts` (8) consecutive attempts with a
    capped-exponential backoff (`recover_backoff_max_secs`, 30s; the wait grows
-   1, 2, 4, 8, 16 then holds at the cap), which spans roughly a two-minute
-   window: long enough to outlast a transient drop (screen lock, proxy warmup).
-   The counter resets on a successful rebuild or a successful `connect()`. A
+   1, 2, 4, 8, 16 then holds at the cap). A rebuild that fails outright spends
+   only that backoff — roughly a two-minute window, long enough to outlast a
+   transient drop (screen lock, proxy warmup). A dead-far-end forward that
+   re-binds but never answers additionally spends one probe window per attempt
+   (`probe_failure_threshold` x `probe_interval`, 3 x 30s = 90s), so its handoff
+   to diagnosis takes `attempts x (90s + backoff)` ~= 16 minutes at the
+   defaults.
+   The counter resets when the steady-state probe answers end-to-end (proving
+   the forward reaches its far end), or on a successful `connect()` — a rebuild
+   that only re-binds the local port while the far end stays dead (a forward
+   whose remote gateway is down) does NOT reset it, so recovery reaches the cap
+   and hands off to diagnosis instead of respawning a healthy-looking forward
+   every interval. Because the reset is driven by an observed live probe rather
+   than by the bind-only rebuild, a single slow probe right after a rebuild
+   cannot ratchet the budget down permanently: the next good probe clears it. A
    successful rebuild records the replacement child's `local_port` alongside its
    `forwarder_pid` / `forwarder_start` / `forwarder_sig` in one write — the same
    field set `connect()` persists. A rebuild takes its port from the live
@@ -307,6 +349,19 @@ delay the bind past the desktop app's gateway-wait window. A failed revive leave
 `was_connected` true and records the failure reason, so the entry persists showing
 why it is down.
 
+**The same supervisor without a gateway: `kirocrew desktop tunnel`.** The desktop
+app's client-only mode runs no local gateway, so nothing above is running there,
+yet its window reaches a remote crew through exactly this kind of forward.
+`instances/tunnel_keeper.py` runs `_SshTunnel` (readiness wait, zombie probe, exit
+classification) and `_recover_backoff_secs` on their own, for one fixed port pair,
+and the desktop app spawns it when a crew's `remoteHosts` entry carries
+`manageTunnel: true`. It deliberately takes none of the manager's registry, token
+minting or hop leases: the app fetches its own token over SSH. A connect resets the
+backoff, so a laptop waking from sleep reconnects within seconds, and the app also
+bounces the keeper on the OS resume event. It stops, always, when stdin
+closes, so the forward cannot outlive the app. Windows is not offered, for the same
+reason the ssh transport above is not.
+
 ---
 
 ## 5. Configuration
@@ -336,8 +391,9 @@ kirocrew config set instances.connect_timeout_secs 45
 kirocrew config set instances.mint_timeout_secs 60
 ```
 
-Constants that are **not** user-configurable: the probe interval (30s), the token
-refresh fraction (0.8), and the stored-token probe timeout (2s).
+Constants that are **not** user-configurable: the probe interval (30s), the
+end-to-end health-probe timeout (`DEFAULT_PROBE_HEALTH_TIMEOUT_SECS`, 4s), the
+token refresh fraction (0.8), and the stored-token probe timeout (2s).
 
 **Which of these a config write reaches (`SshTunnelManager.apply_config`).** The
 manager registers `live.watch_section(self, "instances", method="apply_config",
@@ -1025,11 +1081,11 @@ whose current variable parts are all charset-bound literals.
 |---------|--------------------|
 | Settings → Remote Crew shows the opt-in card | `instances.enabled` is false. Set it and restart. |
 | Enabled but the panel says "not active" | The flag was set after the gateway started; the SSH manager is created at startup only. Restart. |
-| Iframe is blank or black | The pane's embedded SPA never announced readiness within 15s, so the error panel with **Retry** appears (Retry force-reloads even an identical src). An iframe reports no load error to its parent, so this watchdog is the only signal. |
+| Iframe is blank or black | On a loopback dashboard origin, the pane's embedded SPA never announced readiness within 15s, so the error panel with **Retry** appears (Retry force-reloads even an identical src). An iframe reports no load error to its parent, so this watchdog is the only signal. On a non-loopback origin the CSP `frame-src` refuses the frame outright, so no iframe is mounted and no watchdog runs: the pane shows the "needs a local dashboard" card (see §4 step 1), and Retry would not help — open the dashboard on a loopback origin instead. |
 | Connect fails with an SSH auth error | Refresh your SSH credentials (re-add the key to `ssh-agent`); `BatchMode` never prompts, so a missing credential is an immediate failure. Tunnels self-heal once auth is restored. |
 | Connect fails for another reason | Use **Diagnose**. The ladder reports the first broken link: `ssh_unreachable` (check SSH access or the host alias), `remote_down` (remote gateway not listening), `not_connected` (SSH and remote are fine, this instance has no tunnel yet: click Connect), or `tunnel_down` (reconnect). |
 | "local port N was taken while connecting" | The allocator picked a port that something grabbed in the moment before `ssh` bound it. Retry. If it persists, stop whatever keeps taking ports in that range or move `instances.tunnel_base_port` to a quieter one. |
-| Instance keeps dropping | The health probe plus 2-tier self-heal retry over roughly a two-minute window (8 attempts, capped-exponential backoff). Tune `instances.max_recovery_attempts` / `recover_backoff_max_secs` / `probe_failure_threshold`; both recovery values are clamped so they cannot loop indefinitely. If self-heal gives up, diagnosis runs automatically. Check the remote gateway and SSH stability. |
+| Instance keeps dropping | The health probe plus 2-tier self-heal retry: a rebuild that fails outright spans roughly a two-minute window (8 attempts, capped-exponential backoff), while a forward that re-binds but whose far end stays dead additionally spends one probe window per attempt (`probe_failure_threshold` x `probe_interval`, 3 x 30s), so handoff to diagnosis takes `attempts x (90s + backoff)` ~= 16 minutes at the defaults. Tune `instances.max_recovery_attempts` / `recover_backoff_max_secs` / `probe_failure_threshold`; both recovery values are clamped so they cannot loop indefinitely. If self-heal gives up, diagnosis runs automatically. Check the remote gateway and SSH stability. |
 | A pane vanished from the warm set but its switcher entry is still there | It was LRU-evicted (warm set full). The tunnel is untouched: selecting the crew re-warms it, though the re-mint plus SPA cold boot makes that look like a reconnect. Only an explicit `instances.warm_set_cap`, or a fleet past the automatic ceiling (`WARM_SET_CAP_AUTO_CEILING`), can now be below the number of registered crews — set it to `0` to let the cap track the registry. |
 | Every token mint fails on one remote, though its gateway is healthy | The remote's `~/.local/bin/kirocrew` probably points at an uninstalled checkout. See §12: the run-marker is what makes mint follow the *running* gateway's install. |
 
@@ -2134,8 +2190,13 @@ text. `write_bundle_json` then writes the wire document a message at a time and
 streams the log out of the snapshot, byte-for-byte what
 `json.dumps(bundle, separators=(",", ":"))` produces, so every importer reads it
 unchanged. The file export writes the gzip to a temp file (`_stage_export`) and sends it
-from there (`_StagedExport`, a `FileResponse` that removes the file once the send
-ends), so neither the document nor its compressed form is resident; the tunnel send (`send_session_bundle(..., serialise=...)`)
+from there (`_StagedExport`, a `StreamResponse` that owns the file's handle and closes it
+before removing the file once the send ends), so neither the document nor its compressed form is resident.
+A commit that never hands the file to a response removes it itself. Both removals are
+shielded (`_shielded_release`), since a cancelled handler would otherwise withdraw a
+removal still queued for a worker. Unlike `FileResponse`, the send ignores Range and
+conditional requests (always a full 200) and carries no `ETag` or `Last-Modified`: the file is single-use and
+deleted after the send. The tunnel send (`send_session_bundle(..., serialise=...)`)
 uploads a plain-JSON temp file, re-serialised per attempt. `release_bundle_files`
 removes the snapshot on every exit, including a discarded snapshot retry. The
 send's timeout bounds each connect and read, not the whole request, and its read
@@ -2437,6 +2498,16 @@ differs lives on the manager, not in the child.
 - **`restart_remote` refuses.** Nothing runs `kirocrew` on the task, so the call
   returns `{"ok": False, ...}` before any command is built and tells the user to
   stop and relaunch the task instead.
+- **Health probe runs, aimed at the container's own liveness path.** The
+  `fargate` child is an ordinary `_SshTunnel`, so the end-to-end health probe
+  (§3) runs for it too. The container front process serves only its chat API
+  (`FARGATE_HEALTH_PATH` = `/health`, and `/v1/chat/completions`) and authorises
+  before routing every other path, emitting a `control` access-denied audit
+  record for anything else. The probe therefore aims at `/health` (selected by
+  the non-empty `turn_url`) rather than the gateway's `/api/health`, so a
+  healthy `fargate` tunnel is neither torn down nor spamming its own audit log.
+  Any completed HTTP response counts as alive; only a stalled forward (no
+  response before the timeout) fails the probe.
 - **`diagnose` routes to `diagnose_instance_fargate`.**
 
 ### 16.3 Diagnosis ladder (`src/kiro_crew/instances/diagnostics.py`)

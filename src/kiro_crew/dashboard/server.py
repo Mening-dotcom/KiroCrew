@@ -552,7 +552,9 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         "/api/session-control/create",
         "/api/session-control/fork",
         "/api/session-control/stop",
+        "/api/session-control/end-wait",
         "/api/session-control/set-model",
+        "/api/session-control/reload",
         "/api/session-control/close",
         "/api/session-control/revive",
         "/api/session-control/send",
@@ -1247,11 +1249,18 @@ _BASE_CSP = (
 # for a bracketed IPv6 host, so IPv6 loopback preview cannot be expressed here
 # without pinning a specific port — which the arbitrary-port preview use case
 # rules out.
+# The client mirrors this set in `isEmbeddableLoopbackOrigin`
+# (website/src/lib/tunnelOrigin.ts) to decide, before mounting a remote-crew
+# pane, whether the dashboard's own origin can embed it. Edit the two in step:
+# admitting a new frame-src origin here (e.g. [::1] or https *.localhost) while
+# the client stays unchanged leaves the pane silently refused on an origin the
+# server now allows.
 _LOOPBACK_FRAME_SRC = (
     " http://127.0.0.1:* http://localhost:* http://0.0.0.0:*"
     " https://127.0.0.1:* https://localhost:* https://0.0.0.0:*"
 )
 # Additional tunnel wildcard, only when the instances feature is enabled.
+# Mirrored client-side in isEmbeddableLoopbackOrigin (see above).
 _INSTANCES_FRAME_SRC_EXTRA = " http://*.localhost:*"
 
 # Permissions-Policy header. Chrome 143+ changed the default policy so
@@ -1324,6 +1333,69 @@ async def _vendor_preflight_handler(request: web.Request) -> web.Response:
 _IMMUTABLE_PATH_PREFIXES = ("/assets/",)
 _IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _NO_STORE_CACHE_CONTROL = "no-store, no-cache, must-revalidate, max-age=0"
+
+# Worker scripts are the one hashed asset whose runtime behaviour is governed
+# by its OWN response header rather than the document's: a same-origin worker
+# takes its CSP from the header on its script RESPONSE, not from the page that
+# spawned it (see _BASE_CSP's script-src 'wasm-unsafe-eval' note). Vite content-
+# hashes a chunk by its CONTENT only, so a build that changes just a header — a
+# CSP directive, or a cache policy — keeps the identical hashed filename. Under
+# ``immutable`` a browser that cached the worker never re-fetches it, so it
+# replays the stale header for up to a year and runs on a header that differs
+# from the one the running build serves (WASM refused, every diff/highlight
+# surface dead until a hard refresh). A plain JS/CSS chunk is unaffected: it
+# runs under the DOCUMENT's CSP, and the shell that carries it is served
+# no-store, so the fresh policy always wins; a worker has no fresher copy to
+# override it.
+#
+# Workers therefore use a SHORT-LIVED cacheable policy, not ``immutable`` and
+# not ``no-store``. A 60-second ``max-age`` lets the browser serve the worker
+# from cache for a minute (covering a burst of loads and a brief gateway
+# restart with no round-trip), then re-fetch it — so a header-only change
+# reaches the worker within a minute instead of a year, bounding the stale-CSP
+# window to a minute of degraded highlight. ``no-store`` is wrong here: it would
+# evict the bytes and make the worker unloadable the moment the gateway is
+# unreachable, the very window ``immutable`` protects the entry bundle through.
+# ``stale-if-error`` is added as a best-effort grant to a caching tunnel/proxy
+# in front of the gateway; no mainstream browser honours it, so for a plain
+# browser the gateway-down coverage is the ``max-age`` window alone.
+#
+# A worker chunk is identified by the ``worker`` substring in its filename
+# (``diffWorker-``, ``hljsWorker-``, ``subset-worker.chunk-``,
+# ``worker-portable-``), matched case-insensitively. That the build emits every
+# worker chunk with this substring is asserted against the built dist by
+# test_every_built_worker_chunk_carries_the_marker so a worker named without it
+# fails the build rather than silently regaining ``immutable``.
+_WORKER_ASSET_MARKER = "worker"
+# A short fresh lifetime, not ``no-cache``/``must-revalidate``: the browser
+# serves the worker from cache for 60s (covering a burst of loads and a brief
+# gateway restart without a round-trip), then revalidates and picks up a
+# header-only build within a minute. 60s bounds how long a browser can run a
+# stale worker CSP after an upgrade — a minute of degraded highlight, not a
+# year. ``stale-if-error`` is an intermediary (CDN/proxy) hint that no
+# mainstream browser honours; it is kept as a best-effort grant for a caching
+# tunnel in front of the gateway and does nothing in a plain browser, so the
+# gateway-down guarantee for the browser is the ``max-age`` window alone.
+_WORKER_CACHE_CONTROL = "public, max-age=60, stale-if-error=86400"
+
+
+def _asset_cache_control(path: str) -> str | None:
+    """Cache-Control for a content-hashed ``/assets/`` path, or ``None``.
+
+    Returns the year-long ``immutable`` policy for an ordinary hashed chunk
+    (its URL is its version, so it is safe to cache forever), the short-lived
+    ``_WORKER_CACHE_CONTROL`` for a worker script (whose CSP lives in its own
+    cached header, so it must be re-fetched within a minute of a header-only
+    build while staying cache-servable across a brief gateway-down window), or
+    ``None`` for a path that is not under ``/assets/`` at all — the caller then
+    applies the default no-store policy.
+    """
+    if not path.startswith(_IMMUTABLE_PATH_PREFIXES):
+        return None
+    if _WORKER_ASSET_MARKER in path.rsplit("/", 1)[-1].lower():
+        return _WORKER_CACHE_CONTROL
+    return _IMMUTABLE_CACHE_CONTROL
+
 
 # Max size of a single incoming HTTP header field, raised from aiohttp's
 # 8190-byte default. Browser cookies are not port-isolated (RFC 6265), so on
@@ -1456,8 +1528,9 @@ def _apply_security_headers(
     # ``on_response_prepare`` handler, which runs once the status is final)
     # closes that hole; this early decision stays as the common path.
     status = getattr(resp, "status", None)
-    if status in (200, 206, 304) and path.startswith(_IMMUTABLE_PATH_PREFIXES):
-        resp.headers.setdefault("Cache-Control", _IMMUTABLE_CACHE_CONTROL)
+    asset_cc = _asset_cache_control(path) if status in (200, 206, 304) else None
+    if asset_cc is not None:
+        resp.headers.setdefault("Cache-Control", asset_cc)
     else:
         resp.headers.setdefault("Cache-Control", _NO_STORE_CACHE_CONTROL)
         resp.headers.setdefault("Pragma", "no-cache")
@@ -1528,14 +1601,21 @@ async def _finalize_asset_cache_control(request: web.Request, response: web.Stre
     type=module>`` fails silently and the page never boots — tunnel rebuilds and
     gateway restarts cannot fix it because the cache key is the local URL. This
     hook runs after the status is final and overwrites (not ``setdefault``) the
-    header for exactly that case: an immutable-prefixed path whose final status
-    is not one the immutable policy admits.
+    header for exactly that case: a hashed-asset path whose final status is not
+    one the cacheable policies admit. Covers both the ``immutable`` policy of an
+    ordinary chunk and the short-lived ``_WORKER_CACHE_CONTROL`` of a worker —
+    the worker policy is cacheable (``max-age`` plus an intermediary
+    ``stale-if-error``), so leaving it on a 404 would let a browser cache the
+    error and an intermediary serve the stale bytes of an orphaned worker.
     """
     if response.status in (200, 206, 304):
         return
     if not request.path.startswith(_IMMUTABLE_PATH_PREFIXES):
         return
-    if response.headers.get("Cache-Control") != _IMMUTABLE_CACHE_CONTROL:
+    if response.headers.get("Cache-Control") not in (
+        _IMMUTABLE_CACHE_CONTROL,
+        _WORKER_CACHE_CONTROL,
+    ):
         return
     response.headers["Cache-Control"] = _NO_STORE_CACHE_CONTROL
     response.headers["Pragma"] = "no-cache"
@@ -1914,8 +1994,16 @@ def _register_mcp_routes(app: web.Application) -> None:
         "/api/session-control/stop", _deferred("session_control", "api_session_control_stop")
     )
     app.router.add_post(
+        "/api/session-control/end-wait",
+        _deferred("session_control", "api_session_control_end_wait"),
+    )
+    app.router.add_post(
         "/api/session-control/set-model",
         _deferred("session_control", "api_session_control_set_model"),
+    )
+    app.router.add_post(
+        "/api/session-control/reload",
+        _deferred("session_control", "api_session_control_reload"),
     )
     app.router.add_post(
         "/api/session-control/close", _deferred("session_control", "api_session_control_close")
@@ -3890,6 +3978,31 @@ def _kick_connections_warm_scavenge(state: DashboardState) -> None:
     task.add_done_callback(state._background_tasks.discard)
 
 
+def _kick_local_decision_model(state: DashboardState) -> None:
+    """Start the local decision model the provider names, post-bind.
+
+    Called by both gateway entrypoints only after ``_start_site`` has returned. The
+    import and the config read happen off the event loop, under the provider-switch
+    lock, so a gateway with no local model configured pays one thread hop after the
+    listener is serving and a switch made meanwhile is never undone by a stale read.
+    """
+
+    async def _resume() -> None:
+        try:
+            from kiro_crew.dashboard.handlers.decisions import resume_local_decision_model
+
+            preset = await resume_local_decision_model()
+        except Exception:  # noqa: BLE001 - an optional subsystem never fails the gateway
+            logger.warning("local decision model: resume at startup failed", exc_info=True)
+            return
+        if preset:
+            logger.info("local decision model: starting %s", preset)
+
+    task = asyncio.create_task(_resume())
+    state._background_tasks.add(task)
+    task.add_done_callback(state._background_tasks.discard)
+
+
 def _kick_session_search_index(state: DashboardState) -> None:
     """Keep the session search candidate index caught up, in its OWN process.
 
@@ -4058,6 +4171,18 @@ def _kick_knowledge_orphan_reclaim(state: DashboardState) -> None:
     task = asyncio.create_task(_knowledge_orphan_reclaim())
     state._background_tasks.add(task)
     task.add_done_callback(state._background_tasks.discard)
+
+
+def _register_browser_install_cleanup(app: web.Application, state: DashboardState) -> None:
+    """Stop any browser install owned by this gateway during shutdown."""
+
+    async def _browser_install_shutdown(app_: web.Application) -> None:
+        try:
+            await handlers.stop_browser_install(app_["state"])
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            logger.debug("browser install stop failed during shutdown", exc_info=True)
+
+    app.on_cleanup.append(_browser_install_shutdown)
 
 
 def _register_browser_view_cleanup(app: web.Application, state: DashboardState) -> None:
@@ -4948,6 +5073,19 @@ def _register_stt_hooks(app: web.Application) -> None:
     app.on_startup.append(_stt_startup)
     app.on_cleanup.append(_stt_shutdown)
 
+    # The local decision model the provider names runs for as long as the gateway
+    # does; ``_kick_local_decision_model`` starts it post-bind. Its server also exits
+    # on its own when this process does (it watches the stdin pipe the runtime
+    # holds), so this cleanup is the orderly half only.
+    async def _local_decision_model_shutdown(app_: web.Application) -> None:
+        if "kiro_crew.decisions.local_runtime" not in sys.modules:
+            return
+        from kiro_crew.decisions import local_runtime
+
+        await asyncio.to_thread(local_runtime.get_runtime().deactivate, wait=True)
+
+    app.on_cleanup.append(_local_decision_model_shutdown)
+
 
 def _register_own_host_warm(app: web.Application) -> None:
     """Start reading this machine's own addresses at boot, without waiting on it.
@@ -5201,9 +5339,9 @@ def _register_config_watch(
         await live.watch().stop()
         lifecycle = getattr(state, "_dynamic_cards", None)
         if lifecycle is not None:
-            lifecycle.set_enabled(False)
-            if lifecycle.worker is not None:
-                await asyncio.gather(lifecycle.worker, return_exceptions=True)
+            # One call rather than reaching for a worker attribute: the producer owns two
+            # tasks, the model queue and the number refresher, and both must settle.
+            await lifecycle.shutdown()
 
     app.on_cleanup.append(_config_watch_shutdown)
 
@@ -6291,6 +6429,8 @@ async def start_dashboard(
         # ``runner.setup()`` freezes the app's signal lists. See
         # ``_register_instances_hooks`` for why ordering matters.
         _register_instances_hooks(app, state, port)
+        # Install cleanup stays first, before browser relay/session shutdown.
+        _register_browser_install_cleanup(app, state)
         _register_browser_view_cleanup(app, state)
         _register_connections_warm_lifecycle(app, state)
         _register_workflow_lifecycle(app, state)
@@ -6421,6 +6561,7 @@ async def start_dashboard(
     _kick_connections_warm_scavenge(state)
     _kick_session_search_index(state)
     _kick_config_watch(app, state)
+    _kick_local_decision_model(state)
     # Same shape for the knowledge store's writer-locked orphan sweep: it left
     # the constructor (which runs pre-bind, on the loop) and runs here on a
     # worker thread once requests are already being served.
@@ -7338,6 +7479,7 @@ async def start_api_server(
     # Slack task, identically to the full dashboard.
     _register_prevent_sleep_shutdown(app, state)
     _register_listener_guard_shutdown(app, state)
+    _register_browser_install_cleanup(app, state)
     _register_connections_warm_lifecycle(app, state)
     _register_workflow_lifecycle(app, state)
 
@@ -7431,6 +7573,7 @@ async def start_api_server(
     _kick_connections_warm_scavenge(state)
     _kick_session_search_index(state)
     _kick_config_watch(app, state)
+    _kick_local_decision_model(state)
 
     logger.info("API-only server listening on %s:%d", bind_addr, port)
 

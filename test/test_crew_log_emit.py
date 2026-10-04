@@ -1133,12 +1133,24 @@ def test_the_token_count_says_that_it_is_an_estimate():
     assert _body()[-1]["data"]["tokens_estimated"] is True
 
 
-def test_unclassified_characters_are_reported_as_one_other_source():
+def test_the_named_remainder_keeps_its_own_label():
     # Steering, tool specs and injected ledger context have no marker, so their
-    # characters are genuinely a remainder. Three zeroed sources would claim a
-    # measurement nobody took.
+    # characters are genuinely a remainder -- and `unclassified` is what the splitter
+    # calls it. The label passes through: its readers carry a translated string for
+    # that name and none for a catch-all, so renaming it here makes a named remainder
+    # render as an untranslated word in every shipped locale.
     _open_session()
     emit.on_context_composed(SESSION, 1, blocks={"unclassified": 100, "lessons": 40})
+    assert emit.flush()
+    kinds = [s["kind"] for s in _body()[-1]["data"]["sources"]]
+    assert kinds == ["unclassified", "lessons"]
+
+
+def test_a_source_with_no_label_at_all_is_reported_as_other():
+    # An empty label names nothing, so no reader can be given a translation for it.
+    # This is the ONLY label the emitter renames.
+    _open_session()
+    emit.on_context_composed(SESSION, 1, blocks={"": 100, "lessons": 40})
     assert emit.flush()
     kinds = [s["kind"] for s in _body()[-1]["data"]["sources"]]
     assert kinds == ["other", "lessons"]
@@ -2401,6 +2413,70 @@ def _closer(kind: str) -> dict:
     closers = [e for e in _body() if e["type"] == kind]
     assert len(closers) == 1, f"expected exactly one {kind}, saw {len(closers)}"
     return closers[0]["data"]
+
+
+def _opener(kind: str) -> dict:
+    """The one opener of *kind* in the log, so a test reads its data directly."""
+    openers = [e for e in _body() if e["type"] == kind]
+    assert len(openers) == 1, f"expected exactly one {kind}, saw {len(openers)}"
+    return openers[0]["data"]
+
+
+def test_a_dispatch_records_the_task_the_child_was_asked_to_do():
+    """The one field a card cannot rebuild from anything else in the entry.
+
+    A surface drawing a finished child after the dispatching process is gone reads
+    the task from the log or from nowhere.
+    """
+    _open_session()
+    emit.on_turn_started(SESSION, 1, "user")
+    emit.on_subagent_spawned(SESSION, 1, agent_id="sub-1", task="audit the retry path")
+    assert emit.flush()
+    assert _opener("subagent/spawned")["task"] == "audit the retry path"
+
+
+def test_a_dispatch_with_no_task_text_writes_no_task_key_at_all():
+    """Absent means "this log does not say", and an empty string would not.
+
+    It is also how every log written before the field reads, so the two are the
+    same case to a reader: a card draws no task line rather than a blank one.
+    """
+    _open_session()
+    emit.on_turn_started(SESSION, 1, "user")
+    emit.on_subagent_spawned(SESSION, 1, agent_id="sub-1", task="")
+    assert emit.flush()
+    assert "task" not in _opener("subagent/spawned")
+
+
+def test_the_task_text_is_clipped_on_the_same_terms_as_a_plan_item():
+    """A person's words, bounded so one field cannot dominate the line.
+
+    Same helper and same cap ``plan/updated``'s item text uses -- the other place
+    this module records text a person wrote -- and the ellipsis is part of the
+    value, so a reader can tell a task that ends there from one that was cut.
+    """
+    _open_session()
+    emit.on_turn_started(SESSION, 1, "user")
+    emit.on_subagent_spawned(SESSION, 1, agent_id="sub-1", task="t" * (emit._MAX_SHORT_TEXT + 50))
+    assert emit.flush()
+    written = _opener("subagent/spawned")["task"]
+    assert len(written) == emit._MAX_SHORT_TEXT
+    assert written.endswith("\u2026")
+
+
+def test_a_credential_in_the_task_text_never_reaches_the_log():
+    """Redacted at this boundary, not trusted from the call site.
+
+    The task is raw input a person just typed, so the rule has to hold here: a
+    site added later cannot forget it.
+    """
+    _open_session()
+    emit.on_turn_started(SESSION, 1, "user")
+    emit.on_subagent_spawned(
+        SESSION, 1, agent_id="sub-1", task="deploy with AKIAIOSFODNN7EXAMPLE now"
+    )
+    assert emit.flush()
+    assert "AKIAIOSFODNN7EXAMPLE" not in _opener("subagent/spawned")["task"]
 
 
 def test_a_completed_child_records_the_credits_it_billed():

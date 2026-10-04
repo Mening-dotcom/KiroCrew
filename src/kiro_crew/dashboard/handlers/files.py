@@ -4052,7 +4052,16 @@ async def api_file_raw(request: web.Request) -> web.Response:
         _log("denied", path)
         return web.json_response({"error": "file content is not a recognized format"}, status=403)
     _log("success", path)
-    headers = {"Content-Type": content_type, "X-Content-Type-Options": "nosniff"}
+    # inline (not attachment) keeps the PDF/image rendering in the viewer's
+    # <iframe>/<img>, while naming the file so the browser's native Download /
+    # Save-as saves under the real name instead of "file-raw" -- the last
+    # segment of this endpoint's URL. Sibling parity with api_file_stream.
+    safe_name = urllib.parse.quote(os.path.basename(path), safe="")
+    headers = {
+        "Content-Type": content_type,
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f"inline; filename*=UTF-8''{safe_name}",
+    }
     if content_type == "image/svg+xml":
         headers["Content-Security-Policy"] = "script-src 'none'; style-src 'unsafe-inline'"
     return web.Response(body=data, headers=headers)
@@ -4347,6 +4356,13 @@ async def api_file_stream(request: web.Request) -> web.StreamResponse:
         resp.content_length = end - start + 1
         resp.headers["Accept-Ranges"] = "bytes"
         resp.headers["X-Content-Type-Options"] = "nosniff"
+        # inline (not attachment) keeps playback in the <video>/<audio> element,
+        # while naming the file so a player-initiated download (the native media
+        # controls' Download) saves under the real name instead of "file-stream"
+        # -- the last segment of this endpoint's URL, which the browser would
+        # otherwise use. Sibling parity with api_file_download's Content-Disposition.
+        safe_name = urllib.parse.quote(os.path.basename(path), safe="")
+        resp.headers["Content-Disposition"] = f"inline; filename*=UTF-8''{safe_name}"
         if status == 206:
             resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         # SEL: record the ALLOW decision before any bytes move. prepare() and
@@ -6327,7 +6343,7 @@ def _browse_dirs_sync(base: str, skip: set[str]) -> list[dict]:
         for entry in sorted(os.scandir(base), key=lambda e: e.name.lower()):
             if not _browse_entry_is_dir(entry):
                 continue
-            if entry.name in skip or entry.name.startswith("."):
+            if entry.name in skip:
                 continue
             # Resolve symlinks before the sensitivity check — a symlink in
             # a benign dir pointing at ~/.aws would otherwise pass through.
@@ -6352,8 +6368,6 @@ def _browse_files_sync(base: str, skip: set[str]) -> tuple[list[dict], list[dict
         # on an unreadable child: DirEntry.is_dir stats the target, so one
         # bad sibling would abort sorted() and empty the whole listing.
         for entry in sorted(os.scandir(base), key=lambda e: (not _browse_entry_is_dir(e), e.name.lower())):
-            if entry.name.startswith("."):
-                continue
             # An entry that cannot even be classified is skipped, not fatal:
             # without this, one unreadable child aborts the loop and drops
             # every entry after it.
@@ -6361,6 +6375,9 @@ def _browse_files_sync(base: str, skip: set[str]) -> tuple[list[dict], list[dict
                 is_dir = entry.is_dir(follow_symlinks=True)
                 is_file = False if is_dir else entry.is_file(follow_symlinks=True)
             except OSError:
+                continue
+            # Dot-directories are listed (e.g. ``.worktrees``); dot-files stay hidden.
+            if entry.name.startswith(".") and not is_dir:
                 continue
             # Resolve symlinks before the sensitivity check — a symlink in a
             # benign dir pointing at ~/.aws would otherwise pass through.
@@ -6465,6 +6482,7 @@ async def api_browse_dirs(request: web.Request) -> web.Response:
         _sel().log_api_access(caller=caller, operation="browse_dirs", outcome="denied", resources=base, error="sensitive path")
         return web.json_response({"error": "Access denied", "code": "access_denied"}, status=403)
     skip = {".git", "node_modules", "__pycache__", ".cache", ".venv", "venv", "env", ".kirocrew", ".kiro", ".aim"}
+    skip |= _HIDDEN_TOOL_DIRS
     try:
         dirs = await _run_path_probe(_browse_dirs_sync, base, skip, transfer=True)
     except _PathProbeBusy:
@@ -6827,6 +6845,7 @@ async def api_browse_files(request: web.Request) -> web.Response:
         _sel().log_api_access(caller=caller, operation="browse_files", outcome="denied", resources=base, error="sensitive path")
         return web.json_response({"error": "Access denied", "code": "access_denied"}, status=403)
     skip = {".git", "node_modules", "__pycache__", ".cache", ".venv", "venv", "env", ".kirocrew", ".kiro", ".aim", "build", "dist", ".next"}
+    skip |= _HIDDEN_TOOL_DIRS
     try:
         dirs, files = await _run_path_probe(_browse_files_sync, base, skip, transfer=True)
     except _PathProbeBusy:
@@ -7355,14 +7374,19 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
     # enforcement point. Resolved off-thread (profile resolution may read from
     # disk); every decision is SEL-audited by the probe itself.
     from kiro_crew.dashboard import social_share
-    from kiro_crew.decisions.capability import is_decisions_denied
+    from kiro_crew.decisions.capability import denied_sides
 
     social_share_denied = await asyncio.to_thread(social_share.is_share_denied)
     # Same shape, same reason: the Decisions feature-preview card is drawn only when
     # the ceiling permits the seam, and this endpoint is the only place the dashboard
     # can learn that. Presentation, not the control -- the consent PUT and the gate's
-    # own consent read are the two chokepoints (``decisions/capability.py``).
-    decisions_denied = await asyncio.to_thread(is_decisions_denied)
+    # own consent read are the two chokepoints (``decisions/capability.py``). The card
+    # is drawn while EITHER side permits: a fleet that allows hosted Jev but withdraws
+    # local models (``capabilities.decisions_local``) still needs the card. A pinned
+    # ``capabilities.decisions`` deny covers the local side too, so it hides the card.
+    # Both rows evaluated in one hop, each audited once, never short-circuited.
+    hosted_denied, local_denied = await asyncio.to_thread(denied_sides)
+    decisions_denied = hosted_denied and local_denied
     return web.json_response(
         {
             "restore_sessions": cfg.dashboard.restore_sessions,
@@ -8449,8 +8473,39 @@ _PROJECT_TREE_SKIP_DIRS = frozenset(
         "target",
         ".gradle",
         ".idea",
+        # Kiro Crew state, hidden as in the Open/Browse picker.
+        ".kiro",
+        ".kirocrew",
     }
 )
+# The dot-named tool folders of the tree's set, also hidden by the Open/Browse
+# picker and the file browser.
+_HIDDEN_TOOL_DIRS = frozenset(d for d in _PROJECT_TREE_SKIP_DIRS if d.startswith("."))
+
+
+def _project_tree_entries(
+    dirpath: str, dirnames: list[str], filenames: list[str]
+) -> tuple[list[str], list[str]]:
+    """The ``(dirs, files)`` the non-git tree walk keeps under *dirpath*.
+
+    Dot-directories are walked (``.worktrees`` holds checkouts users navigate
+    to). A dot-name, and every entry beneath a dot-directory, is checked
+    against the sensitive-path fence on its real path, since the stores it
+    fences (``.aws``, ``.config/gcloud``, ``.docker/config.json``, ...) live
+    under dot-names. "Beneath a dot-directory" is read off the real path of
+    *dirpath*, ancestors above the project root included, so a project rooted
+    inside one (``~/.config``) is fenced too. Runs on the walk's worker thread,
+    so the pre-resolved gate answers inline.
+    """
+    under_dot = any(part.startswith(".") for part in PurePath(os.path.realpath(dirpath)).parts)
+
+    def fenced(name: str) -> bool:
+        if not (under_dot or name.startswith(".")):
+            return False
+        return is_sensitive_resolved_path(os.path.realpath(os.path.join(dirpath, name)))
+
+    dirs = sorted(d for d in dirnames if d not in _PROJECT_TREE_SKIP_DIRS and not fenced(d))
+    return dirs, [f for f in filenames if not fenced(f)]
 
 
 def _project_tree_directories(paths: list[str]) -> list[str]:
@@ -8626,8 +8681,8 @@ async def api_project_tree(request: web.Request) -> web.Response:
         # is required to return the directory skeleton past the file cap.
         directories: list[str] = []
         # Directories the walk leaves CHILDLESS although they are not empty on
-        # disk: every entry is a directory this filter drops (a dot-directory
-        # or a tooling cache) and there is no file -- a symlink to a directory
+        # disk: every entry is one this filter drops (a skip-set directory or
+        # a fenced entry) and no entry is kept -- a symlink to a directory
         # is NOT such an entry (it is a visible row of its own, see
         # ``linked_directories``). The dashboard renders a childless folder
         # with a state row beneath it, and the row must not call such a folder
@@ -8687,7 +8742,7 @@ async def api_project_tree(request: web.Request) -> web.Response:
 
         file_counts: dict[str, int] = {}
         for dirpath, dirnames, filenames in os.walk(base, onerror=_record_unreadable):
-            had_subdirectories = bool(dirnames)
+            had_entries = bool(dirnames or filenames)
             rel_dir = os.path.relpath(dirpath, base)
             directory = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
             if directory:
@@ -8707,9 +8762,9 @@ async def api_project_tree(request: web.Request) -> web.Response:
             # so links are told apart among the names the filter KEPT, and a
             # filtered link counts as a hidden entry like any filtered
             # directory. Hidden-only therefore means every entry the folder
-            # holds is one the listing filters out by nature (dot-directories,
-            # the skip set), real or linked: it applies when the filter emptied
-            # ``dirnames`` and no file remains. A kept link is a row, and a
+            # holds is one the listing filters out by nature (skip-set
+            # directories, fenced entries), real or linked: it applies when the
+            # filter left no directory and no file. A kept link is a row, and a
             # folder holding only kept links is not hidden-only. The root is
             # judged by the same rule, OUTSIDE the ``if directory`` above: a
             # project directory whose top level holds only skipped or hidden
@@ -8718,16 +8773,21 @@ async def api_project_tree(request: web.Request) -> web.Response:
             # the workspace empty -- the claim this listing refuses to make one
             # level down. The root is no directory row of its own, so it is
             # named as ``.``, exactly as an unreadable root is.
-            dirnames[:] = sorted(
-                d for d in dirnames if d not in _PROJECT_TREE_SKIP_DIRS and not d.startswith(".")
-            )
-            links = [name for name in dirnames if os.path.islink(os.path.join(dirpath, name))]
+            dirnames[:], filenames = _project_tree_entries(dirpath, dirnames, filenames)
+            # ``os.walk`` stops at a symlink but descends a Windows junction, so
+            # both are listed as link rows and pruned here, never walked.
+            links = [
+                name
+                for name in dirnames
+                if platform_compat.is_link_or_junction(os.path.join(dirpath, name))
+            ]
             for name in links:
                 link = f"{directory}/{name}" if directory else name
                 directories.append(link)
                 linked_directories.append(link)
-            if had_subdirectories and not filenames and not dirnames:
+            if had_entries and not filenames and not dirnames:
                 hidden_only_directories.append(directory or ".")
+            dirnames[:] = [name for name in dirnames if name not in links]
             file_counts[directory] = len(filenames)
 
         quotas = _project_tree_file_quotas(file_counts, _PROJECT_TREE_MAX_ENTRIES)
@@ -8736,11 +8796,14 @@ async def api_project_tree(request: web.Request) -> web.Response:
         )
         paths: list[str] = []
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(
-                d for d in dirnames if d not in _PROJECT_TREE_SKIP_DIRS and not d.startswith(".")
-            )
             rel_dir = os.path.relpath(dirpath, base)
             directory = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+            dirnames[:], filenames = _project_tree_entries(dirpath, dirnames, filenames)
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not platform_compat.is_link_or_junction(os.path.join(dirpath, name))
+            ]
             prefix = "" if not directory else directory + "/"
             for name in sorted(filenames)[: quotas.get(directory, 0)]:
                 paths.append(prefix + name)

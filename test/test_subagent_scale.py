@@ -23,6 +23,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from overload_fakes import settle_depth_emits, settle_store_writes
 
 from kiro_crew import subagent as subagent_module
 from kiro_crew.subagent import (
@@ -39,6 +40,11 @@ pytestmark = pytest.mark.usefixtures("healthy_host_memory")
 
 # Subagent-registry isolation is provided globally by the autouse
 # ``_isolate_subagents_dir`` fixture in ``conftest.py``.
+
+
+@pytest.fixture(autouse=True)
+def _close_subagent_managers(close_subagent_managers):
+    """Every manager built here is closed at teardown; the body is in ``conftest``."""
 
 
 # ── 1. Coalescer ─────────────────────────────────────────────────────
@@ -537,9 +543,9 @@ class TestBatchIdentity:
         from types import SimpleNamespace
 
         from kiro_crew.dashboard.handlers.messaging import (
+            _retry_failed_run,
             _stage_boundary_owner_for_parent,
             _stage_boundary_slot_for_parent,
-            api_spawn_retry,
         )
         from kiro_crew.dashboard.state import StageBoundary
         from kiro_crew.subagent_manager.admission.gate import _GateMixin
@@ -557,7 +563,7 @@ class TestBatchIdentity:
                 '"_stage_boundary_owner": _stage_boundary_owner',
             ),
             "retry": (
-                api_spawn_retry,
+                _retry_failed_run,
                 "_stage_boundary_owner_for_parent(state, old.parent_session_key)",
             ),
             "respawn": (
@@ -1155,7 +1161,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1218,7 +1223,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1256,6 +1260,45 @@ class TestWaveDigest:
         assert "requested" not in body
 
     @pytest.mark.asyncio
+    async def test_wave_digest_flags_a_completed_partial_member(self):
+        """A member kept after a generate failure is completed but partial; its ok line says so."""
+        orch = _make_orchestrator()
+        orch.sessions = _mock_sessions()
+        orch.ctx_builder = MagicMock()
+        orch.ctx_builder.hooks = MagicMock()
+        orch.dashboard_state = _mock_dashboard_state()
+        slot = MagicMock()
+        slot.mode = "chat"
+        slot.running = False
+        slot.task = None
+        slot._subagent_deliveries_inflight = 0
+        orch.dashboard_state.get_slot = MagicMock(return_value=slot)
+        mgr, on_done = self._capture_on_done(orch)
+        injected: list[str] = []
+
+        async def _fake_run_chat(_state, _slot, text, *, _directive_user_origin, **_kw):
+            injected.append(text)
+
+        with (
+            patch("kiro_crew.slack.gateway._run_chat", side_effect=_fake_run_chat),
+            patch("kiro_crew.subagent_persistence.mark_delivered"),
+        ):
+            m0, m1 = self._member(0, 2), self._member(1, 2)
+            m0.partial = True
+            mgr.batch_members_pending = MagicMock(return_value=True)
+            await on_done(m0)
+            await asyncio.sleep(0)
+            mgr.batch_members_pending = MagicMock(return_value=False)
+            await on_done(m1)
+            await asyncio.sleep(0)
+            await _settle(lambda: len(injected) >= 1, what="the wave digest injected")
+
+        lines = "\n".join(injected).splitlines()
+        tag = "✅ (partial: backend failed to generate the final response)"
+        assert any(f"`{m0.id}` {tag}" in line for line in lines)
+        assert not any(f"`{m1.id}`" in line and "partial" in line for line in lines)
+
+    @pytest.mark.asyncio
     async def test_wave_digest_no_model_tag_when_served_model_absent(self):
         """Maintainer kyleseaman: when resolved_model is empty the card shows
         nothing, so the digest line must not label the pin as `model
@@ -1269,7 +1312,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1309,7 +1351,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1356,7 +1397,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1408,7 +1448,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1456,7 +1495,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1513,7 +1551,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1559,7 +1596,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1694,7 +1730,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1798,7 +1833,6 @@ class TestWaveDigest:
         # than dispatched. `task = None` keeps the shield-await a no-op.
         slot.running = True
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         slot._subagents_inline_collected = set()
         queued: list[dict] = []
@@ -1876,7 +1910,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         # Real attribute, not a MagicMock truthy stub: the stub below flips it
         # exactly as _run_chat does on a signed-out CLI.
@@ -1945,7 +1978,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -1981,58 +2013,6 @@ class TestWaveDigest:
         ], "the debt stays parked for a recovery replay to claim"
 
     @pytest.mark.asyncio
-    async def test_guard_msgs_from_all_members_fold_into_digest(self):
-        """Orchestration escalations from HELD mid-wave members must survive
-        into the digest (Arbiter item 3) — not just the last member's."""
-        orch = _make_orchestrator()
-        orch.sessions = _mock_sessions()
-        orch.ctx_builder = MagicMock()
-        orch.ctx_builder.hooks = MagicMock()
-        orch.dashboard_state = _mock_dashboard_state()
-        slot = MagicMock()
-        slot.mode = "orchestrator"
-        # Pre-seeded tracker: every failure trips the escalation ceiling.
-        tracker = MagicMock()
-        tracker.stopped = False
-        tracker.record_failure = MagicMock(return_value=True)
-        tracker.failure_count = MagicMock(return_value=2)
-        tracker.record_success = MagicMock()
-        tracker.record_round = MagicMock(return_value=False)
-        slot._orch_tracker = tracker
-        slot.running = False
-        slot.task = None
-        slot._subagent_deliveries_inflight = 0
-        orch.dashboard_state.get_slot = MagicMock(return_value=slot)
-        mgr, on_done = self._capture_on_done(orch)
-        mgr.running_agents_for = MagicMock(return_value=["still-running"])
-        total = 12
-        injected: list[str] = []
-
-        async def _fake_run_chat(_state, _slot, text, *, _directive_user_origin, **_kw):
-            assert _directive_user_origin is False
-            injected.append(text)
-
-        with (
-            patch("kiro_crew.slack.gateway._run_chat", side_effect=_fake_run_chat),
-            patch("kiro_crew.subagent_persistence.mark_delivered"),
-        ):
-            for i in range(total):
-                mgr.batch_members_pending = MagicMock(return_value=i != total - 1)
-                # Mid-wave failure (held member) trips the ceiling; the LAST
-                # member succeeds, so its own guard_msg is empty.
-                await on_done(self._member(i, total, error="boom" if i == 2 else ""))
-                await asyncio.sleep(0)
-            await _settle(lambda: len(injected) >= 2, what="both digest chunks injected")
-        assert len(injected) == 2  # chunked: 10 + 2
-        combined = "\n".join(injected)
-        # The held member's escalation instruction reached the parent, in the
-        # chunk that contains that member…
-        assert "You MUST ask the user for guidance" in injected[0]
-        # …exactly once across the whole wave (deduped within the chunk, and
-        # chunk buffers reset between flushes — no bleed into later chunks).
-        assert combined.count("You MUST ask the user for guidance") == 1
-
-    @pytest.mark.asyncio
     async def test_small_wave_delivers_single_chunk_digest(self):
         """Small multi-task waves (2-10 agents) get ONE consolidated chunk
         digest on wave close — chunking is uniform for every multi-task
@@ -2049,7 +2029,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -2089,7 +2068,6 @@ class TestWaveDigest:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
         mgr, on_done = self._capture_on_done(orch)
@@ -2296,7 +2274,6 @@ class TestDigestHoldDeadline:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         slot._subagents_inline_collected = set()
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
@@ -2373,7 +2350,6 @@ class TestDigestHoldDeadline:
         slot.mode = "chat"
         slot.running = False
         slot.task = None
-        slot._orch_tracker = None
         slot._subagent_deliveries_inflight = 0
         slot._subagents_inline_collected = set()
         orch.dashboard_state.get_slot = MagicMock(return_value=slot)
@@ -2869,10 +2845,11 @@ class TestQueuedDepthReachesZero:
         assert all(d == 0 for d in depths[first_zero:]), depths
 
     def test_dispatching_rows_are_excluded_from_dispatch_reads_only(self):
-        """Two exclusion sets, on purpose. The pump's refill and the depth the
-        chip shows leave a popped row out (it is being started); a parent's
-        Stop and every other pending-work read keep seeing it, because a row in
-        exactly that popped-unclaimed state is the one a Stop must still reach."""
+        """Two exclusion sets, on purpose. The pump's refill (and, through its
+        own set, the depth the chip shows) leaves a popped row out (it is being
+        started); a parent's Stop and every other pending-work read keep seeing
+        it, because a row in exactly that popped-unclaimed state is the one a
+        Stop must still reach."""
         mgr = SubagentManager(sessions=_mock_sessions(), ctx_builder=_mock_ctx(), max_concurrent=4)
         mgr._dispatching_ids.add("popped-row")
         assert "popped-row" in mgr._admission.taskq_dispatch_excluded_ids()
@@ -2922,6 +2899,9 @@ class TestQueuedDepthReachesZero:
             mgr._claim_finalize(first)
             assert mgr._release_slot(first)
             mgr._running_count -= 1
+            await settle_store_writes(mgr._taskq, rounds=4)
+            await settle_depth_emits(mgr)
+            popped_at = len(depths)
             mgr._drain_queue()
             await asyncio.wait_for(hold.wait(), 5)
             assert second.id in mgr._dispatching_ids and not mgr._queue
@@ -2929,13 +2909,17 @@ class TestQueuedDepthReachesZero:
             assert await mgr.has_pending_work_for_async("dashboard:s1") is True
             assert mgr.queued_count_for("dashboard:s1") == 1
             assert await mgr.queued_count_for_async("dashboard:s1") == 1
-            # The chip's reading: the row is being started, not waiting.
-            assert mgr._queued_depth("dashboard:s1", for_dispatch=True) == 0
+            # The chip's reading, as published: the row is being started.
+            await settle_store_writes(mgr._taskq, rounds=4)
+            await settle_depth_emits(mgr)
+            assert depths[popped_at:] == [0], depths
             released.set()
-            for _ in range(25):
-                await asyncio.sleep(0.02)
+            await settle_store_writes(mgr._taskq, rounds=4)
+            await settle_depth_emits(mgr)
+        assert second.id in mgr._agents
         assert mgr._dispatching_ids == set()
-        assert depths and depths[-1] == 0, depths
+        # Nothing published after the pop shows the started row as waiting.
+        assert depths[popped_at:] and all(d == 0 for d in depths[popped_at:]), depths
 
     @pytest.mark.asyncio
     async def test_stop_all_reaches_a_popped_but_unclaimed_row(self):

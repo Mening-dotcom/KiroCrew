@@ -874,6 +874,10 @@ if credential or exfiltration redaction would change executable source, the save
 the library never persists a corrupted script. Async gateway, authoring, and saved-run
 paths offload library disk I/O to worker threads, while the service serializes library
 operations so slug allocation and revision checks remain atomic in-process.
+Revision updates also hold a sidecar file lock across the disk read, expected-revision
+check, and atomic replacement. This makes two gateway or harness processes sharing
+the library reject the second update to the same revision rather than silently
+accepting both and losing one writer's source.
 
 Only explicitly saved definitions participate in local authoring matches.
 `search(intent)` uses deterministic local lexical ranking. `author(intent)` adds
@@ -889,7 +893,7 @@ their exact YAML to TaskRunner without LLM decomposition and retain the saved
 definition id, slug, and revision on both the project and shared run.
 
 The chat run card offers explicit promotion after an ad-hoc Python run reaches
-`finished`. Agent Capabilities > Workflows has **Workflow library** and **Runs**
+`finished`. Customize > Workflows has **Workflow library** and **Runs**
 views; the Runs view lists both dynamic Python and TaskRunner-backed runs. It
 also offers promotion for a paused or finished TaskRunner plan whose run
 declares the `save` capability. It loads the response-redacted run snapshot for
@@ -909,7 +913,7 @@ editor uses the same line-numbered, horizontally scrolling source surface in
 editable mode. Python is highlighted as Python and TaskRunner plans as YAML. Both
 source views are presentation-only:
 neither normalizes nor reformats source bytes. On success, the card shows
-`/workflow <slug>` and links to Agent Capabilities > Workflows.
+`/workflow <slug>` and links to Customize > Workflows.
 
 Session promotion derives lineage from the validated original source's
 `META["adapted_from"]` and accepts it only when the exact id and revision exist in
@@ -1027,7 +1031,20 @@ Each failed attempt is destroyed before the next. Authentication, configuration,
 permission, arbitrary, model-prompt, and validation failures are not startup
 retries. Once a session is ready, script validation still loops up to
 `_AUTHOR_RETRIES + 1` = 3 attempts and feeds the validation errors back on each
-retry. `_strip_fence` peels only the opening fence line and a trailing fence,
+retry. When the previous reply was cut off, the retry says so and asks for a
+shorter complete script instead of "fix it", since a same-length regeneration
+stops in the same place. A reply counts as cut off when its turn ended with ACP
+stop reason `max_tokens`, even when the script validates, or when it fails to
+parse because it ends mid-construct: a bracket or triple-quoted string still
+open at end of input, or a syntax error on its last line
+(`_ends_mid_construct`). When every attempt fails,
+the result's `errors` keeps each attempt's errors, prefixed `attempt N/3:`, so
+the failed run shows what every attempt hit rather than only the last. Because
+that list is stored and served verbatim as the run's error, each attempt
+retains at most `_AUTHOR_ERRORS_PER_ATTEMPT` errors, each cut to
+`_AUTHOR_ERROR_CHARS` characters, plus one `+N more errors` entry counting the
+rest; the retry prompt still receives every error in full.
+`_strip_fence` peels only the opening fence line and a trailing fence,
 never splitting on every ``` , because a literal triple backtick inside the
 script body would otherwise truncate it mid-statement.
 
@@ -1214,6 +1231,28 @@ budget snapshot. On a terminal state, `dashboard/workflow_inject.py` posts the
 result into the originating chat slot and starts (or queues) an agent turn so the
 user gets a synthesized answer rather than a raw blob.
 
+An agent the run ends before it finishes has no `agent_finished`: `_RunContext.agent()`
+records that event only after its call returns, and a cancel leaves the call by
+`CancelledError`, which is not the `Exception` its handler catches, whether an operator
+cancelled the run or the wall-clock ceiling cancelled the script task before recording
+`run_failed` (`where="ceiling"`). A budget ceiling cannot leave an agent in flight:
+`BudgetExceeded` is raised before `agent_started` (see the order of operations above).
+The views therefore derive that agent's state from the RUN status, not from an
+event of its own (`runModel.agentState`): an agent with no finish reads as running
+only while the run is `running` or `paused`, and as **stopped** once the run is
+terminal (`finished`, `failed`, `cancelled`), drawn with the `Square` stop mark the
+subagent surfaces use for the same state and named with the chat stop card's
+catalog entry. The current phase of a cancelled run reads as **stopped** too, never
+as a success: the run ended inside it, so the phase did not complete. So does an
+earlier phase the run ended inside: `pipeline()` has no barrier between stages, so a
+later phase can start while an earlier one still has an agent in flight, and that
+phase reads **stopped** rather than ok beside its stopped row. A `finished`
+run's current phase is ok and a `failed` run's is failed. The tree
+(`WorkflowRunTree.tsx`) and the graph (`planModel.ts`, `WorkflowRunGraph.tsx`) share
+the rule so one run cannot read two ways; pinned by
+`website/src/test/WorkflowRunTree.cancelledAgents.test.tsx`,
+`WorkflowRunGraph.test.tsx` and `workflowPlanModel.test.ts`.
+
 ### Plan preview and the graph view
 
 The event stream says what a run DID. `workflows/preview.py` says what its script
@@ -1324,7 +1363,7 @@ The dashboard handles `/workflow <slug> [input]` locally before harness session
 acquisition; `/workflow` alone lists saved definitions. This keeps the command
 identical across Kiro and adapted harnesses, and prevents an explicit reference
 from being reinterpreted by a harness. The definition format selects its owning
-driver; there is no user-facing engine choice. The Agent Capabilities →
+driver; there is no user-facing engine choice. The Customize →
 Workflows tab is the human management surface. Its Workflow library view owns
 listing, authoring unsaved drafts, lineage, source edits as new revisions, and
 exact saved runs; its Runs view owns common history and explicit promotion.

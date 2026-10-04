@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import io
 import json
 import logging
 import mmap
@@ -833,6 +834,53 @@ class TestProcessCommandLine:
         # A non-existent PID yields "" (fail-closed), never an exception.
         assert pc.process_command_line(2_000_000_000) == ""
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="the WMI/PowerShell arm is Windows-only")
+    def test_windows_cmdline_survives_a_character_outside_the_code_page(self):
+        # The Windows arm reads the command line back through PowerShell, and
+        # both ends of that pipe are pinned to UTF-8 so a character the host
+        # code page cannot represent survives the round trip. With either end
+        # left on the code page it is silently best-fitted away and the probe
+        # answers a plausible string that does not equal the real command line
+        # -- which is what the callers compare to decide whether a listening
+        # PID is our own gateway.
+        #
+        # The needle is chosen against the live code page rather than hardcoded:
+        # which characters are lost depends on the host (cp1252 loses the CJK
+        # one, cp950 loses the accented one), and on a UTF-8 host nothing is
+        # lost and there is nothing to assert.
+        import locale
+
+        code_page = locale.getpreferredencoding(False)
+        needle = ""
+        for candidate in ("張", "é", "Ж", "क"):
+            try:
+                candidate.encode(code_page)
+            except UnicodeEncodeError:
+                needle = candidate
+                break
+        if not needle:
+            pytest.skip(f"{code_page} encodes every probe character; no divergence to assert")
+        # Guard the guard: an encodable needle would make this test pass against
+        # the unfixed decode, so prove the chosen one really is unrepresentable.
+        with pytest.raises(UnicodeEncodeError):
+            needle.encode(code_page)
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", f"import time; _ = {needle!r}; time.sleep(30)"],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            cl = pc.process_command_line(child.pid)
+            # "" stays tolerated for the same reason as the probe above: a cold
+            # PowerShell plus a WMI query can exceed the 10s timeout on a loaded
+            # runner, and that is the documented failure return, not a defect.
+            # A NON-empty answer, though, is the real command line or it is wrong.
+            if cl:
+                assert needle in cl
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+
 
 class TestProcessOwnerUid:
     """`process_owner_uid` backs the ownership half of the CLI's port-trust gate,
@@ -1033,6 +1081,77 @@ class TestUtf8Console:
         finally:
             log.removeHandler(handler)
         assert errors == []
+
+
+class _TtyTextIOWrapper(io.TextIOWrapper):
+    """A text stream that answers like a terminal and counts reconfigure calls."""
+
+    reconfigures = 0
+
+    def isatty(self) -> bool:
+        return True
+
+    def reconfigure(self, **kwargs) -> None:
+        type(self).reconfigures += 1
+        super().reconfigure(**kwargs)
+
+
+class TestLineBufferedStdout:
+    STATUS_LINE = "👻 Kiro Crew gateway starting…"
+
+    def test_status_line_reaches_a_non_tty_stdout_as_printed(self, monkeypatch):
+        # A pipe or a file (the journal under systemd, the Desktop supervisor's
+        # log fd, a detached gateway's own gateway.log) gets a block-buffered
+        # stdout, so a status line sits in the buffer until it fills or the
+        # process exits. After the gateway's stdout setup, one plain print()
+        # with no flush must already be in the underlying bytes.
+        raw = io.BytesIO()
+        # newline="\n": one byte per newline on every OS, so the compare is about buffering.
+        stream = io.TextIOWrapper(raw, encoding="utf-8", newline="\n", line_buffering=False)
+        assert not stream.isatty()
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        pc.ensure_line_buffered_stdout()
+        print(self.STATUS_LINE)
+
+        assert raw.getvalue() == f"{self.STATUS_LINE}\n".encode("utf-8")
+
+    def test_a_terminal_stdout_is_left_alone(self, monkeypatch):
+        # A terminal is line-buffered by the interpreter itself; the seam must
+        # not touch it (not even a flush through reconfigure).
+        stream = _TtyTextIOWrapper(
+            io.BytesIO(), encoding="utf-8", newline="\n", line_buffering=True
+        )
+        _TtyTextIOWrapper.reconfigures = 0
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        pc.ensure_line_buffered_stdout()
+
+        assert _TtyTextIOWrapper.reconfigures == 0
+        assert stream.line_buffering is True
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            pytest.param(None, id="absent-pythonw"),
+            pytest.param(io.StringIO(), id="no-reconfigure"),
+            pytest.param(types.SimpleNamespace(), id="plain-object"),
+        ],
+    )
+    def test_a_stream_that_cannot_be_reconfigured_does_not_raise(self, monkeypatch, stdout):
+        # Boot must survive a replaced or captured stdout: a launcher's plain
+        # object up a multi-process spawn chain, a test's StringIO, or no
+        # stream at all. Nothing to buffer means nothing to do.
+        monkeypatch.setattr(sys, "stdout", stdout)
+
+        pc.ensure_line_buffered_stdout()  # must not raise
+
+    def test_a_closed_stdout_does_not_raise(self, monkeypatch):
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n")
+        stream.close()
+        monkeypatch.setattr(sys, "stdout", stream)
+
+        pc.ensure_line_buffered_stdout()  # must not raise
 
 
 def _wire_mapping(buf: mmap.mmap, length: int) -> bool:
@@ -2719,8 +2838,8 @@ class TestProcessDescendants:
             ),
         ]
         assert runs == [
-            ["/usr/bin/ps", "-Ao", "pid=,ppid=,lstart="],
-            ["/usr/bin/ps", "-Ao", "pid=,ppid=,lstart="],
+            ["/usr/bin/ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "lstart="],
+            ["/usr/bin/ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "lstart="],
         ]
 
     @pytest.mark.parametrize(
@@ -7957,3 +8076,367 @@ class TestStripExtendedLengthPrefix:
         monkeypatch.setattr(pc, "strip_extended_length_prefix", record)
         workflow_memory._allocator_path(tmp_path / "run-ids.json", tmp_path)
         assert calls, "workflow_memory did not reach the shared fold"
+
+
+class TestOpenCreateOrExisting:
+    """The one create-or-open every lock sidecar shares (SEL chain lock, decision
+    log, app-deps provisioning lock): elect one creator, hand contenders the
+    creator's inode, never recreate a leaf that vanished."""
+
+    def test_absent_name_is_created_with_the_mode(self, tmp_path):
+        target = tmp_path / "x.lock"
+        fd = pc.open_create_or_existing(target, os.O_RDWR, 0o600)
+        try:
+            assert target.exists()
+            if pc.IS_POSIX:
+                assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        finally:
+            os.close(fd)
+
+    def test_existing_name_is_opened_not_truncated(self, tmp_path):
+        target = tmp_path / "x.lock"
+        target.write_bytes(b"held")
+        fd = pc.open_create_or_existing(target, os.O_RDWR)
+        try:
+            assert os.read(fd, 8) == b"held"
+        finally:
+            os.close(fd)
+
+    def test_a_missing_parent_is_the_callers_enoent(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            pc.open_create_or_existing(tmp_path / "gone" / "x.lock", os.O_RDWR)
+
+    @pytest.mark.skipif(not pc.IS_POSIX, reason="dir_fd is a POSIX openat feature")
+    def test_descriptor_relative_open_lands_under_the_pin(self, tmp_path):
+        dir_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fd = pc.open_create_or_existing("x.lock", os.O_RDWR, 0o600, dir_fd=dir_fd)
+            try:
+                assert os.fstat(fd).st_ino == (tmp_path / "x.lock").stat().st_ino
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dir_fd)
+
+    def test_racing_creators_all_hold_one_inode(self, tmp_path):
+        """Forty threads race to create the same absent name, many rounds: every
+        caller comes back with a descriptor, and every descriptor names the one
+        inode -- the property a nonexclusive ``O_CREAT`` does not give on Darwin."""
+        for round_no in range(20):
+            target = tmp_path / f"race-{round_no}.lock"
+            gate = threading.Barrier(40)
+            fds: list[int] = []
+            errors: list[BaseException] = []
+            lock = threading.Lock()
+
+            def contend() -> None:
+                try:
+                    gate.wait(timeout=10)
+                    fd = pc.open_create_or_existing(target, os.O_RDWR, 0o600)
+                    with lock:
+                        fds.append(fd)
+                except BaseException as exc:  # noqa: BLE001 - recorded for the assert
+                    with lock:
+                        errors.append(exc)
+
+            threads = [threading.Thread(target=contend) for _ in range(40)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+            try:
+                assert not errors, errors
+                assert len(fds) == 40
+                assert len({os.fstat(fd).st_ino for fd in fds}) == 1
+            finally:
+                for fd in fds:
+                    os.close(fd)
+
+
+class TestOpenLockFileForSweep:
+    """``open_lock_file_for_sweep`` lets the orphan-lock sweep delete a lock file
+    while still holding its own verification handle on it. On POSIX an open fd
+    never blocks an unlink; on Windows a CRT descriptor omits
+    ``FILE_SHARE_DELETE``, so the sweep's own handle would block the delete with a
+    sharing violation and residue would never be reclaimed (the shard-2 reds). The
+    Windows path must open with delete-sharing.
+    """
+
+    def test_posix_opens_rdwr_without_following_links_and_allows_unlink_while_open(
+        self, tmp_path, monkeypatch
+    ):
+        if not pc.IS_POSIX:
+            pytest.skip("exercises real POSIX unlink-while-open semantics")
+        monkeypatch.setattr(pc, "IS_POSIX", True)
+        monkeypatch.setattr(pc, "IS_WINDOWS", False)
+        lock = tmp_path / "lock"
+        lock.write_bytes(b"")
+        fd = pc.open_lock_file_for_sweep(lock)
+        try:
+            # The whole point: the inode is deletable while this fd is open, which
+            # is what lets the sweep remove residue under its own held lock.
+            os.unlink(lock)
+            assert not lock.exists()
+            assert os.fstat(fd).st_size == 0
+        finally:
+            os.close(fd)
+
+    def test_posix_refuses_a_symlink_at_the_name(self, tmp_path, monkeypatch):
+        if not pc.IS_POSIX:
+            pytest.skip("exercises real POSIX symlink + O_NOFOLLOW semantics")
+        if not hasattr(os, "O_NOFOLLOW"):
+            pytest.skip("O_NOFOLLOW unavailable")
+        monkeypatch.setattr(pc, "IS_POSIX", True)
+        monkeypatch.setattr(pc, "IS_WINDOWS", False)
+        target = tmp_path / "target"
+        target.write_bytes(b"")
+        link = tmp_path / "lock"
+        os.symlink(target, link)
+        with pytest.raises(OSError):
+            pc.open_lock_file_for_sweep(link)
+
+    def test_windows_createfilew_requests_delete_sharing_and_read_write(self, monkeypatch):
+        # Simulate the Windows path and capture the CreateFileW arguments. The
+        # share mode must include FILE_SHARE_DELETE so the subsequent unlink lands
+        # while this handle (and its byte-range lock) is still held; without it a
+        # sharing violation leaves genuine residue behind.
+        captured: dict = {}
+
+        def create_file(path, access, share, security, disposition, flags, template):
+            captured.update(
+                path=path,
+                access=access,
+                share=share,
+                disposition=disposition,
+                flags=flags,
+            )
+            return 0x1234
+
+        kernel = types.SimpleNamespace(
+            CreateFileW=create_file,
+            CloseHandle=lambda _h: True,
+        )
+        monkeypatch.setattr(pc, "IS_POSIX", False)
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        monkeypatch.setattr(pc.ctypes, "WinDLL", lambda *_a, **_k: kernel, raising=False)
+        monkeypatch.setattr(
+            pc, "msvcrt", types.SimpleNamespace(open_osfhandle=lambda _h, _flags: 77), raising=False
+        )
+
+        fd = pc.open_lock_file_for_sweep(r"C:\agents\alias.lock")
+
+        assert fd == 77
+        assert captured["share"] == pc._WIN_FILE_SHARE_READ_WRITE_DELETE
+        assert captured["share"] & 0x00000004  # FILE_SHARE_DELETE bit is set
+        assert captured["access"] == pc._WIN_GENERIC_READ | pc._WIN_GENERIC_WRITE
+        assert captured["disposition"] == pc._WIN_OPEN_EXISTING  # never creates
+        assert captured["flags"] == 0  # no OPEN_REPARSE_POINT; caller pre-checks
+
+    def test_windows_closes_the_native_handle_when_wrapping_fails(self, monkeypatch):
+        closed: list = []
+        kernel = types.SimpleNamespace(
+            CreateFileW=lambda *_a: 0x1234,
+            CloseHandle=lambda h: closed.append(h) or True,
+        )
+        monkeypatch.setattr(pc, "IS_POSIX", False)
+        monkeypatch.setattr(pc, "IS_WINDOWS", True)
+        monkeypatch.setattr(pc.ctypes, "WinDLL", lambda *_a, **_k: kernel, raising=False)
+
+        def boom(_h, _flags):
+            raise OSError("wrap failed")
+
+        monkeypatch.setattr(pc, "msvcrt", types.SimpleNamespace(open_osfhandle=boom), raising=False)
+
+        with pytest.raises(OSError):
+            pc.open_lock_file_for_sweep(r"C:\agents\alias.lock")
+        assert closed == [0x1234]
+
+
+class TestProcSubtreePss:
+    """The PSS option of the subtree walker, on a synthetic tree and synthetic
+    ``smaps_rollup`` files, so it runs the same on every host."""
+
+    @staticmethod
+    def _host(monkeypatch, files: dict[int, str], tree: dict[int, list[int]]) -> None:
+        import builtins
+        import io
+
+        monkeypatch.setattr(pc, "IS_LINUX", True)
+        monkeypatch.setattr(pc, "_proc_children", lambda pid: tree.get(pid, []))
+        real_open = builtins.open
+        rollups = {f"/proc/{pid}/smaps_rollup": body for pid, body in files.items()}
+
+        def _open(path, *args, **kwargs):
+            if path in rollups:
+                return io.StringIO(rollups[path])
+            if str(path).endswith("/smaps_rollup"):
+                raise FileNotFoundError(path)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", _open)
+
+    def test_the_subtree_pss_is_summed_from_one_walk(self, monkeypatch) -> None:
+        self._host(
+            monkeypatch,
+            {10: "Rss: 900 kB\nPss: 100 kB\n", 11: "Pss: 20 kB\n", 12: "Pss: 3 kB\n"},
+            {10: [11, 12]},
+        )
+        sample = pc.proc_subtree_sample(10, rss=False, jiffies=False, pss=True)
+        assert sample.pss_kb == 123
+
+    def test_an_unreadable_child_adds_nothing(self, monkeypatch) -> None:
+        self._host(monkeypatch, {10: "Pss: 100 kB\n", 12: "garbage\n"}, {10: [11, 12]})
+        assert pc.proc_subtree_sample(10, rss=False, jiffies=False, pss=True).pss_kb == 100
+
+    def test_an_unreadable_root_or_a_non_linux_host_reads_as_unmeasured(self, monkeypatch) -> None:
+        self._host(monkeypatch, {11: "Pss: 20 kB\n"}, {10: [11]})
+        assert pc.proc_subtree_sample(10, rss=False, jiffies=False, pss=True).pss_kb == -1
+        assert pc.proc_subtree_sample(None, pss=True).pss_kb == -1
+        monkeypatch.setattr(pc, "IS_LINUX", False)
+        assert pc.proc_subtree_sample(11, rss=False, jiffies=False, pss=True).pss_kb == -1
+
+    def test_pss_is_read_only_when_asked(self, monkeypatch) -> None:
+        self._host(monkeypatch, {10: "Pss: 100 kB\n"}, {})
+        assert pc.proc_subtree_sample(10, rss=False, jiffies=False).pss_kb == -1
+
+
+# ── memory_pressure_level: the macOS kernel memory-pressure sysctl ───────────
+#
+# Captured at import: test/conftest.py pins ``memory_pressure_level`` to None for
+# every test so no case reads a macOS runner's live level, and these cases test
+# the reader itself.
+_REAL_MEMORY_PRESSURE_LEVEL = pc.memory_pressure_level
+
+_SYSCTLBYNAME = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_size_t),
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+)
+
+
+class _PressureLibc:
+    """A libc handle whose ``sysctlbyname`` answers one pressure level.
+
+    A real ctypes function pointer, so the reader's call through ctypes is
+    exercised and not just the Python around it. The production prototype and
+    the real sysctl are covered by the macOS-only test below.
+    """
+
+    def __init__(self, level: int, *, result: int = 0, size: int = 4) -> None:
+        self.calls: list[tuple[bytes, object, int]] = []
+
+        def _impl(name, oldp, oldlenp, newp, newlen):  # type: ignore[no-untyped-def]
+            self.calls.append((name, newp, newlen))
+            ctypes.cast(oldp, ctypes.POINTER(ctypes.c_uint32))[0] = level
+            oldlenp[0] = size
+            return result
+
+        # Held on the instance: ctypes would otherwise call a freed callback.
+        self.sysctlbyname = _SYSCTLBYNAME(_impl)
+
+
+class TestMemoryPressureLevel:
+    @pytest.fixture
+    def on_macos(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(pc, "memory_pressure_level", _REAL_MEMORY_PRESSURE_LEVEL)
+        monkeypatch.setattr(pc, "IS_MACOS", True)
+
+        def _install(handle: object) -> None:
+            monkeypatch.setattr(pc, "_darwin_sysctl_handle", lambda: handle)
+
+        return _install
+
+    @pytest.mark.parametrize(
+        "level", [pc.MEMORY_PRESSURE_NORMAL, pc.MEMORY_PRESSURE_WARN, pc.MEMORY_PRESSURE_CRITICAL]
+    )
+    def test_reads_each_kernel_level(self, on_macos, level: int) -> None:
+        libc = _PressureLibc(level)
+        on_macos(libc)
+        assert pc.memory_pressure_level() == level
+        # A read, never a write, of the documented sysctl name.
+        assert libc.calls == [(b"kern.memorystatus_vm_pressure_level", None, 0)]
+
+    def test_none_off_macos_without_touching_libc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pc, "memory_pressure_level", _REAL_MEMORY_PRESSURE_LEVEL)
+        monkeypatch.setattr(pc, "IS_MACOS", False)
+
+        def _refuse() -> object:
+            raise AssertionError("must not load libc off macOS")
+
+        monkeypatch.setattr(pc, "_darwin_sysctl_handle", _refuse)
+        assert pc.memory_pressure_level() is None
+
+    @pytest.mark.parametrize(
+        "handle",
+        [
+            pytest.param(None, id="no-libc"),
+            pytest.param(_PressureLibc(2, result=-1), id="sysctl-fails"),
+            pytest.param(_PressureLibc(2, size=8), id="wrong-size"),
+            pytest.param(_PressureLibc(0), id="zero-is-not-a-level"),
+            pytest.param(_PressureLibc(3), id="unknown-value"),
+        ],
+    )
+    def test_any_failure_reads_as_unknown(self, on_macos, handle: object) -> None:
+        on_macos(handle)
+        assert pc.memory_pressure_level() is None
+
+    def test_names(self) -> None:
+        assert pc.memory_pressure_name(pc.MEMORY_PRESSURE_WARN) == "WARN"
+        assert pc.memory_pressure_name(pc.MEMORY_PRESSURE_CRITICAL) == "CRITICAL"
+        assert pc.memory_pressure_name(None) == ""
+        assert pc.memory_pressure_name(3) == ""
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="reads the real macOS sysctl")
+    def test_the_real_sysctl_answers_a_level(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The production handle (built from the real libc) and the real
+        ``kern.memorystatus_vm_pressure_level``: a wrong name or size would read
+        as None here, which in production only shows as the hold quietly off."""
+        monkeypatch.setattr(pc, "memory_pressure_level", _REAL_MEMORY_PRESSURE_LEVEL)
+        monkeypatch.setattr(pc, "_darwin_libc_sysctl", None)
+        monkeypatch.setattr(pc, "_darwin_libc_sysctl_loaded", False)
+        assert pc.memory_pressure_level() in (
+            pc.MEMORY_PRESSURE_NORMAL,
+            pc.MEMORY_PRESSURE_WARN,
+            pc.MEMORY_PRESSURE_CRITICAL,
+        )
+
+    def test_a_concurrent_first_call_waits_for_the_one_build(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The handle is built once, under a lock, and published with both
+        prototypes declared: a second caller arriving mid-build must get the same
+        handle, never None (which the pressure reader would take for "unknown")."""
+        building = threading.Event()
+        release = threading.Event()
+        built: list[object] = []
+
+        class _Libc:
+            def __init__(self) -> None:
+                self.sysctl = types.SimpleNamespace()
+                self.sysctlbyname = types.SimpleNamespace()
+
+        def _cdll(_path: str) -> _Libc:
+            building.set()
+            assert release.wait(5.0), "the first build was never released"
+            built.append(object())
+            return _Libc()
+
+        monkeypatch.setattr(pc, "_darwin_libc_sysctl", None)
+        monkeypatch.setattr(pc, "_darwin_libc_sysctl_loaded", False)
+        monkeypatch.setattr(pc.ctypes.util, "find_library", lambda _name: "libc.fake")
+        monkeypatch.setattr(pc.ctypes, "CDLL", _cdll)
+        answers: list[object] = []
+        first = threading.Thread(target=lambda: answers.append(pc._darwin_sysctl_handle()))
+        first.start()
+        assert building.wait(5.0), "the first call never started building"
+        second = threading.Thread(target=lambda: answers.append(pc._darwin_sysctl_handle()))
+        second.start()
+        release.set()
+        first.join(5.0)
+        second.join(5.0)
+        assert len(answers) == 2 and answers[0] is answers[1] is not None
+        assert len(built) == 1
+        assert answers[0].sysctlbyname.argtypes is not None  # type: ignore[attr-defined]

@@ -3,13 +3,9 @@
  * the alternative ways to create one.
  *
  * Two load-bearing assertions:
- *   (1) "New chat" renders in the menu alongside "New autopilot chat" — a menu
- *       that offers only autopilot + folder entries reads as if the caret could
- *       not make a plain chat at all;
- *   (2) it creates a PLAIN chat even when `defaultAutopilot` is on. The main
- *       segment honours that preference; this entry names its mode, so it must
- *       pin it — otherwise the one control that says "New chat" hands back an
- *       autopilot session.
+ *   (1) "New chat" renders in the menu — a menu that offers only the other
+ *       create entries reads as if the caret could not make a plain chat at all;
+ *   (2) it creates a PLAIN chat: the mode it sends is the default surface ('').
  *
  * Radix DropdownMenu cannot be opened by mouse in jsdom (needs PointerEvent),
  * so the trigger is activated by keyboard — the path jsdom does handle.
@@ -55,9 +51,8 @@ vi.mock('framer-motion', async () => {
 
 vi.mock('../components/ProjectPicker', () => ({ default: () => null }))
 
-// `defaultAutopilot` is the whole point of assertion (2), so the config mock is
-// a mutable box the tests flip between renders.
-const cfg = vi.hoisted(() => ({ value: { tagColumnsEnabled: false, confirmCloseSession: false, defaultAutopilot: false } as Record<string, unknown> }))
+// A mutable box so a test can flip the config between renders.
+const cfg = vi.hoisted(() => ({ value: { tagColumnsEnabled: false, confirmCloseSession: false } as Record<string, unknown> }))
 vi.mock('../pages/chat/ChatSettings', () => ({
   loadChatConfig: () => cfg.value,
   saveChatConfig: vi.fn(),
@@ -92,6 +87,7 @@ import {
 // Not mocked: the gate reads real localStorage, so the fixture that turns crew
 // on is the same write the Settings > Developer > Feature Previews toggle performs.
 import { PREVIEW_CREW, PREVIEW_REMOTE_CREW_CHAT } from '../utils/previewFlags'
+import enManual from '../i18n/locales/en.manual.json'
 
 /** Where the router is: the "Crew Members" entry navigates rather than creates,
  *  so its tests read the destination back instead of a create call. */
@@ -157,7 +153,7 @@ beforeEach(() => {
   __resetErrorJournalForTests()
   __resetNavSeamForTests()
   installSoftNavigate(() => {})
-  cfg.value = { tagColumnsEnabled: false, confirmCloseSession: false, defaultAutopilot: false }
+  cfg.value = { tagColumnsEnabled: false, confirmCloseSession: false }
   mocks.createChatSlot.mockResolvedValue({ key: 'chat-new-1' })
   mocks.listInstances.mockResolvedValue({
     active: true, warm_set_cap: 5, sso: {},
@@ -171,11 +167,10 @@ afterEach(() => {
 })
 
 describe('create-button caret menu', () => {
-  it('lists "New chat" next to "New autopilot chat"', async () => {
+  it('lists "New chat" in the caret menu', async () => {
     renderSidebar()
     openCreateMenu()
     expect(await findCreateMenuItem('New chat')).toBeTruthy()
-    expect(screen.getByText('New autopilot chat')).toBeTruthy()
   })
 
   it('offers importing a session from a file among the create entries', async () => {
@@ -186,23 +181,18 @@ describe('create-button caret menu', () => {
     expect(await findCreateMenuItem(/import a session from a file/i)).toBeTruthy()
   })
 
-  it('explains the engineered entries, at the point of choice', async () => {
-    // The moment a user cannot tell Autopilot from Crew Members is the moment
-    // this menu opens. Before this, the only explanation was a native title= on
-    // the sidebar badge — i.e. visible only after the session already existed.
+  it('explains the Crew Members entry at the point of choice', async () => {
     // The Members page is on, so the crew gloss describes the page itself.
     localStorage.setItem(PREVIEW_CREW, '1')
     renderSidebar()
     openCreateMenu()
-    await screen.findByText('New autopilot chat')
-    // The contrast that matters: one job in stages vs standing agents you talk to.
-    expect(screen.getByText(/One job, done in steps/)).toBeTruthy()
+    await findCreateMenuItem('New chat')
     expect(screen.getByText(/Opens the Crewmates page/)).toBeTruthy()
   })
 
   it('leaves the plain entries single-line', async () => {
-    // "New chat" / "New folder" need no gloss, and describing them would bury
-    // the contrast between the two engineered modes.
+    // "New chat" / "New folder" need no gloss; only the Crew Members entry,
+    // which does not create a chat, carries one.
     renderSidebar()
     openCreateMenu()
     await findCreateMenuItem('New chat')
@@ -215,24 +205,13 @@ describe('create-button caret menu', () => {
     }
   })
 
-  it('"New chat" creates a plain session even when defaultAutopilot is on', async () => {
-    cfg.value = { tagColumnsEnabled: false, confirmCloseSession: false, defaultAutopilot: true }
+  it('"New chat" creates a plain session', async () => {
     renderSidebar()
     openCreateMenu()
     fireEvent.click(await findCreateMenuItem('New chat'))
     await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalled())
-    // createSlot passes the mode positionally; assert no call carried 'orchestrator'.
-    for (const call of mocks.createChatSlot.mock.calls) {
-      expect(call).not.toContain('orchestrator')
-    }
-  })
-
-  it('"New autopilot chat" still creates an orchestrator session', async () => {
-    renderSidebar()
-    openCreateMenu()
-    fireEvent.click(await screen.findByText('New autopilot chat'))
-    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalled())
-    expect(mocks.createChatSlot.mock.calls.some(c => c.includes('orchestrator'))).toBe(true)
+    // `mode` is the FOURTH positional argument of createChatSlot.
+    expect(mocks.createChatSlot.mock.calls.at(-1)?.[3]).toBe('')
   })
 
   // "Crew Members" — Crew Mode retired, and the entry that used to create a
@@ -245,7 +224,7 @@ describe('create-button caret menu', () => {
     openCreateMenu()
     // Anchor on a sibling entry first: an empty query below would also pass if
     // the menu simply failed to open.
-    await screen.findByText('New autopilot chat')
+    await findCreateMenuItem('New chat')
     const item = screen.getByTestId('open-crew-members')
     expect(item.textContent).toContain('Crewmates')
     // The retired ingress and its experimental tag are gone, not merely hidden.
@@ -428,5 +407,41 @@ describe('create-button caret menu', () => {
     fireEvent.click(await findCreateMenuItem('New chat'))
     await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalled())
     expect(mocks.createChatSlot.mock.calls.at(-1)?.[1]).toBe('planner')
+  })
+
+  // A crew create takes seconds (the peer's session opens before the local one),
+  // so the picked row must show the pending window: a spinner and a label naming
+  // the crew, both gone once the create settles either way.
+  it.each([
+    ['succeeds', true],
+    ['fails', false],
+  ])('shows a pending crew create until it %s', async (_outcome, ok) => {
+    let settle: (v: unknown) => void = () => {}
+    let fail: (e: unknown) => void = () => {}
+    mocks.createChatSlot.mockReturnValue(new Promise((resolve, reject) => { settle = resolve; fail = reject }))
+    localStorage.setItem(PREVIEW_REMOTE_CREW_CHAT, '1')
+    renderSidebar({ warm: { 'i-nobita': { local_port: 7879, token: 't' } } })
+    openCreateMenu()
+    fireEvent.keyDown(await screen.findByTestId('new-chat-on-crew'), { key: 'ArrowRight' })
+    // Wait for the crew NAME, not the id fallback: the pending label reads it.
+    await waitFor(() => expect(screen.getByTestId('new-chat-on-crew-i-nobita').textContent).toContain('nobita'))
+    expect(screen.queryByTestId('new-chat-on-crew-spinner-i-nobita')).toBeNull()
+    const pendingText = enManual.pages.chatSidebar.creating_on_crew.replace('{{name}}', 'nobita')
+
+    fireEvent.click(screen.getByTestId('new-chat-on-crew-i-nobita'))
+    await screen.findByTestId('new-chat-on-crew-spinner-i-nobita')
+    expect(screen.getByTestId('new-chat-on-crew-i-nobita').textContent?.trim()).toBe(pendingText)
+    expect(screen.getByTestId('new-chat-on-crew-i-nobita')).toHaveAttribute('aria-busy', 'true')
+    // Not disabled (so not faded): it is the progress cue. A second pick is
+    // refused by the guard, not by the disabled state.
+    expect(screen.getByTestId('new-chat-on-crew-i-nobita')).not.toHaveAttribute('data-disabled')
+    fireEvent.click(screen.getByTestId('new-chat-on-crew-i-nobita'))
+    expect(mocks.createChatSlot).toHaveBeenCalledTimes(1)
+
+    if (ok) settle({ key: 'chat-new-1' })
+    else fail(new Error('peer version mismatch'))
+    await waitFor(() => expect(screen.queryByTestId('new-chat-on-crew-spinner-i-nobita')).toBeNull())
+    expect(screen.queryByText(pendingText)).toBeNull()
+    if (!ok) expect(await screen.findByTestId('new-chat-on-crew-error')).toBeTruthy()
   })
 })

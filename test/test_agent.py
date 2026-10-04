@@ -1132,13 +1132,17 @@ class TestAtomicJsonWrite:
 
         target = tmp_path / "test.json"
         target.write_text("{}")
-        target.chmod(0o664)
+        if sys.platform != "win32":
+            target.chmod(0o664)
 
         _atomic_json_write(target, {"key": "value"})
 
         import stat
 
-        assert stat.S_IMODE(target.stat().st_mode) == 0o664
+        if sys.platform != "win32":
+            # Windows has no POSIX mode bits; the content contract below is
+            # what this writer guarantees there.
+            assert stat.S_IMODE(target.stat().st_mode) == 0o664
         assert json.loads(target.read_text(encoding="utf-8")) == {"key": "value"}
 
     def test_new_file_gets_0o644(self, tmp_path: Path):
@@ -1149,7 +1153,8 @@ class TestAtomicJsonWrite:
 
         import stat
 
-        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        if sys.platform != "win32":
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
         assert json.loads(target.read_text(encoding="utf-8")) == {"new": True}
 
     def test_a_contended_rename_is_retried_on_windows(self, tmp_path: Path, monkeypatch):
@@ -1660,16 +1665,62 @@ class TestResolveKirocrewBin:
         finally:
             agent_mod._KIROCREW_BIN = old_val
 
-    def test_caches_result(self):
-        """Result is cached in global _KIROCREW_BIN."""
+    def test_caches_result(self, tmp_path: Path):
+        """A cached launcher that still works is returned without re-resolving."""
         import kiro_crew.agent as agent_mod
         from kiro_crew.agent import _resolve_kirocrew_bin
 
+        cached = tmp_path / "cached" / "kirocrew"
+        cached.parent.mkdir()
+        cached.write_text("#!/bin/sh\n")
+        cached.chmod(0o755)
         old_val = agent_mod._KIROCREW_BIN
         try:
-            agent_mod._KIROCREW_BIN = "/cached/kirocrew"
-            result = _resolve_kirocrew_bin()
-            assert result == "/cached/kirocrew"
+            agent_mod._KIROCREW_BIN = str(cached)
+            with patch("shutil.which", side_effect=AssertionError("re-resolved")):
+                result = _resolve_kirocrew_bin()
+            assert result == str(cached)
+        finally:
+            agent_mod._KIROCREW_BIN = old_val
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX launcher layout")
+    def test_a_cached_launcher_from_a_pruned_install_is_re_resolved(self, tmp_path: Path):
+        """An update prunes the version directory the process started from.
+
+        The path cached before the prune must not keep being handed out as the
+        launch of kirocrew-core / kirocrew-cron: it is re-resolved, and with the
+        running package gone the walk reaches the current install via PATH.
+        """
+        import shutil as _shutil
+
+        import kiro_crew.agent as agent_mod
+        from kiro_crew.agent import _resolve_kirocrew_bin
+
+        def _launcher(root: Path) -> Path:
+            exe = root / "bin" / "kirocrew"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("#!/bin/sh\n")
+            exe.chmod(0o755)
+            return exe
+
+        old_install = tmp_path / "tools" / "kirocrew" / "0.8.0.4"
+        new_install = tmp_path / "tools" / "kirocrew" / "0.8.0.6"
+        old_bin = _launcher(old_install)
+        new_bin = _launcher(new_install)
+        old_val = agent_mod._KIROCREW_BIN
+        try:
+            agent_mod._KIROCREW_BIN = str(old_bin)
+            assert _resolve_kirocrew_bin() == str(old_bin)
+            _shutil.rmtree(old_install)  # the update's prune
+            # The running package lived in the pruned tree too, so steps 1-3
+            # find nothing; only PATH names the current install.
+            with (
+                patch.object(sys, "exec_prefix", str(old_install)),
+                patch("kiro_crew.__file__", str(old_install / "lib" / "kiro_crew" / "__init__.py")),
+                patch("shutil.which", return_value=str(new_bin)),
+            ):
+                assert _resolve_kirocrew_bin() == str(new_bin)
+            assert agent_mod._KIROCREW_BIN == str(new_bin)
         finally:
             agent_mod._KIROCREW_BIN = old_val
 
@@ -5450,8 +5501,14 @@ class TestKiroHooksAutoimport:
         with caplog.at_level(logging.INFO, logger="kiro_crew.agent"):
             result = _autoimport_kiro_hooks(hooks_dir)
 
+        if sys.platform == "win32":
+            # No execute bit on Windows: a known script extension counts as
+            # runnable via platform_compat.is_executable_file, so the
+            # chmod -x sibling loads too instead of being skipped.
+            assert len(result["preToolUse"]) == 2
+            return
         assert len(result["preToolUse"]) == 1
-        assert result["preToolUse"][0]["command"].endswith("/ok.sh")
+        assert Path(result["preToolUse"][0]["command"]).name == "ok.sh"
         assert any("not executable" in rec.message for rec in caplog.records)
 
     @requires_symlinks
@@ -5528,7 +5585,7 @@ class TestKiroHooksAutoimport:
         _apply_user_kiro_hooks(config, mc_cfg)
 
         assert len(config["hooks"]["preToolUse"]) == 1
-        assert config["hooks"]["preToolUse"][0]["command"].endswith("/only.sh")
+        assert Path(config["hooks"]["preToolUse"][0]["command"]).name == "only.sh"
 
     def test_kiro_hooks_autoimport_respects_total_limit(self, tmp_path: Path, caplog):
         """More scripts than ``_MAX_TOTAL_USER_HOOKS`` get capped; one WARNING logged."""
@@ -6208,6 +6265,12 @@ class TestKiroHooksAutoimport:
         with caplog.at_level(logging.INFO, logger="kiro_crew.agent"):
             result = _autoimport_kiro_hooks(hooks_dir)
 
+        if sys.platform == "win32":
+            # Same platform rule as above: the script loads, so there is no
+            # rejection to audit.
+            assert len(result.get("preToolUse", [])) == 1
+            assert sel_calls == []
+            return
         assert result == {}
         assert len(sel_calls) == 1, (
             f"regression: expected exactly one _sel_hook_rejected call when "

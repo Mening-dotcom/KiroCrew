@@ -17,6 +17,8 @@ from .types import (
 _glue_logger = _logging.getLogger("kiro_crew.subagent_manager.admission")
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from kiro_crew import taskq as _taskq
     from kiro_crew.taskq import lanes as _lanes
 
@@ -209,6 +211,16 @@ class _FairnessMixin(ManagerComponent):
         return self.lane_for_session(key)
 
     @staticmethod
+    def entry_is_resident_resume(params: Mapping[str, Any]) -> bool:
+        """A window entry that is a RESIDENT run asking for its lane slot back.
+
+        Not a spawn waiting to start: its run is already counted where running
+        runs are. An approval-released start (``_startup_release``) also carries
+        ``_resume_id`` but has not started its run, so it is not one of these.
+        """
+        return bool(params.get("_resume_id")) and not params.get("_startup_release")
+
+    @staticmethod
     def entry_is_child(params: Mapping[str, Any]) -> bool:
         from kiro_crew.taskq import lanes as _lanes
 
@@ -311,7 +323,7 @@ class _FairnessMixin(ManagerComponent):
         # already holds its slot: it waits on the in-startup bound, not on a
         # slot, so it does not arm the reserve.
         reserve_active = settings.child_reserve > 0 and (
-            any(p.get("_resume_id") and not p.get("_startup_release") for p in self._manager._queue)
+            any(self.entry_is_resident_resume(p) for p in self._manager._queue)
             or self.pending_children() > 0
         )
         return CapacityView(
@@ -328,7 +340,11 @@ class _FairnessMixin(ManagerComponent):
         return self.capacity_view().root_slot
 
     def pick_window_index(
-        self, view: CapacityView | None = None, *, lanes: Mapping[str, str] | None = None
+        self,
+        view: CapacityView | None = None,
+        *,
+        lanes: Mapping[str, str] | None = None,
+        root_held: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> int | None:
         """Which ``_queue`` entry the pump takes next, or None when none may start.
 
@@ -340,6 +356,10 @@ class _FairnessMixin(ManagerComponent):
         off the loop (:meth:`resolve_window_lanes_async`); without it the lane
         of an entry that carries none is walked here, which only an inline
         (no-loop) caller may pay for.
+
+        *root_held* answers, for a root entry that could otherwise start, whether
+        the kernel memory-pressure hold keeps it waiting; a nested entry never
+        asks it.
         """
         queue = self._manager._queue
         if not queue:
@@ -348,11 +368,9 @@ class _FairnessMixin(ManagerComponent):
         if not view.any_slot:
             return None
         for idx, params in enumerate(queue):
-            if (
-                params.get("_resume_id")
-                and not params.get("_startup_release")
-                and not self._manager._boundary_cancellation_pending(params)
-            ):
+            if self.entry_is_resident_resume(
+                params
+            ) and not self._manager._boundary_cancellation_pending(params):
                 return idx
         roots_ok = view.root_slot
 
@@ -362,7 +380,10 @@ class _FairnessMixin(ManagerComponent):
             return (
                 not params.get("_startup_release")
                 and not self._manager._boundary_cancellation_pending(params)
-                and (roots_ok or self.entry_is_child(params))
+                and (
+                    self.entry_is_child(params)
+                    or (roots_ok and (root_held is None or not root_held(params)))
+                )
             )
 
         def lane_of(params: Mapping[str, Any]) -> str:

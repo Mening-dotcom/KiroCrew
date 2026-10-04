@@ -823,6 +823,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.background-effort",
     "label": "Background Effort",
     "labelKey": "pages.settings.chatPanel.background_effort",
+    "description": "Applies only on reasoning-capable models. 'Model default' applies no override — this work does not inherit your Default Reasoning Effort.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -834,6 +835,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.background-model",
     "label": "Background Model",
     "labelKey": "pages.settings.chatPanel.background_model",
+    "description": "'Auto' lets the provider pick — it does not inherit your Default Model. Pin a model to run this work on it.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -904,6 +906,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.content-filter-fallback-model",
     "label": "Content-filter fallback model",
     "labelKey": "pages.settings.chatPanel.refusal_fallback_model",
+    "description": "Auto retries on the model the provider suggests in its refusal, when it names one. The retry is announced in chat. Disabled shows the refusal as before.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -929,7 +932,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.default-model",
     "label": "Default Model",
     "labelKey": "pages.settings.chatPanel.default_model",
-    "description": "Which model new sessions start with when their agent pins none. Set a model per agent under Capabilities → Agents, or pick one inside a session to override it there.",
+    "description": "Agents with their own configured model ignore this setting. 'Default' uses the model from the agent configuration, or the system default when none is configured. Changing this does not affect sessions that are already open. Which model new sessions start with when their agent pins none. Set a model per agent under Capabilities → Agents, or pick one inside a session to override it there.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -941,24 +944,12 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.default-reasoning-effort",
     "label": "Default Reasoning Effort",
     "labelKey": "pages.settings.chatPanel.default_reasoning_effort",
-    "description": "How long models think before answering by default. Higher is slower and costs more. Only available on reasoning-capable models (Opus, Sonnet, Fable, GPT-5.x).",
+    "description": "Higher is slower and costs more. Only available on reasoning-capable models.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
     "params": {
       "sub": "models"
-    }
-  },
-  {
-    "id": "chat.default-to-autopilot-mode",
-    "label": "Default to Autopilot Mode",
-    "labelKey": "pages.settings.chatPanel.default_to_autopilot_mode",
-    "description": "New sessions start in autopilot mode (plan → approve → execute). You can still toggle individual sessions.",
-    "tab": "chat",
-    "type": "toggle",
-    "occurrence": 1,
-    "params": {
-      "sub": "sessions"
     }
   },
   {
@@ -989,6 +980,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.fallback-model",
     "label": "Fallback model",
     "labelKey": "pages.settings.chatPanel.fallback_model",
+    "description": "Auto (default) lets the backend route to an available model. A fallback swap is announced in chat and sticks until your model recovers. Disabled turns fallback off.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -1001,6 +993,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.feature-tips",
     "label": "Feature Tips",
     "labelKey": "pages.settings.chatPanel.feature_tips",
+    "description": "Show occasional feature discovery tips above the composer while the agent is working",
     "tab": "chat",
     "type": "toggle",
     "occurrence": 1,
@@ -1324,6 +1317,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.soft-stop-budget-seconds",
     "label": "Soft-stop budget (seconds)",
     "labelKey": "pages.settings.chatPanel.soft_stop_budget_seconds",
+    "description": "How long to wait for the agent to honor a Stop press before forcefully killing the session. Longer budgets preserve session state more often but make stops feel laggy when agents are stuck in long tool calls.",
     "tab": "chat",
     "type": "input",
     "occurrence": 1,
@@ -1370,6 +1364,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.subagent-effort",
     "label": "Subagent Effort",
     "labelKey": "pages.settings.chatPanel.subagent_effort",
+    "description": "Applies only on reasoning-capable models. 'Model default' applies no override — this work does not inherit your Default Reasoning Effort.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -1381,6 +1376,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.subagent-model",
     "label": "Subagent Model",
     "labelKey": "pages.settings.chatPanel.subagent_model",
+    "description": "'Auto' lets the provider pick — it does not inherit your Default Model. Pin a model to run this work on it.",
     "tab": "chat",
     "type": "select",
     "occurrence": 1,
@@ -1440,6 +1436,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "chat.what-enter-does-while-the-agent-is-working",
     "label": "What Enter does while the agent is working",
     "labelKey": "pages.settings.chatPanel.what_enter_does_while_the_agent_is_working",
+    "description": "Steer interrupts the current turn; Queue waits for it.",
     "tab": "chat",
     "type": "buttonGroup",
     "occurrence": 1,
@@ -1608,6 +1605,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "developer.composable-layout",
+    "label": "Composable layout",
+    "labelKey": "pages.developer.featurePreviewsTab.layout_harness",
+    "description": "Turns on an in-development, developer-only harness for a new layout mechanism. Nothing you can see changes yet: the mechanism has no page of its own, so this exists only so it can be built and tested behind a switch.",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1
+  },
+  {
     "id": "developer.crewmates",
     "label": "Crewmates",
     "labelKey": "pages.developer.featurePreviewsTab.crew_members",
@@ -1620,7 +1626,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "developer.decisions-jev",
     "label": "Decisions (Jev)",
     "labelKey": "pages.developer.featurePreviewsTab.decisions",
-    "description": "Jev is a small, fast decision model. With this on, Kiro Crew asks Jev which one of your skills fits the message you just sent — or that none does — and uses Jev's pick for the share of your sessions shown under the switch; the rest keep the word-matching rule this build ships with. If Jev is slow, unreachable or answers with nothing usable, that message falls back to the same rule, so a decision never holds up your reply. Each call is also recorded in a log on the machine that runs Kiro Crew, for diagnostics. This switch is saved on the machine that runs Kiro Crew, not in this browser, so it applies on every device you open it from.",
+    "description": "A small, fast model makes quick calls for Kiro Crew, such as which of your skills fits your message. Pick the model below. If it is slow or does not answer, the built-in rule decides instead, so your reply is never held up.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1
@@ -1630,6 +1636,15 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "label": "Developer Mode",
     "labelKey": "pages.settings.developerPanel.developer_mode",
     "description": "Show Developer page in sidebar with Logs, System metrics, and Memory internals",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1
+  },
+  {
+    "id": "developer.dynamic-dashboard",
+    "label": "Dynamic Dashboard",
+    "labelKey": "pages.developer.featurePreviewsTab.dashboard",
+    "description": "Turns on the in-development Dynamic Dashboard: a status row above the chat composer, a Dashboard view in the side panel and on a crewmate’s page, and an All Dashboards page. Its layout is still being designed, so it is not shown until you turn it on. Also holds the switch for automatic cards.",
     "tab": "developer",
     "type": "toggle",
     "occurrence": 1
@@ -1746,7 +1761,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "display.default-shell",
     "label": "Default shell",
     "labelKey": "pages.settings.displayPanel.terminal_shell",
-    "description": "Shell the built-in terminal launches — an absolute path or a command on PATH. Leave empty to use the system default ($SHELL).",
+    "description": "The shell the built-in terminal launches. An absolute path or a command on PATH. Leave empty to use the system default ($SHELL).",
     "tab": "display",
     "type": "input",
     "occurrence": 1,
@@ -1886,6 +1901,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "params": {
       "sub": "sidebar"
     }
+  },
+  {
+    "id": "display.reuse-the-current-terminal",
+    "label": "Reuse the current terminal",
+    "labelKey": "pages.settings.displayPanel.terminal_reuse_current",
+    "description": "Copies the command instead of running it: Run in terminal focuses the terminal tab you have selected and copies the command, so you can paste it into that shell while keeping its working directory, environment, and any active login session. With no terminal open, it still copies the command for you to paste — it is never run for you.",
+    "tab": "display",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "terminal"
+    },
+    "configKey": "dashboard.terminal.reuse_current"
   },
   {
     "id": "display.theme",
@@ -2288,7 +2316,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "skills.auto-generate-skills-from-sessions",
     "label": "Auto-generate skills from sessions",
     "labelKey": "pages.settings.skillsPanel.auto_generate_skills_from_sessions",
-    "description": "Analyze each completed session and draft a reusable SKILL.md when the session demonstrates a recurring procedure — one a future session, working on a different target, would run again. Off by default. Drafts are staged to the pending queue on Agent Capabilities → Skills for review — nothing goes live without your approval (see below).",
+    "description": "Analyze each completed session and draft a reusable SKILL.md when the session demonstrates a recurring procedure — one a future session, working on a different target, would run again. Off by default. Drafts are staged to the pending queue on Customize → Skills for review — nothing goes live without your approval (see below).",
     "tab": "skills",
     "type": "toggle",
     "occurrence": 1,
@@ -2317,6 +2345,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.auto-submit-when-i-finish-speaking",
     "label": "Auto-submit when I finish speaking",
     "labelKey": "pages.settings.sttSettings.endpointing",
+    "description": "Use a fast model to detect when you've finished a complete request and send it automatically. Streaming providers only.",
     "tab": "voice",
     "type": "toggle",
     "occurrence": 1,
@@ -2359,9 +2388,20 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1
   },
   {
+    "id": "voice.custom-vocabulary",
+    "label": "Custom vocabulary",
+    "labelKey": "pages.settings.sttSettings.transcribe_vocabulary",
+    "description": "Names and terms you uploaded to Amazon Transcribe so dictation spells them right. Listed from the AWS profile and region above.",
+    "tab": "voice",
+    "type": "select",
+    "occurrence": 1,
+    "configKey": "stt.transcribe_vocabulary"
+  },
+  {
     "id": "voice.dictation-panel",
     "label": "Dictation panel",
     "labelKey": "pages.settings.sttSettings.dictation_panel",
+    "description": "Show an animated panel while recording instead of the thin status bar. Falls back to the bar when the browser lacks WebGL2 or your system requests reduced motion.",
     "tab": "voice",
     "type": "toggle",
     "occurrence": 1
@@ -2370,6 +2410,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.enabled",
     "label": "Enabled",
     "labelKey": "pages.settings.sttSettings.enabled",
+    "description": "Transcribe voice into the message box when you click the mic",
     "tab": "voice",
     "type": "toggle",
     "occurrence": 1
@@ -2395,6 +2436,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.language",
     "label": "Language",
     "labelKey": "pages.settings.sttSettings.language",
+    "description": "BCP-47 language code for speech recognition",
     "tab": "voice",
     "type": "select",
     "occurrence": 1,
@@ -2404,6 +2446,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.microphone",
     "label": "Microphone",
     "labelKey": "pages.settings.sttSettings.microphone",
+    "description": "Input device used to capture your voice",
     "tab": "voice",
     "type": "select",
     "occurrence": 1
@@ -2412,6 +2455,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.model",
     "label": "Model",
     "labelKey": "pages.settings.sttSettings.model",
+    "description": "Models download on demand. Select one and click Download now; the desktop app already includes every other runtime dependency.",
     "tab": "voice",
     "type": "select",
     "occurrence": 1,
@@ -2439,6 +2483,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.provider",
     "label": "Provider",
     "labelKey": "pages.settings.sttSettings.provider",
+    "description": "Local speech recognition runs on this machine and sends nothing anywhere. Transcribe uploads your audio to AWS.",
     "tab": "voice",
     "type": "select",
     "occurrence": 1,
@@ -2493,6 +2538,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "id": "voice.streaming",
     "label": "Streaming",
     "labelKey": "pages.settings.sttSettings.streaming",
+    "description": "Show the transcript in the input box as you speak, instead of only when you stop.",
     "tab": "voice",
     "type": "toggle",
     "occurrence": 1,

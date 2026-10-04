@@ -90,8 +90,8 @@ Phase 2's read-only local review:
 
 | Finding source | Repair preference, in order |
 |---|---|
-| Opus-family review lane | Fable 5.1 -> Fable 5 -> latest available Opus -> older Opus generations -> lower-capability available general model |
-| GPT 5.6 review lane | GPT 6 -> GPT 5.6 best available variant -> older capable GPT -> available general fallback |
+| Opus-family review lane | latest available Opus -> older Opus generations -> lower-capability available general model |
+| GPT 6.1 review lane | GPT 6 Astra -> GPT 6.1 Sol -> older capable GPT -> available general fallback |
 
 1. Read current-head findings, settle whole-design concerns first, and apply the
    three questions above. Verify the originating lane; do not route by model names
@@ -133,7 +133,7 @@ Answering is prose work. It never needs a push and never widens the diff.
 |---|---|---|
 | `fixed` | you changed the code | the change and the SHA |
 | `rebutted` | the code stays correct as-is | the evidence it does not hold, **or** the reasoning it is disproportional |
-| `accepted-and-deferred` | the work is already decided, just out of scope here — unlike `needs-a-decision`, nothing is being asked | why, plus an issue whose body names a task someone can pick up. The issue MUST carry the `deferred-finding` label, an assignee (the owner), and a `Due: YYYY-MM-DD` line in its body — an untracked deferral is how flagged findings ship anyway, and the Disposition Deferral Check replies to dispositions whose issue lacks any of the three. Note the server-side asymmetry: the GPT lane's convergence rules do not accept a deferral as a ruling on a security / data-loss / corruption finding, so a deferred one of those is re-raised every round until fixed, rebutted as not-a-defect, or human-overridden |
+| `accepted-and-deferred` | the work is already decided, just out of scope here — unlike `needs-a-decision`, nothing is being asked | why, plus an issue whose body names a task someone can pick up. The issue MUST carry the `deferred-finding` label, the `needs-triage` label (so the triage pipeline's intake sees it and the follow-up PR can pass `Issue Gate`), an assignee (the owner), and a `Due: YYYY-MM-DD` line in its body — an untracked deferral is how flagged findings ship anyway, and the Disposition Deferral Check replies to dispositions whose issue lacks any of the three. Note the server-side asymmetry: the GPT lane's convergence rules do not accept a deferral as a ruling on a security / data-loss / corruption finding, so a deferred one of those is re-raised every round until fixed, rebutted as not-a-defect, or human-overridden |
 | `needs-a-decision` | the outcome depends on a maintainer ruling | the question, put to the maintainer directly — do **not** file an issue for it |
 
 **What must be answered:**
@@ -569,7 +569,7 @@ re-runs them on the new head.
    and Phase 4 can arm auto-merge on a review that never happened.
 
    - **0** → Phase 4.
-   - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**; one of its reasons needs no code change at all — an `unanswered CONCERNS from <LANE>` reason is cleared by POSTING the dispositions (one comment per item, each naming its span), not by pushing; re-pushing an unchanged diff against a failure just repeats it. **(a) CI/build/test failure** → read the failing log (`gh run view <run-id> --log-failed`), then — once the decision to fix is made — cancel the head's remaining in-flight runs per Phase 3's read → cancel → edit rule, reproduce the **exact failing node ids** locally (never the full suite), and fix the **root cause**; or confirm a flake and re-run **only the failing job**, never the whole run — `gh run rerun <run-id> --failed` (or `--job <job-id>` for one of several reds), since a bare `gh run rerun <run-id>` replays the entire matrix to re-decide one shard, and no cancel applies here. **(b) Review finding** → read whole-design verdicts first and apply the three questions. For Kiro Crew Opus-family or GPT 5.6 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the selected model-pinned subagent, then verify in the parent. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), or request a maintainer decision; resolve only addressed threads. **(c) Conflict / behind base** → Phase 1's re-sync handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
+   - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**; one of its reasons needs no code change at all — an `unanswered CONCERNS from <LANE>` reason is cleared by POSTING the dispositions (one comment per item, each naming its span), not by pushing; re-pushing an unchanged diff against a failure just repeats it. **(a) CI/build/test failure** → read the failing log (`gh run view <run-id> --log-failed`), then — once the decision to fix is made — cancel the head's remaining in-flight runs per Phase 3's read → cancel → edit rule, reproduce the **exact failing node ids** locally (never the full suite), and fix the **root cause**; or confirm a flake and re-run **only the failing job**, never the whole run — `gh run rerun <run-id> --failed` (or `--job <job-id>` for one of several reds), since a bare `gh run rerun <run-id>` replays the entire matrix to re-decide one shard, and no cancel applies here. **(b) Review finding** → read whole-design verdicts first and apply the three questions. For Kiro Crew Opus-family or GPT 6.1 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the selected model-pinned subagent, then verify in the parent. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), or request a maintainer decision; resolve only addressed threads. **(c) Conflict / behind base** → Phase 1's re-sync handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
    - **10** → reviewers or CI are still running. In a chat slot, load
      `kirocrew-core::monitor_start` through `tool_search`, request a finite
      same-session loop, then END THE TURN. No wait/poll beside an active loop.
@@ -768,9 +768,22 @@ This is the only thing that closes the issue on merge — `Related: #<n>`, `Part
 in the body means the keyword is missing or malformed, and `pr_status.py` prints a
 `NOTICE:`. The reference may be `#<n>`, `owner/repo#<n>`, or a full URL.
 
-If the PR deliberately closes nothing, say so at the start of a line —
-`no linked issue: <why>` — so a reader can tell an intentional omission from a
-forgotten trailer. **Advisory, not a gate:** readiness never blocks on it.
+On Kiro Crew the link is **a gate, not advice**: the `Issue Gate` lane of
+`PR Readiness` fails a PR whose visible body declares no issue of the repository,
+or declares one that still carries `needs-triage` or has no triage verdict label
+(`auto-fixable`, `needs-investigation`, `needs-human`). The gate reads the body
+with `pr_status.py`'s `declared_issue_numbers()` (through
+`.github/scripts/issue_gate_refs.py`): a declaration STARTS a line and the rest
+of the line is free, and the non-closing `Refs #<n>` / `Part of #<n>` count as
+declarations even though they close nothing. That is a wider reading than the
+whole-line, closing-verbs-only trailer this section describes and the `NOTICE:`
+below classifies with -- so a body can pass the gate and still earn a `NOTICE:`
+(`Fixes #123 (the Windows half)`, or `Part of #123` alone). Write the trailer as
+a whole line of its own and both are satisfied. Open the issue and let triage
+reach it BEFORE Phase 1. There is no body-side opt-out: an issue-less PR is red
+until a maintainer applies the `issue-gate: waived` label (production fire,
+release PR), and `pr_status.py` prints its `NOTICE:` for the missing link every
+round rather than accepting a line the gate rejects.
 
 `pr_status.py` masks fenced blocks and indented examples and reconciles closures
 on repository *and* number, so just read the `NOTICE:` lines it prints.

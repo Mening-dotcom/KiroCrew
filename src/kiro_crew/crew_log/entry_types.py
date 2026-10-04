@@ -806,6 +806,33 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
                 note="Present with credits; absent on a synthesized close.",
             ),
             Field(
+                "context",
+                JSON_OBJECT,
+                fields=(
+                    Field(
+                        "used",
+                        JSON_INT,
+                        required=True,
+                        note="Tokens the provider reported occupying the window.",
+                    ),
+                    Field(
+                        "window",
+                        JSON_INT,
+                        required=True,
+                        note="Window size that reading was taken against.",
+                    ),
+                ),
+                note=(
+                    "The provider's own OCCUPANCY reading, a different quantity from "
+                    "tokens above: tokens is summed over every model call the turn "
+                    "made and answers what it cost, while this answers how full the "
+                    "window was. The two travel as one object because a used count "
+                    "from one turn over a window from another describes no turn, and "
+                    "a model switch moves the window. Absent when the provider "
+                    "reports no occupancy, so unmeasured reads as unmeasured."
+                ),
+            ),
+            Field(
                 "error",
                 JSON_STRING,
                 note="Exception class name, never its message, on an in-process failed close.",
@@ -935,6 +962,18 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
                 JSON_BOOL,
                 required=True,
                 note="Always true -- tokens are derived from characters.",
+            ),
+            Field(
+                "phase",
+                JSON_STRING,
+                note=(
+                    "session_start or per_turn. Which POPULATION this composition "
+                    "belongs to: the one-off session-start injection is many times "
+                    "the size of a per-turn one, so a reader that pools them "
+                    "describes neither. Absent on a log written before it was "
+                    "recorded, and absent rather than guessed when the composer "
+                    "does not state it."
+                ),
             ),
         ),
     ),
@@ -1135,6 +1174,17 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
             Field("agent", JSON_STRING, note="The child's agent name, when one was resolved."),
             Field("model", JSON_STRING, note="The child's model, when one was resolved."),
             Field(
+                "task",
+                JSON_STRING,
+                note=(
+                    "What the child was asked to do, redacted and clipped on the same "
+                    "terms as plan/updated's item text. ABSENT when the dispatch carried "
+                    "no task text, and absent on every log written before the field, "
+                    "which a reader must not read as a dispatch that asked for nothing -- "
+                    "a surface draws no task line for it rather than an empty one."
+                ),
+            ),
+            Field(
                 "scope",
                 JSON_OBJECT,
                 fields=(
@@ -1179,6 +1229,20 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
             "Written into the PARENT's log: the parent is what sent it, and the child has "
             "no crew log to receive it. Opens and closes nothing -- a steer is an event "
             "about a child, not a state of one."
+        ),
+    ),
+    EntryType(
+        "subagent/dismissed",
+        "The user cleared a finished child's card from the panel.",
+        (Field("agent_id", JSON_STRING, required=True, note="The child's run id."),),
+        note=(
+            "A fact about the SESSION, which is why it is here rather than in a store "
+            "beside the log: the panel's durable half is a fold of this log, so a "
+            "dismissal kept anywhere else is a second record that has to be held in step "
+            "with it -- and when the other store was reclaimed first, the card came back. "
+            "Opens and closes nothing: a dismissal is not an ending, and a dismissed "
+            "child keeps whatever outcome its own closer recorded. It may arrive before "
+            "any closer, for a child the user cleared while it was still running."
         ),
     ),
     EntryType(
@@ -1263,7 +1327,7 @@ _SESSION_TYPES: tuple[EntryType, ...] = (
                 "kind",
                 JSON_STRING,
                 required=True,
-                enum=("title", "summary", "memory_consolidation"),
+                enum=("title", "summary", "memory_consolidation", "dynamic_card"),
                 note=(
                     "Which background helper spent the budget. Open: the set grows with "
                     "each helper wired, and refusing an unrecognized one would drop the "

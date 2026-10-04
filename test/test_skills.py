@@ -8,7 +8,7 @@ import pytest
 
 from kiro_crew.config.loader import KiroCrewConfig, SkillsConfig
 from kiro_crew.skill_usage import SkillUsageLedger
-from kiro_crew.skills import _SHORT_DESC_CHARS, SkillsLoader
+from kiro_crew.skills import _NEW_SKILL_BOOST_WINDOW_SECS, _SHORT_DESC_CHARS, SkillsLoader
 
 
 @pytest.fixture(autouse=True)
@@ -1933,6 +1933,159 @@ class TestResolveDollarSkills:
         names = [n for _t, n, _b in out]
         assert names == ["oncall-handover", "nested/ticket-pull"]
 
+    def test_nested_key_uses_forward_slash(self, tmp_path, opened):
+        """The enumerated key of a nested skill is forward-slash-separated.
+
+        Discriminator for a Windows-only failure of ``test_multiple_tokens_anywhere``
+        seen on a CodeBuild container: the resolver leaf-matches ``$ticket-pull``
+        against ``key.rsplit("/", 1)[-1]``, so a key built with the OS separator
+        (``nested\\ticket-pull`` on Windows) would leaf to the whole string and match
+        nothing — an identical-looking assertion failure, but with the bug in NAMING
+        rather than enumeration or the read gate. This pins the key exactly, so a CI
+        run answers which mechanism is at fault instead of leaving it a coin flip: if
+        BOTH this and ``test_multiple_tokens_anywhere`` fail, the key is misnamed; if
+        this passes while the other fails, naming is eliminated. The loader is
+        wrapped in ``opened`` so its catalog-refresh thread and SQLite descriptors
+        are released at teardown.
+        """
+        loader = opened(self._loader(tmp_path))
+        keys = [s["key"] for s in loader.scoped_skills()]
+        assert "nested/ticket-pull" in keys
+        assert "nested\\ticket-pull" not in keys
+
+    def test_two_flat_siblings_both_enumerate_and_resolve(self, tmp_path, opened):
+        """Two flat sibling skills both enumerate and both resolve — a count pin.
+
+        Discriminator for a Windows-only second-token drop seen on a CodeBuild
+        container: resolving ``$one $two`` returns only one skill even though both
+        are flat, top-level, and carry no path separator. That rules out the
+        nested-key/separator theory (there is no separator here) and localizes the
+        drop to the count, not the name. This pins BOTH stages so a CI run says
+        which stage drops the sibling:
+
+        * If ``scoped_skills`` returns one key, the WALK (``_iter_skill_files``)
+          drops a distinct sibling on that filesystem — its only sibling-dropping
+          site is the ``seen_real`` dedup keyed on ``os.path.realpath``.
+        * If ``scoped_skills`` returns both keys but ``resolve_dollar_skills``
+          returns one, the drop is in the resolver's per-token loop.
+
+        Kept minimal and platform-neutral: the assertion holds on every platform,
+        so a red is a real defect on the host that produced it, not a POSIX-only
+        expectation. The loader is wrapped in ``opened`` so its catalog-refresh
+        thread and SQLite descriptors are closed at teardown — a measurement test
+        must not itself leak the resource that makes the suite flaky.
+        """
+        skills_dir = tmp_path / "skills"
+        _create_skill(skills_dir, "one", "---\nname: one\ndescription: A\n---\n# One\nBody one.")
+        _create_skill(skills_dir, "two", "---\nname: two\ndescription: B\n---\n# Two\nBody two.")
+        loader = opened(SkillsLoader(skills_path=skills_dir, install_builtins=False))
+
+        keys = sorted(s["key"] for s in loader.scoped_skills())
+        assert keys == ["one", "two"]
+
+        out = loader.resolve_dollar_skills("use $one and $two")
+        assert [n for _t, n, _b in out] == ["one", "two"]
+
+    def test_nested_skill_enumerates_beside_flat_under_plain_and_symlinked_base(self, tmp_path):
+        """A nested skill enumerates alongside a flat one — even via a symlinked base.
+
+        Regression guard for the Windows-only report where the NESTED skill
+        (``nested/ticket-pull``) vanished from enumeration while the depth-1 flat
+        skill survived. The catalog walk resolves each node through
+        ``os.path.realpath`` and admits a SKILL.md whose resolved path lands
+        under the base; this pins that a nested descendant and a flat sibling
+        both enumerate, so a regression that drops the nested subtree is caught.
+
+        The symlinked-base half matters and a naive fix fails it: a lexical-only
+        containment shortcut would drop a skill reached through a symlinked base,
+        because the symlinked spelling is not lexically under the base's
+        realpath. Enumeration is deterministic here, so the assertion holds on
+        every platform; ``make_dir_link`` keeps the symlinked-base path exercised
+        on Windows (a junction) instead of skipping there.
+        """
+        from kiro_crew.skills import _iter_skill_files
+
+        real_base = tmp_path / "real_skills"
+        _create_skill(real_base, "flat-skill", "---\nname: flat-skill\n---\n# Flat")
+        _create_skill(real_base, "nested/deep-skill", "---\nname: nested/deep-skill\n---\n# Deep")
+
+        # Plain base: both enumerate, nested key is forward-slash separated.
+        names = sorted(name for name, _path in _iter_skill_files(real_base))
+        assert names == ["flat-skill", "nested/deep-skill"]
+
+        # Symlinked base: the nested skill must still enumerate. A lexical-only
+        # containment shortcut would drop it here because the symlinked spelling
+        # is not lexically under the base's realpath. make_dir_link (a junction
+        # on Windows, a dir symlink on POSIX) keeps this exercised on the
+        # platform the drop was found on, instead of skipping there.
+        from conftest import make_dir_link
+
+        link_base = tmp_path / "linked_skills"
+        make_dir_link(link_base, real_base)
+        via_link = sorted(name for name, _path in _iter_skill_files(link_base))
+        assert via_link == ["flat-skill", "nested/deep-skill"]
+
+    def test_skill_under_symlinked_intermediate_ancestor_is_resolved_fresh(self, tmp_path):
+        """A skill whose ancestor is a link enumerates with its resolved path under the tree.
+
+        The catalog walk resolves each node through ``os.path.realpath``, so a
+        link/junction ancestor is followed to its target and the node is admitted
+        only when the resolved SKILL.md lands under the base. Here an intermediate
+        directory in the tree is a symlink to a sibling holding the skill; the
+        skill must still be found and its resolved SKILL.md must land under the
+        tree — proving a link ancestor is resolved and contained, not dropped.
+        """
+        from kiro_crew.skills import _iter_skill_files
+
+        base = tmp_path / "skills"
+        base.mkdir(parents=True, exist_ok=True)
+        _create_skill(base, "plain", "---\nname: plain\n---\n# Plain")
+        # Target lives INSIDE the base tree (so it is contained), and an
+        # intermediate name links to it — the link node resolves to a path that
+        # still lands under the base.
+        _create_skill(base, "real/linked-child", "---\nname: linked-child\n---\n# Linked")
+        # make_dir_link: a junction on Windows, a dir symlink on POSIX — keeps
+        # the link-ancestor path exercised on Windows instead of skipping there.
+        from conftest import make_dir_link
+
+        make_dir_link(base / "via", base / "real")
+
+        names = sorted(name for name, _path in _iter_skill_files(base))
+        # The plain skill and the skill reached through the linked intermediate
+        # both enumerate; the link node resolves to a contained path.
+        assert "plain" in names
+        assert "real/linked-child" in names
+
+    def test_skill_under_ancestor_relocated_out_of_root_is_excluded(self, tmp_path):
+        """A skill reachable only through an out-of-root ancestor is excluded.
+
+        The catalog walk resolves each node through ``os.path.realpath`` and
+        admits a SKILL.md only when its resolved path is under the allowed roots.
+        An ancestor inside the base can link to a directory outside the roots;
+        a skill reached only through that out-of-root ancestor resolves outside
+        the roots and must not enumerate, while an in-tree sibling still does.
+        """
+        from conftest import make_dir_link
+        from kiro_crew.skills import _iter_skill_files
+
+        base = tmp_path / "skills"
+        base.mkdir(parents=True, exist_ok=True)
+        _create_skill(base, "plain", "---\nname: plain\n---\n# Plain")
+        # A skill lives under outside/real/leaf, entirely outside the base tree.
+        outside = tmp_path / "outside"
+        _create_skill(outside, "real/leaf", "---\nname: leaf\n---\n# Leaf")
+        # An ancestor name inside the base links to the out-of-root directory:
+        # the only path to the leaf runs through a link whose resolved target
+        # is outside the roots.
+        make_dir_link(base / "aliased", outside / "real")
+
+        names = sorted(name for name, _path in _iter_skill_files(base))
+        # The in-tree plain skill enumerates; the leaf reachable only through
+        # the out-of-root ancestor resolves outside the roots and is excluded.
+        assert "plain" in names
+        assert "leaf" not in names
+        assert "real/leaf" not in names
+
     def test_dedupe_repeated_token(self, tmp_path):
         loader = self._loader(tmp_path)
         out = loader.resolve_dollar_skills("$oncall-handover and again $oncall-handover")
@@ -2134,6 +2287,140 @@ class TestLazyLoadContext:
         # budget shows all skills AND exercises the usage ordering.
         ctx = loader.get_context(budget=100_000)
         assert ctx.index("**od3**") < ctx.index("**od0**")
+
+    @staticmethod
+    def _shipped_and_user(tmp_path, n_shipped=12, n_user=1, hot=None, shipped_hits=1):
+        """A skills dir of *n_shipped* shipped skills plus *n_user* cold user skills.
+
+        Shipped is marked the way the builtin sync marks every copy it installs.
+        User skills are aged past the new-skill boost window and never used, so
+        rank alone puts every one of them last; each shipped skill carries
+        *shipped_hits* hits, and *hot* (a shipped index) carries several more.
+        """
+        import os
+        import time
+
+        skills_dir = tmp_path / "skills"
+        stale = time.time() - 2 * _NEW_SKILL_BOOST_WINDOW_SECS
+        for i in range(n_user):
+            _create_skill(
+                skills_dir,
+                f"zz-mine{i:02}",
+                f"---\nname: zz-mine{i:02}\ndescription: my own procedure {i}\n---\n# Mine\n",
+            )
+            os.utime(skills_dir / f"zz-mine{i:02}" / "SKILL.md", (stale, stale))
+        for i in range(n_shipped):
+            _create_skill(
+                skills_dir,
+                f"shipped{i:02}",
+                f"---\nname: shipped{i:02}\ndescription: shipped {i}\n---\n# S\n",
+            )
+            (skills_dir / f"shipped{i:02}" / ".builtin-skill-provenance").write_text("2:x")
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        for i in range(n_shipped):
+            for _ in range(shipped_hits):
+                loader._usage.record(f"shipped{i:02}")
+        for _ in range(5 if hot is not None else 0):
+            loader._usage.record(f"shipped{hot:02}")
+        return loader
+
+    @staticmethod
+    def _pointer_names(loader) -> list[str]:
+        text = loader.get_context(budget=100_000, discovery_only=True)
+        return [line[2:].split(":", 1)[0] for line in text.splitlines() if line.startswith("- ")]
+
+    def test_pointer_names_a_cold_user_skill_ahead_of_hot_shipped_ones(self, tmp_path):
+        # A new user has no usage history, so the eight pointer names went to
+        # shipped skills and the skill they wrote was never named at all.
+        loader = self._shipped_and_user(tmp_path)
+        names = self._pointer_names(loader)
+        assert names[0] == "zz-mine00"
+        # The cap is still eight names in total.
+        assert len(names) == 8
+
+    def test_pointer_names_every_user_skill_on_a_zero_usage_install(self, tmp_path):
+        # Three user skills, sixty-odd shipped ones, an empty ledger: all three
+        # user skills are named, and shipped skills fill the remaining slots.
+        loader = self._shipped_and_user(tmp_path, n_shipped=60, n_user=3, shipped_hits=0)
+        names = self._pointer_names(loader)
+        assert names[:3] == ["zz-mine00", "zz-mine01", "zz-mine02"]
+        assert len(names) == 8
+        assert all(n.startswith("shipped") for n in names[3:])
+
+    def test_pointer_keeps_a_hot_shipped_skill_under_a_large_user_tree(self, tmp_path):
+        # The mirror case: ten user skills must not evict a shipped skill the
+        # user actually relies on. At most six of the eight names are the user's
+        # on provenance alone; the rest go to rank, which the hot skill wins.
+        loader = self._shipped_and_user(tmp_path, n_shipped=12, n_user=10, hot=5)
+        names = self._pointer_names(loader)
+        assert len(names) == 8
+        assert "shipped05" in names
+        assert sum(n.startswith("zz-mine") for n in names) == 6
+
+    def test_user_first_order_is_quota_then_rank_then_user_tail(self, tmp_path):
+        loader = self._make(tmp_path, n_on_demand=0)
+        loader._is_user_authored = lambda s: s["user"]  # type: ignore[method-assign]
+
+        def row(name, user):
+            return {"key": name, "user": user}
+
+        # Rank order in: shipped and user rows interleaved, nine user rows.
+        ranked = [
+            row("s0", False),
+            row("u0", True),
+            row("u1", True),
+            row("s1", False),
+            *(row(f"u{i}", True) for i in range(2, 8)),
+            row("s2", False),
+            row("s3", False),
+            row("u8", True),
+        ]
+        out = [r["key"] for r in loader._user_first(ranked)]
+        # Six user rows lead; the two remaining head slots go to the best-ranked
+        # of what is left (s0, s1 outrank the overflow user rows u6, u7); after
+        # the head, the overflow user rows precede the shipped tail.
+        assert out == ["u0", "u1", "u2", "u3", "u4", "u5", "s0", "s1", "u6", "u7", "u8", "s2", "s3"]
+
+    def test_index_admits_a_cold_user_skill_before_hot_shipped_ones(self, tmp_path):
+        loader = self._shipped_and_user(tmp_path)
+        full = loader.get_context(budget=100_000)
+        assert full.index("**zz-mine00**") < full.index("**shipped00**")
+        # A budget with room for only a few rows still spends it on the user's
+        # skill first; the shipped tail goes to the omission footer.
+        tight = loader.get_context(budget=1200)
+        assert "**zz-mine00**" in tight
+        assert "more skill(s) not shown" in tight
+
+    def test_user_authored_classification(self, tmp_path, monkeypatch):
+        import kiro_crew.skills as skills_mod
+
+        skills_dir = tmp_path / "skills"
+        provider = tmp_path / "provider" / "app-skill"
+        provider.mkdir(parents=True)
+        (provider / "SKILL.md").write_text("---\nname: app-skill\ndescription: d\n---\n")
+        from conftest import make_dir_link
+
+        skills_dir.mkdir()
+        make_dir_link(skills_dir / "app-skill", provider)
+        _create_skill(skills_dir, "marked", "---\nname: marked\ndescription: d\n---\n")
+        (skills_dir / "marked" / ".builtin-skill-provenance").write_text("2:x")
+        _create_skill(skills_dir, "packaged", "---\nname: packaged\ndescription: d\n---\n")
+        _create_skill(skills_dir, "team/mine", "---\nname: mine\ndescription: d\n---\n")
+        monkeypatch.setattr(
+            skills_mod, "_trusted_skill_roots", lambda: (str((tmp_path / "provider").resolve()),)
+        )
+        monkeypatch.setattr(skills_mod, "_packaged_skill_names", lambda: frozenset({"packaged"}))
+        loader = SkillsLoader(skills_path=skills_dir, install_builtins=False)
+        verdict = {str(r["key"]): loader._is_user_authored(r) for r in loader.scoped_skills()}
+        assert verdict == {
+            "app-skill": False,
+            "marked": False,
+            "packaged": False,
+            # A nested key is not an app namespace: the user's own tree.
+            "team/mine": True,
+        }
+        # A confined project row is the user's without touching its path.
+        assert loader._is_user_authored({"key": "x", "path": "/nonexistent", "confine_root": "/p"})
 
     def test_short_desc_truncated(self, tmp_path):
         loader = self._make(tmp_path, n_on_demand=1)

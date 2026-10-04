@@ -32,9 +32,16 @@ from kiro_crew.acp.client import (
     model_is_unusable,
     registration_rate_limited_error,
     registration_throttle_line,
+    resolve_pin_spelling_on,
 )
 from kiro_crew.acp.mcp_session_report import McpSessionReport
-from kiro_crew.acp.runtime import AcpRuntime, AcpRuntimeDead, AcpRuntimeError, AcpSessionHandle
+from kiro_crew.acp.runtime import (
+    AcpRuntime,
+    AcpRuntimeDead,
+    AcpRuntimeError,
+    AcpRuntimeStdinStalled,
+    AcpSessionHandle,
+)
 from kiro_crew.acp.session_handle import WatchdogSettings
 from kiro_crew.acp.types import (
     ACP_BACKENDS_COMPACT,
@@ -220,7 +227,16 @@ class AcpSessionProvider(LLMProvider):
             if self._owns_runtime:
                 return None
             return claim_runtime_tenancy(
-                self._runtime, holder=f"subagent:{self._session_key or 'unnamed'}"
+                self._runtime,
+                holder=f"subagent:{self._session_key or 'unnamed'}",
+                # The same key this session's stubs declare in ``X-Session-Key``,
+                # and the reason the dashboard's peer check can admit them: a
+                # shared session holds no lease and the session manager never
+                # registers it, so this claim is the only record binding the key
+                # to the process. Passed as itself rather than reused from the
+                # holder label, which carries a prefix for a human reading a
+                # refusal log.
+                session_key=self._session_key or "",
             )
         except RuntimeTeardownCommitted as exc:
             logger.warning("_claim_shared_turn: shared runtime is being torn down: %s", exc)
@@ -603,8 +619,15 @@ class AcpSessionProvider(LLMProvider):
             await self._end_shared_turn(claim)
 
     async def steer(self, message: str) -> bool:
-        """Forward a mid-turn steer to the session handle (kiro _session/steer)."""
-        return await self._guarded(self._handle.steer(message))
+        """Forward a mid-turn steer to the session handle (kiro _session/steer).
+
+        A failed steer is ambiguous only when its OWN frame was left buffered:
+        the session's outstanding prompt says nothing about a steer that was
+        refused before its first byte, and marking that steer possibly
+        delivered would make the next turn skip an instruction that never
+        reached the backend.
+        """
+        return await self._guarded(self._handle.steer(message), own_write_only=True)
 
     @property
     def last_steer_monotonic(self) -> float:
@@ -658,7 +681,9 @@ class AcpSessionProvider(LLMProvider):
         finally:
             await self._end_shared_turn(claim)
 
-    def _translate_dead(self, exc: AcpRuntimeDead) -> AcpProcessDied | AcpAuthRequired:
+    def _translate_dead(
+        self, exc: AcpRuntimeDead, *, own_write_only: bool = False
+    ) -> AcpProcessDied | AcpAuthRequired:
         """Map a shared-runtime death (AcpRuntimeDead — an AcpRuntimeError OUTSIDE
         the AcpError hierarchy) to the AcpError-hierarchy exception every caller
         expects: AcpAuthRequired on auth-expiry, the typed transient
@@ -685,14 +710,25 @@ class AcpSessionProvider(LLMProvider):
                 host_auth.signed_out_message(self._runtime.acp_backend),
                 backend=self._runtime.acp_backend,
             )
-        if not getattr(getattr(self, "_handle", None), "prompt_or_tool_seen", True):
+        # A stdin-stall death is the host's own verdict, never a throttle: the
+        # transient subclass would license a verbatim replay of a prompt the
+        # live child may still read. Ambiguity is the stalling write's own flag
+        # or, for a co-tenant, its prompt left outstanding in the stalled pipe.
+        handle = getattr(self, "_handle", None)
+        ambiguous = getattr(exc, "ambiguous_delivery", False) is True or (
+            not own_write_only and getattr(handle, "prompt_outstanding_on_stall", False) is True
+        )
+        stalled = isinstance(exc, AcpRuntimeStdinStalled) or (
+            getattr(self._runtime, "stdin_stall_death", False) is True
+        )
+        if not stalled and not getattr(handle, "prompt_or_tool_seen", True):
             tail = getattr(self._runtime, "redacted_stderr_tail", lambda: "")()
             cause = registration_throttle_line(tail) if tail else None
             if cause is not None:
                 return registration_rate_limited_error(str(exc), cause)
-        return AcpProcessDied(str(exc))
+        return AcpProcessDied(str(exc), ambiguous_delivery=ambiguous)
 
-    async def _guarded(self, awaitable: Any) -> Any:
+    async def _guarded(self, awaitable: Any, *, own_write_only: bool = False) -> Any:
         """Await a runtime-touching handle coroutine, translating AcpRuntimeDead
         into the AcpError hierarchy (see _translate_dead), and any other base
         AcpRuntimeError into a generic AcpError so nothing outside AcpError
@@ -700,7 +736,7 @@ class AcpSessionProvider(LLMProvider):
         try:
             return await awaitable
         except AcpRuntimeDead as exc:
-            raise self._translate_dead(exc) from exc
+            raise self._translate_dead(exc, own_write_only=own_write_only) from exc
         except AcpRuntimeError as exc:
             raise AcpError(str(exc)) from exc
 
@@ -1128,14 +1164,26 @@ class AcpSessionProvider(LLMProvider):
         """
         advertised = advertised_model_ids(self._handle.available_models)
         if model_is_unusable(model_id, advertised):
-            # A user's explicit pick must earn a FRESH probe, not be refused on a
-            # recent no-evidence failure the picker read path may have cached
-            # (force=True skips the failure/empty attempt-clock replay).
-            fresh = advertised_model_ids(
-                await self._guarded(self._handle.refresh_available_models(force=True))
-            )
-            if model_is_unusable(model_id, fresh or advertised):
-                raise AcpModelUnavailable(model_id, fresh or advertised)
+            # A pair-id harness (e.g. codex-acp) stores a pin in its BARE
+            # spelling while the advertised rows carry a ``[effort]`` suffix, so
+            # the bare id reads as unadvertised here even though it is the exact
+            # spelling the harness's config-option write accepts. Ask the
+            # backend-aware resolver: a non-empty answer means this pin resolves
+            # to a real served model for this backend, so it is usable — let the
+            # handle do the wire translation rather than hard-killing a provider
+            # on a pin the harness routinely stores. Only refuse when the
+            # resolver also finds nothing, after a fresh probe.
+            if not resolve_pin_spelling_on(model_id, advertised, backend=self.backend):
+                # A user's explicit pick must earn a FRESH probe, not be refused
+                # on a recent no-evidence failure the picker read path may have
+                # cached (force=True skips the failure/empty attempt-clock replay).
+                fresh = advertised_model_ids(
+                    await self._guarded(self._handle.refresh_available_models(force=True))
+                )
+                if not resolve_pin_spelling_on(
+                    model_id, fresh, backend=self.backend
+                ) and model_is_unusable(model_id, fresh or advertised):
+                    raise AcpModelUnavailable(model_id, fresh or advertised)
         await self._guarded(self._handle.set_model(model_id))
 
     async def set_mode(self, agent_name: str) -> None:

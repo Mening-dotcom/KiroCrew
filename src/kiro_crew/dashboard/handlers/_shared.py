@@ -1048,7 +1048,8 @@ async def private_chat_route_refusal(request: web.Request) -> web.Response | Non
 #: The path is matched STRUCTURALLY by :func:`_admitted_chat_route_methods`
 #: against the exact registered patterns, never by a raw prefix, so a sibling
 #: literal that shares a prefix (``/api/chat/folders/reorder``,
-#: ``/api/chat/tag-columns``) is NOT admitted and keeps the owner-only refusal.
+#: ``/api/chat/tag-columns/order``) is NOT admitted and keeps the owner-only
+#: refusal.
 #:
 #: The admitted VERBS are exactly the ones a member may actually do -- a verb
 #: whose handler has no member fence is not admitted here, so the gate can never
@@ -1058,7 +1059,12 @@ async def private_chat_route_refusal(request: web.Request) -> web.Response | Non
 #: every agent principal); it READS the shared tag vocabulary (GET) but does NOT
 #: coin/rename/delete tags (``chat_tags.api_chat_tag_delete`` has no
 #: vocabulary fence at all, so admitting DELETE would let a member remove a
-#: shared tag); it files/tags only its own or created sessions. The per-handler
+#: shared tag); it files/tags only its own or created sessions, and a tag it
+#: assigns is still subject to the agent tag-grants policy
+#: (``chat_tags.agent_tag_change_refusal``): it may apply a tag the owner opened
+#: to agents (``add-only``/``add-remove``) or any rowless ordinary label, but a
+#: tag the owner reserved (a protected ``none`` row) is refused the same as for
+#: any other agent. The per-handler
 #: ownership fence (``owner_app``/``folder_principal`` for the tree,
 #: ``member_owns_slot`` for filing/tagging, ``_refuse_vocabulary_write`` for tag
 #: creation/rename) is still the authoritative gate; this set just refuses to
@@ -1069,6 +1075,11 @@ _MEMBER_CHAT_FOLDER_ID_METHODS = frozenset({"PATCH"})
 #: row to the caller's own folder, so a member renumbers only what it owns.
 _MEMBER_CHAT_FOLDER_REORDER_METHODS = frozenset({"POST"})
 _MEMBER_CHAT_TAGS_METHODS = frozenset({"GET"})
+#: The board's column list is admitted READ-only, like the tag vocabulary: it
+#: names tags and live-state lanes, never a session. Its writes (POST, and the
+#: ``/{id}`` and ``/order`` routes, which are not matched at all) stay refused;
+#: ``_refuse_vocabulary_write`` in each write handler refuses a member too.
+_MEMBER_CHAT_TAG_COLUMNS_METHODS = frozenset({"GET"})
 _MEMBER_CHAT_SLOT_FOLDER_METHODS = frozenset({"PATCH"})
 _MEMBER_CHAT_SLOT_TAGS_METHODS = frozenset({"PUT"})
 #: Pinning a session (``chat_session_pin``); ``api_chat_slot_pin`` applies the
@@ -1088,8 +1099,9 @@ def _admitted_chat_route_methods(path: str) -> frozenset[str] | None:
     Structural, path-shape matching that mirrors the routes registered in
     ``routes/sessions.py`` / ``routes/chat.py`` EXACTLY. A trailing single
     segment on ``/folders/`` is a folder id (``{id}``); the reserved literal
-    ``/api/chat/folders/reorder`` and every ``/api/chat/tag-*`` are deliberately
-    excluded. ``/api/chat/tags/{id}`` is NOT admitted for any method -- a member
+    ``/api/chat/folders/reorder`` and every ``/api/chat/tag-*`` except the
+    read-only column list ``/api/chat/tag-columns`` are deliberately excluded.
+    ``/api/chat/tags/{id}`` is NOT admitted for any method -- a member
     neither renames nor deletes shared tags -- so its DELETE (which has no
     vocabulary fence) is refused at the gate. ``/api/chat/slots`` is the session
     LIST only; a deeper ``/api/chat/slots/<slot>/...`` sub-resource other than
@@ -1099,6 +1111,8 @@ def _admitted_chat_route_methods(path: str) -> frozenset[str] | None:
         return _MEMBER_CHAT_FOLDERS_METHODS
     if path in ("/api/chat/tags", "/api/chat/tags/"):
         return _MEMBER_CHAT_TAGS_METHODS
+    if path in ("/api/chat/tag-columns", "/api/chat/tag-columns/"):
+        return _MEMBER_CHAT_TAG_COLUMNS_METHODS
     if path in ("/api/chat/slots", "/api/chat/slots/"):
         return _MEMBER_CHAT_SLOTS_METHODS
     if path == "/api/chat/folders/reorder":
@@ -1110,7 +1124,7 @@ def _admitted_chat_route_methods(path: str) -> frozenset[str] | None:
         # own folders.
         return _MEMBER_CHAT_FOLDER_REORDER_METHODS
     id_part = _single_id_segment(path, "/api/chat/folders/")
-    if id_part is not None and id_part != "reorder":
+    if id_part is not None and id_part not in ("reorder", "cleanup"):
         return _MEMBER_CHAT_FOLDER_ID_METHODS
     slot = _single_id_segment(path, "/api/chat/slots/", suffix="/folder")
     if slot is not None:

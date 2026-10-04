@@ -23,7 +23,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -34,6 +34,11 @@ from kiro_crew.constants import (
     SUBAGENT_TIMEOUT_SECS,
 )
 from kiro_crew.executors import image_executor, maintenance_executor
+from kiro_crew.install_liveness import (
+    POOLED_BACKEND_ENV,
+    POOLED_BACKEND_VALUE,
+    POOLED_RESPAWN_COMMAND_ENV,
+)
 from kiro_crew.mcp_caller import (
     CALLER_CAPABILITY_KEY,
     CALLER_META_KEY,
@@ -103,6 +108,11 @@ INTERNAL_STUB_PREFIXES: tuple[str, ...] = ("__app_call__", TOOL_SURFACE_STUB_PRE
 # Schema (one JSONL record per completed request):
 #   {"ts": epoch_ms_int, "method": "tools/call", "dur_ms": 2.34,
 #    "pool": "example-mcp::kirocrew::...", "pid": 12345, "ok": true}
+#
+# ``ok`` is false for either failure shape: a JSON-RPC ``error`` response, or
+# a tools/call ``result`` carrying ``isError: true`` (the tool ran and
+# reported its own failure). A failed tool call also emits one WARNING line to
+# the gateway log naming the server, tool, session and a truncated error.
 #
 # Ring-buffer-free — we trust log rotation on the consumer side.
 _METRICS_PATH = os.environ.get("MCP_GATEWAY_CALL_METRICS_PATH")
@@ -340,6 +350,70 @@ class _PendingRequest:
     # subscribe/unsubscribe against an unresponsive server would grow the
     # pending table without bound. Cap accounting only; never routed to.
     origin_stub: str = ""
+    # The frame as forwarded upstream, kept only for a method in
+    # ``_REHANDSHAKE_RETRY_METHODS`` so the request can be sent once more after
+    # the backend is handshaken again. ``None`` for every other request, and on
+    # the retry itself, which is never retried a second time.
+    retry_frame: Optional[dict[str, Any]] = None
+
+
+# A request the Python MCP SDK refuses because ITS session is not initialized
+# comes back as exactly this error (``mcp.shared.session``: the
+# ``Received request before initialization was complete`` RuntimeError is
+# reported as INVALID_PARAMS with this message and an empty ``data``). The same
+# frame answers a request that fails the SDK's ``ClientRequest`` validation, so
+# on its own it does not prove the session was lost -- which is why the answer
+# to it is one rehandshake and one retry, never a loop.
+#
+# The gateway reaches it when the server process behind the pipe was replaced
+# without a handshake while the pipe stayed up. A pooling multiplexer does this
+# when the command the gateway spawned is its thin client: the client keeps its
+# connection to the multiplexer's daemon, and the daemon respawns a retired or
+# dead server instance cold, sending it nothing before the next request. kiro-cli
+# sends ``initialize`` once per session and the gateway answers every later stub
+# from its cache, so without the rehandshake every later call on that backend
+# fails until the gateway itself restarts.
+_LOST_SESSION_ERROR_CODE = -32602
+_LOST_SESSION_ERROR_MESSAGE = "Invalid request parameters"
+
+# Requests safe to send twice: the refusal above is issued before the SDK
+# dispatches anything, and none of these hold gateway-side lease state.
+# ``resources/subscribe`` / ``unsubscribe`` are left out because their
+# response drives the lease bookkeeping, and ``initialize`` is the cache's.
+_REHANDSHAKE_RETRY_METHODS: frozenset[str] = frozenset({
+    "tools/call",
+    "tools/list",
+    "prompts/list",
+    "prompts/get",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "completion/complete",
+})
+
+# ``stub_uuid`` of the gateway's own re-sent ``initialize``: its reply is
+# swallowed, never delivered to a stub.
+_REHANDSHAKE_STUB_SENTINEL = "__rehandshake__"
+
+
+def _is_lost_session_error(msg: dict[str, Any]) -> bool:
+    """Whether ``msg`` is the Python MCP SDK's not-initialized refusal."""
+    error = msg.get("error")
+    return (
+        isinstance(error, dict)
+        and error.get("code") == _LOST_SESSION_ERROR_CODE
+        and error.get("message") == _LOST_SESSION_ERROR_MESSAGE
+        # Empty in every SDK release that sends it; absent is tolerated so a
+        # release that drops the member is still recognised.
+        and error.get("data", "") == ""
+    )
+
+
+def _without_id(msg: dict[str, Any]) -> dict[str, Any]:
+    """A shallow copy of ``msg`` with no ``id``."""
+    out = dict(msg)
+    out.pop("id", None)
+    return out
 
 
 def _strip_caller_meta(msg: dict[str, Any]) -> dict[str, Any]:
@@ -428,6 +502,120 @@ def _is_success_response(msg: dict[str, Any]) -> bool:
     server never actually delivered, so lease transitions treat it as a
     refusal (fail closed)."""
     return "error" not in msg and "result" in msg
+
+
+# Maximum length of the error string carried in the per-call failure WARNING.
+# The point is a greppable breadcrumb an operator can anchor on, not the whole
+# payload; a multi-KB tool error would otherwise push the useful fields
+# (server, tool, session) off the end of a wrapped log line.
+_TOOL_ERROR_LOG_MAX = 300
+
+# Upper bound on the untrusted error prefix handed to ``redact`` before the
+# final ``_TOOL_ERROR_LOG_MAX`` truncation. Far larger than the logged cap (so
+# redaction still sees enough context to match a secret spanning a few hundred
+# bytes) but small enough that the credential/exfiltration scan on the shared
+# stdout pump is bounded regardless of the frame size.
+_TOOL_ERROR_PRESCAN_MAX = 8192
+
+
+def _tool_call_error_text(msg: dict[str, Any]) -> Optional[str]:
+    """Return a truncated error string when ``msg`` is a FAILED tool-call
+    response, else ``None``.
+
+    Two distinct wire shapes mean "this tool call failed":
+
+    * a JSON-RPC ``error`` object — the server could not run the tool at all;
+    * a ``result`` carrying ``isError: true`` — the tool ran and reported a
+      failure in its own content (the MCP ``CallToolResult`` error channel).
+
+    Both reach the model as a failed call. A plain ``"error" not in msg``
+    check misses the second shape (``isError`` lives inside ``result``), so
+    this recognises both and extracts a short, greppable description for the
+    breadcrumb.
+
+    Returns ``None`` for a settled success and for a malformed frame carrying
+    neither ``error`` nor ``result`` (nothing to attribute as a failure).
+    """
+    err = msg.get("error")
+    if isinstance(err, dict):
+        text = err.get("message")
+        if not isinstance(text, str) or not text:
+            text = json.dumps(err, separators=(",", ":"))
+    elif isinstance(err, str) and err:
+        text = err
+    else:
+        result = msg.get("result")
+        if not isinstance(result, dict) or result.get("isError") is not True:
+            return None
+        text = _mcp_result_error_text(result)
+    # ``text`` is untrusted server output. Slice it to a bounded prefix FIRST
+    # (well above ``_TOOL_ERROR_LOG_MAX``) so the credential/exfiltration
+    # ``redact`` pass — the same one the backend stderr pump applies — runs on
+    # a few KiB rather than a frame bounded only by ``READ_BUFFER_LIMIT_BYTES``;
+    # this routing happens on the shared stdout pump, so an O(payload) scan here
+    # would add head-of-line latency to every co-pooled session's frames.
+    # ``_collapse_nonprintable`` then maps every control character (newlines,
+    # escapes, NUL included) to a space so the value cannot forge a second log
+    # line or clear the operator's terminal, and the record stays one line.
+    if len(text) > _TOOL_ERROR_PRESCAN_MAX:
+        text = text[:_TOOL_ERROR_PRESCAN_MAX]
+    text = _collapse_nonprintable(redact(text))
+    if len(text) > _TOOL_ERROR_LOG_MAX:
+        text = text[: _TOOL_ERROR_LOG_MAX - 1] + "\u2026"
+    return text
+
+
+def _mcp_result_error_text(result: dict[str, Any]) -> str:
+    """Best-effort human string from an ``isError: true`` CallToolResult.
+
+    An MCP tool error is reported in the result's ``content`` list (text parts
+    carry the message); fall back to a compact JSON dump when no text part is
+    present so there is always something to log."""
+    content = result.get("content")
+    if isinstance(content, list):
+        parts = [
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ]
+        if parts:
+            return " ".join(parts)
+    return json.dumps(result, separators=(",", ":"))
+
+
+# A caller/server-supplied identifier (tool name, session key, server name)
+# interpolated into the failed-tool-call WARNING. Cap it so a long name cannot
+# push the structured fields off a wrapped log line.
+_MCP_IDENT_LOG_MAX = 120
+
+
+def _collapse_nonprintable(value: str) -> str:
+    """Replace every non-printable character (and whitespace run) with a single
+    space.
+
+    ``str.split()`` only recognises Python's whitespace set, so an escape
+    (``\\x1b``), NUL, BEL or DEL would otherwise survive into the log line and
+    could clear the terminal or overwrite preceding records. Map every
+    character ``str.isprintable()`` rejects to a space, then collapse runs.
+    """
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())
+
+
+def _log_safe_identifier(value: str, fallback: str = "?") -> str:
+    """Make a caller/server-supplied identifier safe to interpolate into a log
+    line.
+
+    A tool name or session key is caller input (``params.name`` on a
+    tools/call) and a server name is operator/registry input; any of them could
+    carry a newline (forging a second gateway/dashboard log entry), a terminal
+    escape, or a credential/exfiltration URL. Run the module's ``redact`` pass,
+    map every non-printable character to a space, cap the length, and fall back
+    to ``fallback`` when nothing printable remains.
+    """
+    cleaned = _collapse_nonprintable(redact(value))
+    if len(cleaned) > _MCP_IDENT_LOG_MAX:
+        cleaned = cleaned[: _MCP_IDENT_LOG_MAX - 1] + "\u2026"
+    return cleaned or fallback
 
 
 # Deadline for the out-of-band ``resources/read`` round-trip. On timeout the
@@ -756,6 +944,12 @@ class Backend:
     _init_pending: list[tuple[str, Any]] = field(default_factory=list)
     _init_first_stub: Optional[str] = None
     _init_first_id: Any = None
+    # The ``initialize`` frame this backend was handshaken with, as forwarded
+    # upstream minus its id. Kept so a backend whose server lost its MCP session
+    # behind the pipe can be handshaken again (``_retry_after_rehandshake``):
+    # kiro-cli sends ``initialize`` once per session and the cache above answers
+    # every later stub, so no stub will ever send another one.
+    _upstream_init_frame: Optional[dict[str, Any]] = None
     # Set once the upstream initialize resolves (ready OR failed). The
     # transparent-respawn path (gatewayd) awaits this after re-priming a
     # freshly spawned backend so stub traffic only resumes when the new
@@ -1342,11 +1536,14 @@ class Backend:
         # method) pass through without rewrite. Pure responses are kiro-cli
         # answering a server-to-client request — the backend owns that id
         # table, not us.
+        retry_fid: Optional[str] = None
         if isinstance(msg, dict):
             orig_id = msg.get("id")
             has_method = "method" in msg
             if has_method and orig_id is not None:
                 fid = self._next_forward_id()
+                if method in _REHANDSHAKE_RETRY_METHODS:
+                    retry_fid = fid
                 msg = dict(msg)  # shallow copy — we mutate id + maybe _meta
                 msg["id"] = fid
                 progress_token = None
@@ -1419,6 +1616,12 @@ class Backend:
                 msg = _inject_caller_meta(msg, caller)
             if self.supports_caller_identity and tenant_nonce:
                 msg = _inject_tenant_meta(msg, tenant_nonce)
+            if retry_fid is not None:
+                # The frame exactly as it goes upstream -- identity blocks
+                # included -- so a retry after a rehandshake is the same request.
+                retry_pending = self._pending_requests.get(retry_fid)
+                if retry_pending is not None:
+                    retry_pending.retry_frame = msg
 
         self.touch()
         try:
@@ -1465,6 +1668,7 @@ class Backend:
         # the KIROCREW_MCP_APPS flag is on). Must follow the strip so the
         # injected frame is our copy, never the stub's.
         forward_msg = _inject_client_extensions(forward_msg)
+        self._upstream_init_frame = _without_id(forward_msg)
         forward_msg["id"] = fid
         self.touch()
         try:
@@ -1598,6 +1802,7 @@ class Backend:
             # MCP Apps: same injection as _handle_initialize so a respawned
             # backend sees the identical ui capability (flag-gated no-op).
             forward_msg = _inject_client_extensions(forward_msg)
+            self._upstream_init_frame = _without_id(forward_msg)
             forward_msg["id"] = fid
             self.touch()
             try:
@@ -2040,20 +2245,53 @@ class Backend:
                     self.pid, msg_id,
                 )
                 return
+            if pending.stub_uuid == _REHANDSHAKE_STUB_SENTINEL:
+                if "error" in msg:
+                    logger.warning(
+                        "backend pid=%s refused the re-sent initialize: %s",
+                        self.pid, _tool_call_error_text(msg),
+                    )
+                return
+            if (
+                pending.retry_frame is not None
+                and _is_lost_session_error(msg)
+                and await self._retry_after_rehandshake(pending)
+            ):
+                return
             if pending.t_start_ms:
                 # Fire-and-forget: awaiting the emit here (even with its file
                 # I/O offloaded to a thread) yields the shared stdout pump,
                 # adding head-of-line latency to co-pooled sessions whenever
                 # the metrics volume is slow. Schedule it off the hot path.
+                #
+                # ``error_text`` is non-None for BOTH failure shapes (a
+                # JSON-RPC ``error`` and a ``result`` with ``isError: true``),
+                # so a tool that ran and reported its own failure is scored
+                # ``ok: false`` here rather than counted as a success.
+                error_text = _tool_call_error_text(msg)
                 self._spawn_metric_task({
                     "ts": int(time.time() * 1000),
                     "method": pending.method,
                     "dur_ms": round(time.monotonic() * 1000.0 - pending.t_start_ms, 3),
                     "pool": self.pool_key.human_readable(),
                     "pid": self.pid,
-                    "ok": "error" not in msg,
+                    "ok": error_text is None,
                     "stub": pending.stub_uuid,
                 })
+                if error_text is not None and pending.method == "tools/call":
+                    # One greppable breadcrumb per failed tool call (isError or
+                    # a JSON-RPC error), so an operator searching gateway.log
+                    # for an MCP outage finds the failing call rather than only
+                    # the session's lifecycle lines. WARNING matches the
+                    # severity of the per-session claim-push outcomes logged on
+                    # this seam.
+                    logger.warning(
+                        "mcp tool call failed: server=%s tool=%s session=%s error=%s",
+                        _log_safe_identifier(self.pool_key.server_name),
+                        _log_safe_identifier(pending.tool_name),
+                        _log_safe_identifier(pending.session_key),
+                        error_text,
+                    )
             if pending.stub_uuid == "__init__":
                 await self._on_upstream_initialize(msg)
                 return
@@ -2310,6 +2548,66 @@ class Backend:
                 await self._broadcast_backend_gone(reason)
             return
         logger.debug("backend pid=%s emitted malformed JSON-RPC: %r", self.pid, msg)
+
+    async def _retry_after_rehandshake(self, pending: _PendingRequest) -> bool:
+        """Handshake the server again and send ``pending``'s request once more.
+
+        Called when a forwarded request came back as the not-initialized refusal
+        (:func:`_is_lost_session_error`). Returns True when the request is back
+        on the wire, so its first answer must not reach the stub; False leaves
+        the caller to deliver that answer unchanged.
+
+        The ``initialize``, the ``notifications/initialized`` and the retried
+        request go out in ONE write. A server reads its stdin in order, so the
+        retry cannot overtake the handshake, and no co-tenant's request can land
+        between the two halves of it -- a Python server that has just seen an
+        ``initialize`` refuses everything until ``initialized`` arrives. The
+        reply to the ``initialize`` is swallowed: the cache already answered
+        every stub, and the server is the same one.
+        """
+        init_frame = self._upstream_init_frame
+        if init_frame is None or self._init_state != "ready" or not self.is_alive:
+            return False
+        async with self._inbox_lock:
+            attached = pending.stub_uuid in self._stub_inboxes
+        if not attached:
+            return False
+        assert pending.retry_frame is not None
+        init_fid = self._next_forward_id()
+        retry_fid = self._next_forward_id()
+        self._pending_requests[init_fid] = _PendingRequest(
+            stub_uuid=_REHANDSHAKE_STUB_SENTINEL, original_id=None, method="initialize",
+            # Stamped like every other pending: the wedge sweep reads an unset
+            # start as an hour-old request.
+            t_start_ms=time.monotonic() * 1000.0,
+        )
+        retry_frame = dict(pending.retry_frame)
+        retry_frame["id"] = retry_fid
+        # Same stub, original id, start time and captured tool fields, so the
+        # answer, a cancel and the metrics all read as the one request it is.
+        self._pending_requests[retry_fid] = replace(pending, retry_frame=None)
+        logger.warning(
+            "backend pid=%s server=%s refused %s as not initialized; its MCP session "
+            "was lost behind the pipe (a pooling proxy respawned it cold?) -- "
+            "re-sending initialize and retrying once",
+            self.pid,
+            _log_safe_identifier(self.pool_key.server_name),
+            _log_safe_identifier(pending.method),
+        )
+        frames = [
+            {**init_frame, "id": init_fid},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            retry_frame,
+        ]
+        self.touch()
+        try:
+            await _write_json_lines(self.stdin, frames)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            self._pending_requests.pop(init_fid, None)
+            self._pending_requests.pop(retry_fid, None)
+            self._dead_reason = f"stdin closed during rehandshake: {exc}"
+            return False
+        return True
 
     def _record_hazard(self, code: str) -> None:
         """Note that this server exhibited per-client behaviour while shared.
@@ -4092,6 +4390,13 @@ async def spawn_backend(
     # identity (unlike a per-session value, which would be a correctness bug).
     spawn_env = dict(env)
     spawn_env[KIROCREW_SPAWNED_ENV] = KIROCREW_SPAWNED_VALUE
+    # Tells a first-party server it may exit to be replaced (its install was
+    # pruned): this pool respawns it. Constant, so PoolKey-safe like the above.
+    spawn_env[POOLED_BACKEND_ENV] = POOLED_BACKEND_VALUE
+    # The command a respawn reuses (the daemon's target map is frozen), so the
+    # server exits only when that relaunch can still work. Derived from the
+    # key's own command, so PoolKey-safe like the marker.
+    spawn_env[POOLED_RESPAWN_COMMAND_ENV] = command
     # Per-process temp containment. Safe re: the pooled-backend
     # PoolKey invariant for the same reason as the marker above -- the value
     # is derived from the key's own digest plus a token generated AFTER
@@ -4331,7 +4636,15 @@ async def _write_json_line(writer: asyncio.StreamWriter, obj: Any) -> None:
     OS pipe buffer fill and silently stall the gateway loop (Phase-0
     item #2). Every write goes through this helper.
     """
-    payload = json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n"
+    await _write_json_lines(writer, [obj])
+
+
+async def _write_json_lines(writer: asyncio.StreamWriter, objs: list[Any]) -> None:
+    """:func:`_write_json_line` for several frames in ONE write and one drain,
+    so no other writer's frame can land between them."""
+    payload = b"".join(
+        json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n" for obj in objs
+    )
     lock = getattr(writer, "_mc_write_lock", None)
     guard: Any = lock if lock is not None else contextlib.nullcontext()
     async with guard:

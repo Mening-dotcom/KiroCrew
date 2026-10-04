@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import errno
 import json
 import os
 import sys
@@ -18,6 +19,7 @@ from kiro_crew.config.loader import (
     _subtract_overlay,
     config_local_path,
     config_path,
+    read_config_text,
     update_config_locked,
     workspace_dir_from_entry,
 )
@@ -42,6 +44,53 @@ if TYPE_CHECKING:
     from kiro_crew.config.schema import ConfigEntry
 
 _MISSING = object()
+
+#: How the OS sandbox refuses a write to a sealed config file: Seatbelt answers
+#: ``EPERM``, and a Linux read-only file bind answers ``EROFS`` for an in-place write
+#: and ``EBUSY`` for the rename ``atomic_write`` publishes with.
+_SEALED_CONFIG_ERRNOS = frozenset({errno.EPERM, errno.EACCES, errno.EROFS, errno.EBUSY})
+
+
+def _names_sealed_config(exc: OSError) -> bool:
+    """Whether *exc* was raised against ``config.json`` or ``config.local.json``.
+
+    The publishing ``os.replace(tmp, path)`` reports the temp as ``filename`` and the
+    destination as ``filename2``; an in-place ``open(path, "w")`` reports only
+    ``filename``. Either way the sealed file is one of the two. A failure that names
+    neither -- ``config edit``'s ``execvp`` of an editor, a temp the data home itself
+    refused -- is the caller's to report as what it is.
+    """
+    sealed = {os.path.realpath(p) for p in (config_path(), config_local_path())}
+    for name in (exc.filename, exc.filename2):
+        if isinstance(name, (str, bytes, os.PathLike)):
+            if os.path.realpath(os.fsdecode(name)) in sealed:
+                return True
+    return False
+
+
+def _sandboxed_config_write_hint(exc: OSError) -> str | None:
+    """The operator-facing reason a config write failed inside the agent sandbox.
+
+    ``config.json`` and ``config.local.json`` are read-only to every sandboxed process
+    (``sandbox._CREW_READONLY_LEAVES``) because they carry the switches that loosen
+    confinement. Without this the refusal surfaces as a bare errno, which reads like a
+    broken install. Decided from the failure itself -- a denial errno against one of
+    the two sealed files -- and not from ``KIROCREW_SANDBOX_ACTIVE``: ``cli.main()``
+    pops that marker before dispatch so an inherited value can never buy a sandbox
+    bypass, which means it is never set by the time this runs. ``None`` for any other
+    failure, so the caller's own error path still reports a genuinely read-only or
+    full data home, or an editor the sandbox would not exec.
+    """
+    if exc.errno not in _SEALED_CONFIG_ERRNOS:
+        return None
+    if not _names_sealed_config(exc):
+        return None
+    return (
+        "❌ The config file was not written. Inside the agent sandbox config.json and "
+        "config.local.json are read-only, so an agent cannot change the settings that "
+        "confine it: change the setting in the dashboard (Settings), or run this command "
+        "from your own terminal. Outside the sandbox, check the file's permissions."
+    )
 
 
 def _refuse_missing_workspace_dirs(data: dict, current: dict) -> dict:
@@ -72,6 +121,17 @@ def _refuse_missing_workspace_dirs(data: dict, current: dict) -> dict:
 
 def _config_cmd(args: argparse.Namespace) -> None:
     """Get or set config values."""
+    try:
+        _run_config_cmd(args)
+    except OSError as exc:
+        hint = _sandboxed_config_write_hint(exc)
+        if hint is None:
+            raise
+        print(hint, file=sys.stderr)
+        sys.exit(1)
+
+
+def _run_config_cmd(args: argparse.Namespace) -> None:
     action = getattr(args, "config_action", None)
     if action == "get":
 
@@ -276,7 +336,7 @@ def _config_cmd(args: argparse.Namespace) -> None:
                     lp = config_local_path()
                     if lp.is_file():
                         try:
-                            raw_local = json.loads(lp.read_text(encoding="utf-8"))
+                            raw_local = json.loads(read_config_text(lp))
                             if isinstance(raw_local, dict):
                                 return _subtract_overlay(existing, raw_local)
                         except (json.JSONDecodeError, OSError):
@@ -365,7 +425,7 @@ def _defaults_cmd(args: argparse.Namespace) -> None:
         _print_adopted()
     path = config_path()
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(read_config_text(path))
     except FileNotFoundError:
         print("✅ No config.json yet — the current defaults already apply.")
         return
@@ -470,7 +530,10 @@ def _defaults_cmd(args: argparse.Namespace) -> None:
         except OSError as e:
             # A read-only or full data home, or a refused link: report it and stop,
             # rather than letting the CLI die on a traceback.
-            print(f"❌ Could not write {config_path()}: {e}", file=sys.stderr)
+            print(
+                _sandboxed_config_write_hint(e) or f"❌ Could not write {config_path()}: {e}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         # An adopted key no longer stores the acked value, so its ack is dead
         # bookkeeping; dropping it keeps a later deliberate choice reportable.
@@ -499,8 +562,20 @@ def _defaults_cmd(args: argparse.Namespace) -> None:
                 print(f"✅ {key} removed — the current default now applies")
         if not removed:
             print("Nothing removed — the stored values changed since they were listed.")
-        else:
-            print("\nRestart the gateway for a running instance to pick this up.")
+        # The schema's restart=True mark is the one statement of which fields a
+        # running gateway cannot adopt, so the restart hint names exactly those keys
+        # -- and only where the effective value moved: an overlay-shadowed key runs
+        # the same value after the edit as before it.
+        # Imported here: the schema builds the full registry at import time, which
+        # the listing and --keep paths never need.
+        from kiro_crew.config.schema import requires_restart
+
+        restart_bound = [key for key in removed if key not in overridden and requires_restart(key)]
+        if restart_bound:
+            print(
+                "\nRestart the gateway for a running instance to pick up: "
+                + ", ".join(restart_bound)
+            )
         return
 
     if keeping:
@@ -522,8 +597,13 @@ def _defaults_cmd(args: argparse.Namespace) -> None:
             source="cli",
             resources=",".join(recorded),
         )
+        notes = {e.dotted_key: e.note for e in drifted if e.note}
         for key in recorded:
             print(f"✅ {key} recorded as intentional — no longer reported")
+            if key in notes:
+                # Said again at the moment of affirming: the note is a fact the
+                # choice to keep depends on, and this is the last line they read.
+                print(f"   Note: {notes[key]}.")
         print("\nChanging one of these values later reports it again.")
         return
 
@@ -564,7 +644,7 @@ def _overlay_keys(dotted_keys: list[str]) -> set[str]:
     if not p.is_file():
         return set()
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
+        raw = json.loads(read_config_text(p))
     except (OSError, ValueError):
         # ValueError covers malformed JSON and invalid UTF-8 alike; either way the
         # overlay is treated as carrying nothing.

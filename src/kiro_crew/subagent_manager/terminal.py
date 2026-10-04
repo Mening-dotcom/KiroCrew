@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         SubagentInfo,
         _done_result,
         _injection_notice_outcome,
+        _parked_at_spawn_approval,
         _redact,
         _timeout_context,
         _ws_result_path,
@@ -316,6 +317,22 @@ class TerminalCoordinator(ManagerComponent):
                 "partial": info.partial,
             },
         )
+        # A terminal is where the user watches the wave settle, so it
+        # re-publishes the parent's authoritative queued depth. The pushed
+        # count is advisory and otherwise only reset on a reconnect's snapshot;
+        # without this, a missed or superseded frame leaves "N waiting to
+        # start" and its wait reason on the card after every run has finished.
+        # A queued-stop terminal is the exception: it is the synthetic record
+        # of a row stopped before it started, and the stop that removed the row
+        # has already asked for the depth (and a read that fails is retried),
+        # so another request would only discard that stop's read and queue a
+        # fresh one behind the stop's settle writes. Guarded: an advisory emit
+        # must never cost the parent its completion.
+        if info.parent_session_key and not info.queued:
+            try:
+                self._manager._emit_queue_depth(info.parent_session_key, info.batch_id)
+            except Exception:
+                logger.debug("queue-depth re-emit failed after terminal", exc_info=True)
         if not self._manager._on_done:
             return True
         if info.id in getattr(self._manager, "_teardown_cancelled_ids", ()):
@@ -640,7 +657,7 @@ class TerminalCoordinator(ManagerComponent):
         # also sets ``_awaiting_approval`` for mid-run TOOL prompts, where
         # ``_exec_started`` is already set, so ``_exec_started is None`` is what
         # distinguishes "never started" from "was running".
-        approval_parked = info._awaiting_approval and info._exec_started is None
+        approval_parked = _parked_at_spawn_approval(info)
         # Same capture for the state right after: approved, and waiting for the
         # pump to meter the start into startup (``_admit_released_start``).
         release_parked = info._start_release is not None and info._exec_started is None
@@ -934,6 +951,11 @@ class TerminalCoordinator(ManagerComponent):
                         info.error = f"Reaped after {int(elapsed)}s while still awaiting an unanswered spawn approval (never started) [{_timeout_context(info, include_elapsed=False, turn_limit=self._manager._effective_turn_limit(info))}]"
                     elif release_parked:
                         info.error = f"Reaped after {int(elapsed)}s while still waiting to be admitted into startup after spawn approval (never started) [{_timeout_context(info, include_elapsed=False, turn_limit=self._manager._effective_turn_limit(info))}]"
+                    elif reason == "start_queue_saturated":
+                        # Imported here: this ``_impl`` resolves globals in ``subagent``.
+                        from kiro_crew.subagent_manager.monitoring import _START_QUEUE_MAX_SECS
+
+                        info.error = f"Never started: start queues saturated (over {int(_START_QUEUE_MAX_SECS)}s queued for start permits in total, behind other starts) [{_timeout_context(info, include_elapsed=False, turn_limit=self._manager._effective_turn_limit(info))}]"
                     elif reason == "startup_timeout":
                         info.error = f"Failed to start within {self._manager._startup_deadline}s (no runtime launched, no turn produced; {info._startup_cotenant_frames} co-tenant frame(s) received, none addressed to this session) [{_timeout_context(info, include_elapsed=False, turn_limit=self._manager._effective_turn_limit(info))}]"
                     else:

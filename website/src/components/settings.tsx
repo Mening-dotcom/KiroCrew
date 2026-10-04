@@ -40,13 +40,15 @@ interface SettingsToggleProps {
    *  acts, instead of leaving a side effect discoverable only by exploring. */
   describedBy?: string
   /**
-   * A "?" tip beside the label, for a sentence that explains what the control IS.
+   * An info tip beside the label, for prose that explains what the control IS.
    *
    * The counterpart to `description`, which keeps its text permanently on the row.
    * Use `description` only when the sentence is needed to MAKE the choice (a
-   * consequence, a cost, where data goes); anything a reader would want once and
-   * never again belongs here, because a row that always shows two lines of prose
-   * spends attention whether or not it is being read.
+   * consequence, a cost, where data goes, a status); anything a reader would want
+   * once and never again belongs here, because a row that always shows two lines
+   * of prose spends attention whether or not it is being read. The tip shows on
+   * hover and focus, pins on click or tap, and is the control's accessible
+   * description (`InfoTip`). One catalog string per tip.
    */
   hint?: string
 }
@@ -70,7 +72,7 @@ export function SettingsToggle({ label, description, hint, checked, onChange, di
           <div className="text-[13px] font-semibold text-text group-hover:text-text-strong transition-colors">{label}</div>
           {/* Marked, not handled: `fromHint` above reads this attribute off the
               event target, so the tip needs no handler of its own. */}
-          {hint && <span data-settings-hint><InfoTip text={hint} /></span>}
+          {hint && <span data-settings-hint><InfoTip text={hint} placement="top" /></span>}
         </div>
         {description && <div className="text-[12px] text-muted mt-0.5">{description}</div>}
       </div>
@@ -103,7 +105,7 @@ export function SettingsField({ label, description, hint, configKey, settingId, 
         {controlId
           ? <label htmlFor={controlId} className="text-[13px] font-semibold text-text">{label}</label>
           : <span className="text-[13px] font-semibold text-text">{label}</span>}
-        {hint && <InfoTip text={hint} />}
+        {hint && <InfoTip text={hint} placement="top" />}
       </div>
       {description && <div className="text-[12px] text-muted">{description}</div>}
       {children}
@@ -157,6 +159,7 @@ export function SettingsSelect({ label, description, hint, value, options, optio
 interface SettingsComboboxProps {
   label: string
   description?: string
+  hint?: string
   value: string
   options: SearchableSelectOption[]
   onChange: (value: string) => void
@@ -178,10 +181,10 @@ interface SettingsComboboxProps {
  * scan, or one that carries a per-option sublabel. Reach for `SettingsSelect` at
  * a dozen-ish fixed options and this past that.
  */
-export function SettingsCombobox({ label, description, value, options, onChange, triggerFallback, searchPlaceholder, customValueOption, action, actionStatus, configKey }: SettingsComboboxProps) {
+export function SettingsCombobox({ label, description, hint, value, options, onChange, triggerFallback, searchPlaceholder, customValueOption, action, actionStatus, configKey }: SettingsComboboxProps) {
   const controlId = React.useId()
   return (
-    <SettingsField label={label} description={description} configKey={configKey} controlId={controlId}>
+    <SettingsField label={label} description={description} hint={hint} configKey={configKey} controlId={controlId}>
       <SearchableSelect
         id={controlId}
         options={options}
@@ -339,9 +342,112 @@ interface SettingsSectionProps {
   children?: React.ReactNode
 }
 
+/* ── A settings deep link that is still looking for its row ──
+ *
+ * The command palette and every `SettingRef` chip navigate to
+ * `/settings/<tab>?highlight=<id>`, and `useSettingHighlight` then resolves that
+ * id by QUERYING THE DOM for the row. A collapsed group renders no rows at all,
+ * so a setting inside one is not merely hidden from the reader -- it is absent
+ * from the document the deep link searches, and the link arrives on the tab
+ * having revealed nothing and rung nothing.
+ *
+ * What is published is the SELECTOR the probe is looking for, not merely the fact
+ * that it is looking. A bare "a link is pending" flag is not enough to decide
+ * which group should answer it: every collapsible group on the page would see the
+ * same flag and open, which trades "the target stays hidden" for "unrelated groups
+ * open and stay open". The Voice tab is where that shows, because it nests one
+ * collapsible group inside another -- "Start dictation with a key" is the last
+ * child of "Fine-tuning" -- so a link to a Fine-tuning row opened both.
+ *
+ * Carried as a signal rather than read from the router HERE, because
+ * `SettingsSection` is also rendered outside a router (Mochi's Electron renderer
+ * under `apps/mochi`), where a `useSearchParams` in a shared primitive would
+ * throw. `useSettingHighlight` owns the router and publishes.
+ */
+let deepLinkTarget: string | null = null
+const deepLinkListeners = new Set<() => void>()
+
+/**
+ * Publish the CSS selector a settings deep link is probing for, or null when none
+ * is outstanding. For containment only: the probe's own resolution is finer (it
+ * disambiguates a repeated label by `occurrence`), and a group answers the coarser
+ * question "is the row it wants inside me".
+ */
+export function setSettingsDeepLinkTarget(next: string | null): void {
+  if (deepLinkTarget === next) return
+  deepLinkTarget = next
+  for (const cb of deepLinkListeners) cb()
+}
+
+function subscribeDeepLinkTarget(cb: () => void): () => void {
+  deepLinkListeners.add(cb)
+  return () => { deepLinkListeners.delete(cb) }
+}
+const readDeepLinkTarget = () => deepLinkTarget
+const readDeepLinkOnServer = (): string | null => null
+
 export function SettingsSection({ title, badge, collapsible, children }: SettingsSectionProps) {
   const [open, setOpen] = React.useState(false)
   const bodyId = React.useId()
+  const bodyRef = React.useRef<HTMLDivElement>(null)
+  const target = React.useSyncExternalStore(
+    subscribeDeepLinkTarget, readDeepLinkTarget, readDeepLinkOnServer,
+  )
+  /* Which target this group has already answered for, so the two passes below
+   * settle exactly once instead of oscillating. */
+  const answered = React.useRef<string | null>(null)
+  /* Whether THIS effect is the thing that opened the group. Only a group the probe
+   * revealed may be closed again by the probe; one that was already open on arrival
+   * -- the user opened it -- is never ours to close. */
+  const revealed = React.useRef(false)
+  /* REVEAL, then KEEP only if it was ours. A closed group cannot be asked what it
+   * contains -- that is the whole defect -- so it opens far enough to be searched
+   * and closes again in the same commit when the row is not inside it. Both passes
+   * are layout effects, so the speculative open is never painted.
+   *
+   * Nesting resolves itself: a child group answers before its parent, and the
+   * parent's query spans its whole subtree, so a target inside the nested group
+   * keeps BOTH open while a target beside it keeps only the parent.
+   *
+   * A group the USER opened is left alone: when it is already `open` on arrival the
+   * effect stamps `answered` and returns without ever touching `open` or the
+   * `revealed` flag, so nothing here closes something a reader chose to see. Latched
+   * for the owner, because the probe strips its parameter the moment it has rung
+   * the row and a group that merely mirrored the signal would close on that tick.
+   *
+   * The signal's withdrawal clears `answered`, so the SAME deep link used a second
+   * time reveals the group again instead of returning early on a stale stamp. */
+  React.useLayoutEffect(() => {
+    if (!collapsible) return
+    /* Signal withdrawn. Clear BOTH latches: `answered` so the same link reveals the
+     * group again on its next use, and `revealed` so a group the probe once opened
+     * is no longer flagged probe-owned once the link that opened it is gone. Leaving
+     * `revealed` latched would let a LATER deep link to a row elsewhere collapse a
+     * group the reader had meanwhile re-opened by hand -- the exact case the
+     * `revealed` guard exists to prevent. */
+    if (!target) { answered.current = null; revealed.current = false; return }
+    if (answered.current === target) return
+    if (!open) { setOpen(true); revealed.current = true; return }
+    answered.current = target
+    /* Already open before the probe touched it: the user opened it. Stamp and leave
+     * `open` and `revealed` alone -- a group the reader chose to see is never ours
+     * to close, even when the target it wants is somewhere else. */
+    if (!revealed.current) return
+    /* Decided one microtask after the reveal, not inside it. A NESTED group opens
+     * in a later commit than its parent -- the parent has to render its body before
+     * the child exists to open at all -- so a parent that answered within this
+     * commit would search a subtree whose child group has not rendered yet, find
+     * nothing, and close over the very row it holds. React flushes the whole
+     * cascade of layout-effect state updates synchronously in one task, so a
+     * microtask queued here runs after every group has revealed and still before
+     * the browser paints: nothing speculative is ever on screen. */
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      if (!bodyRef.current?.querySelector(target)) { setOpen(false); revealed.current = false }
+    })
+    return () => { cancelled = true }
+  }, [collapsible, target, open])
   return (
     <>
       {/* `mt-6` separates one section from the previous section's controls, so it
@@ -380,7 +486,7 @@ export function SettingsSection({ title, badge, collapsible, children }: Setting
       {/* Unmounted rather than hidden when closed. A collapsed group exists to
           stop costing the reader attention, and an `aria-hidden` subtree still
           costs a screen-reader user their place in the tab order. */}
-      {collapsible ? open && <div id={bodyId}>{children}</div> : children}
+      {collapsible ? open && <div id={bodyId} ref={bodyRef}>{children}</div> : children}
     </>
   )
 }

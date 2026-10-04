@@ -12,19 +12,23 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from kiro_crew.constants import DENY_CAUSE_SURFACE_POLICY
 from kiro_crew.dashboard.handlers._shared import (
     read_bounded_json,
     require_owner_dashboard_request,
 )
+from kiro_crew.dashboard.request_priority import owner_start_priority
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.execution_context import ExecutionContext, bind_session_execution
 from kiro_crew.hooks import FileTooLargeError, validate_file_path
+from kiro_crew.llm_helpers import _steer_host_deny
 from kiro_crew.security import (
     is_sensitive_path,
     is_sensitive_resolved_path,
     redact_credentials,
     redact_exfiltration_urls,
 )
+from kiro_crew.start_priority import StartPriority
 from kiro_crew.task_planner import plan_to_yaml
 from kiro_crew.taskrunner import WorkflowInitializing
 from kiro_crew.workflow_memory import capture_admission_execution
@@ -869,6 +873,8 @@ async def api_taskrunner_plan(request: web.Request) -> web.Response:
             workspace_dir=workspace_dir,
             session_key=origin,
             execution_context=execution,
+            # The owner pressed Plan and watches the banner; an app token does not.
+            start_priority=owner_start_priority(request),
         )
         state.task_runner._plan_task = asyncio.current_task()
         run = await plan_coro
@@ -1104,6 +1110,16 @@ async def api_taskrunner_from_chat(request: web.Request) -> web.Response:
     )
 
 
+#: What the model is told when the task-refine turn refuses a tool call. The
+#: refine SURFACE runs no tools -- it drafts the task spec from the request and
+#: answers the user's questions with text -- so nothing about the call was
+#: judged, and the reason says what this surface permits (nothing), which is
+#: what the surface-policy notice tells the model to read.
+_REFINE_DENY_REASON = (
+    "the task refine turn runs no tools: it only drafts the task spec from the "
+    "request and answers with text, so every tool call is refused here"
+)
+
 _REFINE_PROMPT = (
     "You are a task spec writer. Rewrite the user's request into a clear, structured task specification.\n\n"
     "Output ONLY the spec in this format — no preamble, no commentary:\n\n"
@@ -1120,7 +1136,10 @@ _REFINE_PROMPT = (
 
 
 async def _run_refine(
-    state: DashboardState, user_input: str, execution: ExecutionContext | None = None
+    state: DashboardState,
+    user_input: str,
+    execution: ExecutionContext | None = None,
+    start_priority: StartPriority = StartPriority.BACKGROUND,
 ) -> None:
     """Background task: multi-turn LLM refine with tool access and Q&A."""
     import time as _time  # noqa: F811
@@ -1150,7 +1169,9 @@ async def _run_refine(
         prompt = _REFINE_PROMPT.format(input=user_input)
         state._refine_text = ""
         _push()
-        client, _is_new, _resumed = await state.sessions.get_or_create(session_key)
+        client, _is_new, _resumed = await state.sessions.get_or_create(
+            session_key, start_priority=start_priority
+        )
 
         async for event in client.stream(prompt):
             if event.kind == EVENT_TEXT_CHUNK:
@@ -1160,6 +1181,24 @@ async def _run_refine(
                     _last_push = now
                     _push()
             elif event.kind == EVENT_PERMISSION_REQUEST:
+                # Audit FIRST (backend-security-controls: every denied tool
+                # attempt is a Security Event Log row, and the steer and the
+                # reject both await the ACP pipe, so a row sequenced after them
+                # can be cancelled away), then tell the model in-band that the
+                # HOST refused this (a rejected permission reaches it as
+                # kiro-cli's "User denied tool execution"), then answer the
+                # wire. The SURFACE refuses every call, so the notice says what
+                # the refine turn permits, not a sanctioned alternative.
+                _sel().log_tool_invocation(
+                    session_key=session_key,
+                    tool_name=getattr(event, "title", "") or "unknown",
+                    outcome="denied",
+                    source="taskrunner_refine",
+                    request_id=str(event.request_id),
+                )
+                await _steer_host_deny(
+                    client, event, _REFINE_DENY_REASON, cause=DENY_CAUSE_SURFACE_POLICY
+                )
                 await client.reject_tool(event.request_id)
             elif event.kind == EVENT_COMPLETE:
                 break
@@ -1227,7 +1266,10 @@ async def api_taskrunner_refine(request: web.Request) -> web.Response:
     state._refine_error = ""
     state._refine_status = "running"
     state._refine_input = user_input
-    task = asyncio.create_task(_run_refine(state, user_input, execution))
+    # The owner pressed Refine and watches it stream; an app token does not.
+    task = asyncio.create_task(
+        _run_refine(state, user_input, execution, owner_start_priority(request))
+    )
     state._refine_task = task
     state._background_tasks.add(task)
     task.add_done_callback(state._background_tasks.discard)
