@@ -51,6 +51,27 @@
       "missing_code": 60,
       "opaque_body": 8
     },
+    "dashboard/agent_admin/agent_config.py": {
+      "missing_code": 1
+    },
+    "dashboard/agent_admin/agent_detail.py": {
+      "missing_code": 7
+    },
+    "dashboard/agent_admin/capabilities.py": {
+      "missing_code": 26
+    },
+    "dashboard/agent_admin/crew_records.py": {
+      "missing_code": 2
+    },
+    "dashboard/agent_admin/crew_removal.py": {
+      "missing_code": 2
+    },
+    "dashboard/agent_admin/crew_update.py": {
+      "missing_code": 2
+    },
+    "dashboard/agent_admin/installed_agents.py": {
+      "missing_code": 2
+    },
     "dashboard/chat_folders.py": {
       "missing_code": 19
     },
@@ -88,7 +109,7 @@
       "missing_code": 20
     },
     "dashboard/handlers/agents.py": {
-      "missing_code": 46
+      "missing_code": 4
     },
     "dashboard/handlers/artifacts.py": {
       "dynamic_status": 2

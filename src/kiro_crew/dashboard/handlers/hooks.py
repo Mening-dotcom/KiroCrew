@@ -1887,8 +1887,8 @@ async def api_webhook_token_create(request: web.Request) -> web.Response:
     through :func:`_verify_hook_token`, and that route's own comment states what
     the credential buys: a real agent turn with full tool access. Minting one is
     therefore at least as privileged as the agent writes
-    ``handlers/agents.py::api_kirocrew_agents_create`` reserves for the owner, so
-    this route applies the same predicate and returns the same 403 shape.
+    ``dashboard/agent_admin/crew_records.py::api_kirocrew_agents_create`` reserves for the
+    owner, so this route applies the same predicate and returns the same 403 shape.
 
     The caller it stops is a real principal, not a hypothetical one: an
     allow-listed messaging user running ``!dashboard`` holds an ordinary

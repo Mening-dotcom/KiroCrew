@@ -1816,7 +1816,7 @@ class TestTokenMintIsOwnerOnly:
     ``_verify_hook_token`` accepts the bearer this route returns on
     ``POST /api/hooks/agent``, which runs a real agent turn with full tool
     access, so the mint is owner-gated exactly like the closest guarded sibling
-    (``handlers/agents.py::api_kirocrew_agents_create`` ->
+    (``dashboard/agent_admin/crew_records.py::api_kirocrew_agents_create`` ->
     ``handlers/_shared.require_owner_dashboard_request``). These tests hold both
     directions: the callers that legitimately mint today keep minting, and the
     non-owner dashboard session that ordinary token auth admits does not.

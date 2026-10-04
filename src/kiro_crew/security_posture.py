@@ -2317,6 +2317,16 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         "platform/context.py",
         "mcp_shared.py",
         "dashboard/handlers/agents.py",
+        # The agents handlers composed into dashboard/handlers/agents.py, in the
+        # same class as that facade and the dashboard handlers around it: the
+        # config and template-pane reads mask `oauth.clientSecret`, and the
+        # capability routes and the roster row mask edition- and agent-written
+        # text with `redact_external_text`, all answering the dashboard's HTTP
+        # surface rather than adding an egress path of their own.
+        "dashboard/agent_admin/agent_config.py",
+        "dashboard/agent_admin/agent_detail.py",
+        "dashboard/agent_admin/capabilities.py",
+        "dashboard/agent_admin/roster.py",
         # Pre-publish content scanning (a scan, not an egress of agent output).
         "deploy/handlers.py",
         # Redacts CLI stderr as an AWSError message is BUILT, before any caller
@@ -2476,8 +2486,8 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # spec dict that mask (and, on the write-back, un-mask) a pre-registered
         # Connections client's `oauth.clientSecret`. Nothing leaves the process
         # here; the egress boundaries are the two dashboard reads that CALL the
-        # masker -- `GET /api/agent/config` and `GET /api/agents/detail/{name}`
-        # in `dashboard/handlers/agents.py`, an already-registered sink.
+        # masker -- `GET /api/agent/config` and `GET /api/agents/detail/{name}`,
+        # in `dashboard/agent_admin/agent_config.py` and `agent_detail.py`.
         "mcp_utils.py",
         # Pure-type error-envelope constructor, not an egress boundary: the W01
         # connector control plane's `redacted_detail` / `operation_error` scrub an

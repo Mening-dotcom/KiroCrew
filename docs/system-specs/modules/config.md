@@ -2484,7 +2484,7 @@ and it is deliberately NOT re-exported from `loader.py` — the loader's
   carrying only the ghost tier's own reactions — which read as reset would
   silently clear a pack set through the API. `PUT /api/agents/{name}` therefore
   keeps the current pack id when the record is a pack and the save names no face
-  (`handlers/agents._carry_pack_through_faceless_save`), and rides the save's
+  (`dashboard/agent_admin/avatars.py::_carry_pack_through_faceless_save`), and rides the save's
   `expressions` and `sounds` onto the kept pack: both are still legal on every
   tier here, and a pack's own cue answers a different route (`/sound/{state}`)
   than a crew-record cue does, so the two do not collide. Only `motions` is left
@@ -2496,7 +2496,7 @@ and it is deliberately NOT re-exported from `loader.py` — the loader's
   traits, a picture, another pack — replaces it. The carve-out exists until the
   picker can display a pack, at which point the editor round-trips it itself.
   **A ghost's `motions` survive a save that does not name them** for the same
-  reason (`handlers/agents._carry_motions_through_motionless_save`): the shipped
+  reason (`dashboard/agent_admin/avatars.py::_carry_motions_through_motionless_save`): the shipped
   editor rebuilds a ghost draft from the axes it can draw and submits exactly
   those, so a `motions` pick set through the API would be erased by the next
   unrelated save with no click that meant it. The rule is the tri-state

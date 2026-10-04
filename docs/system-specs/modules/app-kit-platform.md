@@ -427,7 +427,7 @@ EBADF and ELOOP — so a child that is a symlink loop looked like a regular file
 was skipped, deleting the bridges of the app under that name.
 
 The complete row-by-row table, including which test pins each row, is the docstring
-of `dashboard/handlers/agents.py::_app_declared_server_names`.
+of `dashboard/agent_admin/app_mcp_ownership.py::_app_declared_server_names`.
 
 Scoped to `mcpServers`: all three bridges writers of this file touch that key and
 nothing else, so every other key still replaces wholesale. The merge runs *ahead
@@ -512,7 +512,7 @@ any of them has to come through it.
 
 Writer: `apps/bridges.py::_apply_agent_mcp_policy`, `_mcp_json_path`,
 `_scrub_legacy_shared_mcp`;
-`dashboard/handlers/agents.py::_merge_unowned_servers` and
+`dashboard/agent_admin/app_mcp_ownership.py::_merge_unowned_servers` and
 `_drop_unbacked_app_entries` for the PUT side.
 
 App agent registration materializes a host-managed server for both a whole-server

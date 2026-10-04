@@ -201,21 +201,21 @@ _CAP_REGISTER: dict[str, tuple[str, str]] = {
     # need 12 JSON bytes each; 512 KiB covers those keys plus the control envelope.
     "handlers/prompts.py::api_skills": ("512 * 1024", _BOUNDED_EXPLICIT),
     # agents.py tranche.
-    "handlers/agents.py::api_agent_config": ("None", _UNBOUNDED_USER_CONTENT),
-    "handlers/agents.py::api_default_agent": ("None", _CONTROL_FIELDS_CAP_PENDING),
-    "handlers/agents.py::api_capability_mcp_install": (
+    "agent_admin/agent_config.py::api_agent_config": ("None", _UNBOUNDED_USER_CONTENT),
+    "agent_admin/default_agent.py::api_default_agent": ("None", _CONTROL_FIELDS_CAP_PENDING),
+    "agent_admin/capabilities.py::api_capability_mcp_install": (
         "None",
         _CONTROL_FIELDS_CAP_PENDING,
     ),
-    "handlers/agents.py::api_capability_mcp_uninstall": (
+    "agent_admin/capabilities.py::api_capability_mcp_uninstall": (
         "None",
         _CONTROL_FIELDS_CAP_PENDING,
     ),
-    "handlers/agents.py::api_capability_skills_install": (
+    "agent_admin/capabilities.py::api_capability_skills_install": (
         "None",
         _CONTROL_FIELDS_CAP_PENDING,
     ),
-    "handlers/agents.py::api_capability_skills_uninstall": (
+    "agent_admin/capabilities.py::api_capability_skills_uninstall": (
         "None",
         _CONTROL_FIELDS_CAP_PENDING,
     ),

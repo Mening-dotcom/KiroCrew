@@ -1081,6 +1081,25 @@ _EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
         ("steering_resources", "unknown"),
     ],
     "kiro_crew/cron_script.py": [("cron_resolve_mcp_server", "cron")],
+    "kiro_crew/dashboard/agent_admin/agent_detail.py": [
+        ("api_agent_detail", "dashboard"),
+        ("api_agent_detail", "dashboard"),
+        # PATCH's locked overwrite re-reads the spec INSIDE agents_spec_lock so
+        # the merge+sanitize applies to the current disk state, not a stale
+        # pre-lock snapshot.
+        ("api_agent_detail", "dashboard"),
+    ],
+    "kiro_crew/dashboard/agent_admin/fork_publish.py": [
+        # Fork/publish create closures re-read the SOURCE inside the lock too —
+        # the pre-lock snapshot can miss a concurrent refresh's writes (GPT
+        # round-10 stale-copy finding).
+        ("api_agent_fork", "dashboard"),
+        ("api_agent_publish", "dashboard"),
+    ],
+    "kiro_crew/dashboard/agent_admin/installed_agents.py": [("api_agents_sync", "dashboard")],
+    # The fork/publish endpoints share _load_template_specs, which forwards
+    # its ``operation`` argument -- each caller still names itself.
+    "kiro_crew/dashboard/agent_admin/template_lineage.py": [("forward:operation", "dashboard")],
     # The templates tab's read-only rule for a definition PATCH reads the spec
     # file the PATCH targets, so it labels itself as that PATCH; create re-reads
     # the SOURCE it copies inside the spec lock (the fork/publish shape).
@@ -1089,23 +1108,6 @@ _EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
         ("api_agent_template_create", "dashboard"),
         ("api_agent_template_delete", "dashboard"),
         ("api_agent_template_delete", "dashboard"),
-    ],
-    "kiro_crew/dashboard/handlers/agents.py": [
-        ("api_agent_detail", "dashboard"),
-        ("api_agent_detail", "dashboard"),
-        # PATCH's locked overwrite re-reads the spec INSIDE agents_spec_lock so
-        # the merge+sanitize applies to the current disk state, not a stale
-        # pre-lock snapshot.
-        ("api_agent_detail", "dashboard"),
-        # Fork/publish create closures re-read the SOURCE inside the lock too —
-        # the pre-lock snapshot can miss a concurrent refresh's writes (GPT
-        # round-10 stale-copy finding).
-        ("api_agent_fork", "dashboard"),
-        ("api_agent_publish", "dashboard"),
-        ("api_agents_sync", "dashboard"),
-        # The fork/publish endpoints share _load_template_specs, which forwards
-        # its ``operation`` argument -- each caller still names itself.
-        ("forward:operation", "dashboard"),
     ],
     "kiro_crew/dashboard/handlers/hooks.py": [("api_kiro_hooks", "dashboard")],
     "kiro_crew/dashboard/handlers/mcp.py": [

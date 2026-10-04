@@ -624,7 +624,7 @@ Frontmatter keys map one-to-one onto the JSON fields above; nesting works
 | everything else | read-only — the pane renders it, the PATCH ignores it |
 
 `PATCH /api/agents/detail/{name}` recognizes exactly two body keys, `model` and
-`skills` (`src/kiro_crew/dashboard/handlers/agents.py`, `api_agent_detail`).
+`skills` (`src/kiro_crew/dashboard/agent_admin/agent_detail.py`, `api_agent_detail`).
 `skills` is a computed view of `resources` and is never written back under that
 name, because kiro-cli would reject the unknown field and drop the agent. A
 markdown spec refuses every non-GET with `409 markdown_spec_readonly`:
@@ -660,7 +660,7 @@ fence requirement, the JSON-twin precedence, and which backends run the form.
 | `--agent` on the spawn argv, the freshness gate | `src/kiro_crew/acp/client.py` |
 | `excludedTools` for Tool Search | `src/kiro_crew/agent_sdk/tool_search.py` |
 | the provider and backend axes | `src/kiro_crew/agent_sdk/provider_identity.py`, `src/kiro_crew/agent_sdk/backend_identity.py` |
-| Template pane GET / PATCH | `src/kiro_crew/dashboard/handlers/agents.py` |
+| Template pane GET / PATCH | `src/kiro_crew/dashboard/agent_admin/agent_detail.py` |
 | fork / publish field handling | `src/kiro_crew/agent_capabilities.py` |
 
 Skill resource mappings define the available set, not startup body injection. Crew
