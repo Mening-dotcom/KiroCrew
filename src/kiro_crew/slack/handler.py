@@ -5069,7 +5069,17 @@ async def handle_message(
         # structural finally clears them; skipping here avoids removing the
         # status/Stop button while that region is still running. Idempotent, so
         # the post-turn code below is a no-op after this.
-        if not _release_deferred:
+        #
+        # A replayed attempt (``_replayed``) is also skipped: the nested
+        # ``handle_message`` has already delivered the reply, set its own status
+        # label (e.g. "Awaiting review…" in review mode) and torn down its own
+        # indicators. This abandoned outer frame owns none of them, so clearing
+        # here with the default ``keep_review_status=False`` would fire
+        # ``set_thread_status(channel, reply_ts, "")`` on the same thread and
+        # erase the label the nested turn just set, leaving a review draft
+        # waiting with no pending indicator. The ``if _replayed: return`` below
+        # ends this frame cleanly without touching the nested turn's state.
+        if not _release_deferred and not _replayed:
             await asyncio.sleep(0)  # let finalize fire
             await _clear_working_indicators()
 

@@ -510,6 +510,9 @@ class TestHandleMessage:
             if a[0] == "set_thread_status" and a[1]["status"] == "Awaiting review…"
         ]
         assert not awaiting, "early-cancel path must not leave an 'Awaiting review…' label"
+
+    @pytest.mark.asyncio
+    async def test_thinking_posted_then_updated(self):
         slack = MockSlackClient()
         provider = FakeProvider([LLMEvent(kind="text_chunk", text="hello")])
         sessions = FakeSessionManager(provider)
@@ -3791,6 +3794,50 @@ class TestTransientCompactionRetry:
         assert call["from_trusted_bot"] is True
         assert call["had_voice_input"] is True
         assert call["_compaction_replay"].attempt == 1
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_review_turn_keeps_the_awaiting_review_label(self):
+        """A transient-compaction replay in review mode must END on the
+        "Awaiting review…" label the nested turn set, not erase it.
+
+        The replay is a nested ``handle_message``: it delivers the ephemeral
+        draft and sets "Awaiting review…", then clears its OWN indicators.
+        Control returns to the abandoned outer frame, whose first ``finally``
+        computes ``_release_deferred`` as False (``_acquired`` was handed to the
+        replay) and reaches ``if _replayed: return`` only afterwards. If the
+        teardown there runs ``_clear_working_indicators()`` with the default
+        ``keep_review_status=False``, it fires ``set_thread_status(channel,
+        reply_ts, "")`` on the very thread the nested call just labelled,
+        wiping the pending-review indicator while the draft still waits. The
+        outer frame owns none of the replay's indicators, so it must not clear
+        them: the thread's final status must be "Awaiting review…", with no
+        trailing clear."""
+        from kiro_crew.slack.handler import ACTIVATION_REVIEW
+
+        slack = MockSlackClient()
+        provider = _SequencedProvider([_abandoned(), _answered()], transient=True)
+        sessions = FakeSessionManager(provider)
+
+        await handle_message(
+            slack,
+            sessions,
+            "C1",
+            "hello",
+            "thread1",
+            "msg1",
+            "U1",
+            channel_activation=ACTIVATION_REVIEW,
+        )
+
+        assert provider.turns == 2, "the replay ran"
+        # Every status this thread saw, in order. The nested replay sets
+        # "Awaiting review…"; the outer frame must not append a trailing clear.
+        statuses = [a[1]["status"] for a in slack.actions if a[0] == "set_thread_status"]
+        assert "Awaiting review…" in statuses, statuses
+        assert statuses[-1] == "Awaiting review…", (
+            "the abandoned outer frame erased the nested replay's review label",
+            statuses,
+        )
 
 
 class TestBuildTimingFooter:
