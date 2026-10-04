@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import time
+from datetime import datetime
 
 REVIEWED_STAMP_RE = re.compile(r"\[([A-Z][A-Z0-9_-]*)-REVIEWED\]\s+([0-9a-f]{7,40})\b")
 BLOCK_MERGE_RE = re.compile(r"\[BLOCK-MERGE\]\s+([0-9a-f]{7,40})\b")
@@ -207,6 +208,21 @@ def override_reviewer_names(target, bindings, keys=DEFAULT_OVERRIDE_TARGET_KEYS)
     return {name} if name else set()
 
 
+def _accepted_overrides(comments, head_sha, authors):
+    """Yield ``(target, actor, comment)`` for each trusted record naming ``head_sha`` EXACTLY.
+
+    The one definition of an accepted record, so every reader applies the same
+    author, leading-bytes and exact-head rules.
+    """
+    head = (head_sha or "").lower()
+    if not head:
+        return
+    for comment in comments or []:
+        parsed = parse_override_record(comment, authors)
+        if parsed and parsed[1] == head:
+            yield parsed[0], parsed[2], comment
+
+
 def human_override_actors(comments, head_sha, bindings, authors=DEFAULT_MARKER_AUTHORS):
     """Return ``(named, blanket)`` -- the override actors valid for ``head_sha``.
 
@@ -230,22 +246,43 @@ def human_override_actors(comments, head_sha, bindings, authors=DEFAULT_MARKER_A
     """
     named: dict = {}
     blanket = ""
-    head = (head_sha or "").lower()
-    if not head:
-        return named, blanket
-    for comment in comments or []:
-        parsed = parse_override_record(comment, authors)
-        if not parsed:
-            continue
-        target, marked_head, actor = parsed
-        if marked_head != head:
-            continue
+    for target, actor, _comment in _accepted_overrides(comments, head_sha, authors):
         if target == OVERRIDE_TARGET_ALL:
             blanket = actor
             continue
         for name in override_reviewer_names(target, bindings):
             named[name] = actor
     return named, blanket
+
+
+def _instant(stamp):
+    """A GitHub ISO-8601 timestamp as an aware datetime, or None if unreadable."""
+    try:
+        moment = datetime.fromisoformat((stamp or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def human_override_instants(comments, head_sha, bindings, authors=DEFAULT_MARKER_AUTHORS):
+    """Return ``{reviewer name: when}`` -- the newest accepted override per lane.
+
+    The same records ``human_override_actors`` accepts (``_accepted_overrides``).
+    A ``target=all`` record answers for every bound lane. ``when``
+    is the record comment's ``created_at``, which is the moment the handler
+    authorized the decision; a record whose time cannot be read is dropped,
+    because the supersession gate uses the time to decide which blocks the
+    human could have seen, and an unknown time cannot answer that.
+    """
+    instants: dict = {}
+    for target, _actor, comment in _accepted_overrides(comments, head_sha, authors):
+        when = _instant(comment.get("created_at"))
+        if when is None:
+            continue
+        for name in override_reviewer_names(target, bindings):
+            if name not in instants or instants[name] < when:
+                instants[name] = when
+    return instants
 
 
 def span_hash(path, rule_class):
@@ -574,6 +611,21 @@ def superseded_verdicts(
     lane. The heading is used rather than the rewritten marker because the marker
     lands inside the embedded model output -- see ``_sanctioned_downgrade``.
 
+    A lane is also NOT named for a block that an accepted human-override record
+    for this lane and this EXACT head post-dates: a repository writer adjudicated
+    the lane at this commit after that block was on the board. This is the only
+    same-head exit a FORK lane has. The same-repo override arm also replaces the
+    slot with an unstamped note, which ends the reading through
+    ``current_stamped``, but a Stage-2 fork lane writes no such note, so without
+    the record its clean re-roll reads as a dropped block that nothing can clear.
+    Records come from ``human_override_instants``: a trusted bot author, the
+    marker as the leading bytes, the exact head, and this lane's target or
+    ``all``. A block published in or after the second the newest such record
+    was posted stays named: the writer cannot have judged it. (The record's time
+    is when the handler posted it, a few seconds to minutes after the command; a
+    block landing inside that window is the stated residual.) ``override_at``
+    reports the record's time per lane.
+
     ``ok`` False means the question could not be ANSWERED and must be read as
     unknown, never as "nothing was superseded". Two causes reach it and both fail
     closed. An unreadable history is one. EXAMINING NO LANE AT ALL is the other:
@@ -608,6 +660,7 @@ def superseded_verdicts(
         result["cause"] = "unreadable"
         return result
     allowed = {a.lower() for a in authors or ()}
+    override_at = human_override_instants(comments, head_sha, bindings, authors)
     lanes = []
     dropped = set()
     for comment in comments:
@@ -672,6 +725,7 @@ def superseded_verdicts(
             "current_blocking": current["blocking"],
             "current_downgraded": current["downgraded"],
             "current_verdict": current["verdict"],
+            "override_at": override_at[name].isoformat() if name in override_at else "",
             "superseded": samples,
         }
         lanes.append(entry)
@@ -728,6 +782,11 @@ def superseded_verdicts(
         # loop removes from the history side: two same-head blocks with one
         # adjudication presented leaves the earlier one undecided, and a blanket
         # veto hid it with no recompute able to recover it.
+        #
+        # A human override record is not paired: it covers every block already
+        # published when it was recorded (see the docstring). Downgrades pair
+        # first, so a record never frees one to absolve an older block.
+        decided = override_at.get(name)
         unpaired_downgrades = 1 if current["downgraded"] else 0
         unadjudicated_block = False
         for sample in samples:
@@ -736,9 +795,14 @@ def superseded_verdicts(
             elif sample["blocking"]:
                 if unpaired_downgrades:
                     unpaired_downgrades -= 1
-                else:
-                    unadjudicated_block = True
-                    break
+                    continue
+                published = _instant(sample.get("at")) if decided else None
+                # Strictly before: both clocks tick in whole seconds, so a block
+                # in the record's own second may have landed after it.
+                if published is not None and published < decided:
+                    continue
+                unadjudicated_block = True
+                break
         # `current["blocking"]` stays a veto, and is not a pairing term: a presented
         # body that still blocks is not a DROPPED block at all -- the block is being
         # reported by the lane itself, which is the state this gate exists to

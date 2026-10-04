@@ -1863,11 +1863,11 @@ def decide(
     for lane in (supersession_eval or {}).get("blocking_dropped") or []:
         # Both halves of this text were wrong and each sent the reader somewhere
         # the code does not look. `/ai-review override <lane> <head>` is an exit
-        # for EVERY lane, not a new head: its arm replaces the slot with a note
-        # that deliberately carries no `[<LANE>-REVIEWED] <head>` stamp
-        # (claude-review.yml says so in as many words -- "an override still does
-        # not carry" the review stamp -- and design-review.yml's note has none),
-        # so `current_stamped` goes False and this gate stops naming the lane. And
+        # for EVERY lane, not a new head, and on a fork PR too: the accepted
+        # record itself adjudicates every block the lane raised at this head
+        # before it was recorded (superseded_verdicts reads it), and the
+        # same-repo arm also replaces the slot with a note that carries no
+        # `[<LANE>-REVIEWED] <head>` stamp, so `current_stamped` goes False. And
         # what clears the GPT family by decision is the workflow-authored
         # `(all downgraded on adjudication)` heading, NOT the
         # `[BLOCK-MERGE-DOWNGRADED]` marker: _sanctioned_downgrade reads the
@@ -1885,8 +1885,9 @@ def decide(
         else:
             remedy = (
                 "if the clear is legitimate, record it at this head with "
-                "/ai-review override, whose note carries no review stamp and so "
-                "is not read as a same-head replacement. This lane has no "
+                "/ai-review override, whose accepted record adjudicates every "
+                "block this lane raised at this head before it, on a fork PR "
+                "too. This lane has no "
                 "adjudication heading, so the only other exit is a new head, at "
                 "the cost of every other lane's verdict for this head"
             )

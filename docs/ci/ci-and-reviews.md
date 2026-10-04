@@ -2594,7 +2594,10 @@ branch — the handler locates the lane run through the run URL the lane stamps 
 the `details_url` of the check-run it posts on the PR head, verifies the resolved
 run belongs to the expected fork workflow, and re-runs it. The fork lanes consume
 no override marker, so that re-run is a fresh review roll rather than a forced
-pass. A rerun failure after the judgment has recorded is reported as a warning
+pass. PR Readiness's supersession gate does read the record, so when that clean
+re-roll replaces the BLOCK at the same head, the replaced block counts as
+adjudicated rather than dropped (see the supersession bullets under PR
+Readiness). A rerun failure after the judgment has recorded is reported as a warning
 annotation plus a PR notice naming the lane to re-run manually — never as a failed
 run, which would make a recorded judgment look rejected.
 `test/test_ai_review_workflows.py` pins the contract from both ends:
@@ -2878,8 +2881,24 @@ status plus one `readiness:` label**.
 - **The clearance path differs by lane family, and the gate's failure text says
   which.** On the GPT lane, clear the verdict the sanctioned way and the gate
   reads it as cleared. The whole-design lanes have no downgrade artifact at all,
-  so a superseded BLOCK there cannot be stamped away: the only exit is pushing a
-  new head, and that is what their failure text names. An ordinary same-head
+  so a superseded BLOCK there cannot be stamped away. Their same-head exit, and
+  every lane's, is `/ai-review override <lane> <head>`. The same-repo arm
+  replaces the slot with an unstamped note, which ends the reading. A Stage-2
+  fork lane writes no note, so the gate reads the record itself. A block counts
+  as adjudicated when an accepted override for that lane (or `all`) names this
+  head EXACTLY, its marker comment was written by a trusted marker author
+  (`github-actions[bot]` by default, with the marker as its leading bytes), and
+  the record was posted strictly after the block was published. A block
+  published in or after the second of the newest record stays named. The record's
+  time is when the handler posted it, which can trail the command by the
+  handler's queueing time, so a block landing inside that window is a stated
+  residual. A marker for another
+  head or lane, from an untrusted author, or quoted inside any other comment
+  clears nothing. A new head is the other exit, and it discards every other
+  lane's verdict for this head. An override posted after the last readiness
+  evaluation is read at the next one; to recompute now, run
+  `gh workflow run pr-readiness.yml --ref main -f pr=<n> -f sha=<full head sha>`.
+  An ordinary same-head
   re-sample that did not drop a block is reported for information and does NOT
   gate. A reading the gate could not establish is `pending`, never red, for the
   same reason the disposition gate's is — an unreadable comment history is not

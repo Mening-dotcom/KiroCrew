@@ -315,7 +315,10 @@ jobs:
           # model review, and the gate passes. Re-running is what lets that
           # skip take effect (a deterministic BLOCK would otherwise re-BLOCK).
           # The FORK design-family lanes consume no override marker, so their
-          # re-run is a fresh review roll rather than a forced pass.
+          # re-run is a fresh review roll rather than a forced pass. PR
+          # Readiness's supersession gate does read this record, so a clean
+          # re-roll replacing an earlier BLOCK at this head is not held as a
+          # dropped block.
           if [ "$TARGET" = "design" ] || [ "$TARGET" = "all" ]; then
             rerun_reviewer "design-review.yml" "Design Review" "Design Review" "design" "fork-design-review.yml"
           fi

@@ -1249,7 +1249,11 @@ jobs:
                 # fresh review roll -- a fork false BLOCK clears via a clean
                 # re-roll or a new commit, never a forced pass -- identical to
                 # the fork Opus / GPT / Design lanes, which already block a
-                # fork PR the same way.
+                # fork PR the same way. A clean re-roll at the SAME head
+                # replaces the BLOCK sample; the supersession gate above reads
+                # an override record that post-dates the block as adjudicating
+                # it (GPT also has its downgrade heading), and without either
+                # the re-roll reads as a dropped block.
                 if [ "$fail" -gt 0 ]; then
                   failed+=("$label (BLOCK)")
                 elif [ "$pass" -gt 0 ]; then
@@ -1605,17 +1609,18 @@ jobs:
                 [ -n "$lane" ] || continue
                 # Both halves of this text were wrong and each sent the reader
                 # somewhere the code does not look. `/ai-review override <lane>
-                # <head>` is an exit for EVERY lane: its arm replaces the slot
-                # with a note that deliberately carries no `[<LANE>-REVIEWED]
-                # <head>` stamp, so `current_stamped` goes False and the gate
-                # stops naming the lane. And what clears the GPT lane by decision
+                # <head>` is an exit for EVERY lane, fork PRs included: the gate
+                # reads the accepted record itself as adjudicating every block
+                # the lane raised at this head before it was recorded (a fork
+                # lane writes no override note, so the record is its only
+                # same-head exit). And what clears the GPT lane by decision
                 # is the workflow-authored `(all downgraded on adjudication)`
                 # heading, NOT the `[BLOCK-MERGE-DOWNGRADED]` marker, which sits
                 # in embedded model output. A new head is the expensive advice: it
                 # discards every other lane's verdict for this head.
                 case "$lane" in
                   GPT) remedy="record a legitimate clear at this head with /ai-review override, or an adjudication pass, whose '(all downgraded on adjudication)' heading is read as cleared; a new head also re-samples it, at the cost of every other lane's verdict for this head" ;;
-                  *) remedy="record a legitimate clear at this head with /ai-review override, whose note carries no review stamp and so is not read as a same-head replacement; this lane has no adjudication heading, so the only other exit is a new head, at the cost of every other lane's verdict for this head" ;;
+                  *) remedy="record a legitimate clear at this head with /ai-review override, whose accepted record adjudicates every block this lane raised at this head before it, on a fork PR too; this lane has no adjudication heading, so the only other exit is a new head, at the cost of every other lane's verdict for this head" ;;
                 esac
                 failed+=("superseded verdict: $lane blocked this head in a replaced sample and the body now presented does not - read the comment's stored history; $remedy")
               done <<<"${SUPERSESSION_DROPPED:-}"
