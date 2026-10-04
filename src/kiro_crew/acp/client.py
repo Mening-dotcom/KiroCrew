@@ -1986,6 +1986,108 @@ def _opencode_rules_deny(raw: dict) -> bool:
     return False
 
 
+#: The characters the harness escapes before it turns a pattern into a regex; every
+#: other character is literal in both dialects.
+_JS_REGEX_SPECIALS = frozenset(".+^${}()|[]\\")
+
+
+def _opencode_wildcard_match(value: str, pattern: str) -> bool:
+    """The harness's own wildcard test, transcribed from opencode 1.18.30.
+
+    Both sides have ``\\`` turned into ``/``; in the pattern, ``*`` matches any run
+    and ``?`` any one character, everything else is literal, and a trailing `` *``
+    also matches nothing after the space. Anchored at both ends.
+    """
+    value = value.replace("\\", "/")
+    pattern = pattern.replace("\\", "/")
+    body = "".join(
+        ".*" if ch == "*" else "." if ch == "?" else "\\" + ch if ch in _JS_REGEX_SPECIALS else ch
+        for ch in pattern
+    )
+    if body.endswith(" .*"):
+        body = body[:-3] + "( .*)?"
+    return re.fullmatch(body, value, re.DOTALL) is not None
+
+
+def _opencode_rules(raw: object) -> list[tuple[str, str, str]]:
+    """One resolved ``permission`` value as the harness's ordered rule list.
+
+    ``(permission, pattern, action)`` per rule, in the order the harness reads them:
+    a string value is one rule for every pattern, a map value is one rule per pattern
+    it lists. A bare string for the whole setting is the same as ``{"*": value}``.
+    """
+    if isinstance(raw, str):
+        return [("*", "*", raw)]
+    rules: list[tuple[str, str, str]] = []
+    if not isinstance(raw, dict):
+        return rules
+    for key, value in raw.items():
+        if isinstance(value, str):
+            rules.append((str(key), "*", value))
+        elif isinstance(value, dict):
+            rules.extend(
+                (str(key), str(pattern), action)
+                for pattern, action in value.items()
+                if isinstance(action, str)
+            )
+    return rules
+
+
+def _opencode_denied_in(tool_id: str, rules: list[tuple[str, str, str]]) -> bool:
+    """Whether the harness hides *tool_id* under *rules*.
+
+    The harness's own test: the LAST rule whose permission key matches the tool
+    decides, and it hides the tool only when that rule denies every pattern.
+    """
+    last = None
+    for rule in rules:
+        if _opencode_wildcard_match(tool_id, rule[0]):
+            last = rule
+    return last is not None and last[1] == "*" and last[2] == "deny"
+
+
+def _opencode_unenforced_denies(
+    resolved: dict, setting_key: str, deny_rules: Collection[str]
+) -> frozenset[str]:
+    """The seeded deny rules the harness's RESOLVED config does not put in force.
+
+    Evaluated for the top-level setting and again for every agent that carries its
+    own, because an agent's rules are appended after the top-level ones and so can
+    outrank them. A rule that loses in either place is not in force for a session
+    that may run as that agent.
+    """
+    if not deny_rules:
+        return frozenset()
+    top = _opencode_rules(resolved.get(setting_key))
+    contexts = [top]
+    agents = resolved.get("agent")
+    if isinstance(agents, dict):
+        for entry in agents.values():
+            if isinstance(entry, dict) and setting_key in entry:
+                contexts.append(top + _opencode_rules(entry.get(setting_key)))
+    return frozenset(
+        tool_id
+        for tool_id in deny_rules
+        if not all(_opencode_denied_in(tool_id, rules) for rules in contexts)
+    )
+
+
+def _opencode_seeded_deny_rules(config_content: str, setting_key: str) -> tuple[str, ...]:
+    """The deny rules Crew wrote into *config_content*, in seed order.
+
+    Read back out of the seed itself rather than handed in separately, so the
+    read-back judges exactly what the harness was given.
+    """
+    try:
+        seed = json.loads(config_content)
+    except ValueError:
+        return ()
+    value = seed.get(setting_key) if isinstance(seed, dict) else None
+    if not isinstance(value, dict):
+        return ()
+    return tuple(str(key) for key, action in value.items() if key != "*" and action == "deny")
+
+
 #: How much of a refused read-back child's stderr is examined at all.
 #: A harness is free to write a screenful of banner, or a hundred megabytes, and
 #: this only ever needs the tail, where a launcher puts its verdict. Bounding the
@@ -3712,6 +3814,19 @@ class AcpClient:
         # file Crew writes (claude's ``permissions.deny``) leaves it empty, and an
         # empty set makes the refusal a no-op. Cleared on reset with the array.
         self._spec_denied_tools: frozenset[tuple[str, str]] = frozenset()
+        # Narrowed servers the projection withheld because THIS session cannot put
+        # their per-tool rule in force (``SessionProjection.unhonoured_servers``). No
+        # member mount may re-add one, whatever the backend's PerToolDeny says.
+        self._session_mcp_unhonoured: frozenset[str] = frozenset()
+        # Tool ids the projection asks the harness itself to deny
+        # (``SessionProjection.harness_deny_rules``), seeded by the opencode routing.
+        self._session_harness_deny_rules: tuple[str, ...] = ()
+        # The subset of those rules the opencode read-back found IN FORCE, handed back
+        # to every later projection so it withholds a server whose rule is not. None
+        # until this spawn has seeded any.
+        self._opencode_denies_in_force: frozenset[str] | None = None
+        # The seeded rules the last read-back found outranked by another rule.
+        self._opencode_denies_unenforced: frozenset[str] = frozenset()
         # The inline harness config this session's routing seed travels in, resolved
         # in the opencode spawn arm and read back there before the first prompt. The
         # env section applies it; holding it here is what keeps that section a plain
@@ -4240,8 +4355,16 @@ class AcpClient:
             # identity through the signed mapping rather than through an env key
             # a warm-pool rekey can leave stale.
             session_token=self._stub_session_token,
+            # The deny rules the opencode read-back found in force (None before any
+            # were seeded), so a later re-parse withholds a server whose rule is not.
+            harness_denies_in_force=getattr(self, "_opencode_denies_in_force", None),
+            # The environment the harness child starts with, which decides where a
+            # harness reads its own per-tool permission file from (goose).
+            harness_env={**os.environ, **(getattr(self, "_extra_env", None) or {})},
         )
         self._spec_denied_tools = projection.denied_tools
+        self._session_mcp_unhonoured = projection.unhonoured_servers
+        self._session_harness_deny_rules = projection.harness_deny_rules
         # Kept beside the array it describes, so the post-consume check judges the
         # generation these elements were built from and not a later read of the file.
         self._session_mcp_snapshot = projection.derived_spec_snapshot
@@ -4392,6 +4515,17 @@ class AcpClient:
                 "%s is not mounted -- no backend can refuse a call to a server it was "
                 "handed, and mounting it would undo that switch; re-enable that server "
                 "to restore it",
+                self._session_key,
+                server_name,
+                capability,
+            )
+            return True
+        if server_name in getattr(self, "_session_mcp_unhonoured", frozenset()):
+            logger.warning(
+                "member session %s: one of %s's tools is switched off and this session "
+                "could not put that restriction in force, so the projection withheld the "
+                "server and mounting it here would make that tool reachable again; %s is "
+                "not mounted",
                 self._session_key,
                 server_name,
                 capability,
@@ -4970,7 +5104,13 @@ class AcpClient:
                         "only Crew's permission routing.",
                         _ENV_OPENCODE_CONFIG_CONTENT,
                     )
-        merged[setting_key] = value
+        rules = getattr(self, "_session_harness_deny_rules", ()) or ()
+        if rules and value == "ask":
+            # Each switched-off tool AFTER the "*", because the harness lets the last
+            # matching rule win; the read-back checks that order survived the merge.
+            merged[setting_key] = {"*": value, **{rule: "deny" for rule in rules}}
+        else:
+            merged[setting_key] = value
         return json.dumps(merged)
 
     def _verify_opencode_routing(self, argv: list[str], config_content: str) -> tuple[str, str]:
@@ -5069,7 +5209,18 @@ class AcpClient:
         if servers_issue:
             return servers_issue, _opencode_config_mcp_servers_remedy()
         self._opencode_config_mcp_servers = config_servers
-        observed = _opencode_uniform_permission(resolved.get(setting_key))
+        seeded_denies = _opencode_seeded_deny_rules(config_content, setting_key)
+        # Which of Crew's deny rules the harness's own resolution keeps in force.
+        # A rule that lost is not a refusal: the projection withholds its server.
+        self._opencode_denies_unenforced = _opencode_unenforced_denies(
+            resolved, setting_key, seeded_denies
+        )
+        top_level = resolved.get(setting_key)
+        if seeded_denies and isinstance(top_level, dict):
+            # Crew's own deny rules are judged above, so the routing check sees the
+            # value the operator's sources and the seed's "*" leave behind.
+            top_level = {k: v for k, v in top_level.items() if k not in seeded_denies}
+        observed = _opencode_uniform_permission(top_level)
         issue = acp_tool_gate.seeded_setting_issue(self.backend, _scrub_observed(observed))
         if issue:
             return issue, acp_tool_gate.remediation_for(self.backend)
@@ -7900,6 +8051,7 @@ class AcpClient:
             # a synchronous spawn on the gateway loop is the stall this path guards
             # against everywhere else.
             self._opencode_config_content = self._opencode_routing_config()
+            self._opencode_denies_in_force = frozenset(self._session_harness_deny_rules)
             # Wrapped in the SAME sandbox, with the SAME credential mask, as the
             # session spawn below. The read-back runs the harness's own binary, and
             # this harness resolves its configuration by reading the work dir --
@@ -7947,6 +8099,21 @@ class AcpClient:
                     )
                 except acp_tool_gate.ToolGateUnroutable as exc:
                     raise AcpToolGateUnroutable(str(exc)) from None
+            if self._opencode_denies_unenforced:
+                # A seeded deny rule came out OUTRANKED in the harness's resolved
+                # config, so its tool would stay listed. Re-project with only the rules
+                # that held: the server it narrows is withheld whole, as before this
+                # harness had a per-tool channel.
+                logger.warning(
+                    "opencode: %d per-tool deny rule(s) are outranked in the resolved "
+                    "config, so the servers they narrow are withheld this session: %s",
+                    len(self._opencode_denies_unenforced),
+                    ", ".join(sorted(self._opencode_denies_unenforced)),
+                )
+                self._opencode_denies_in_force = (
+                    self._opencode_denies_in_force - self._opencode_denies_unenforced
+                )
+                self._session_mcp_cache = await asyncio.to_thread(self._resolve_session_mcp_servers)
         elif self._is_goose:
             # This harness serves ACP from its own binary, so the argv is that binary
             # plus its ``acp`` subcommand: no adapter entry script, no node, and no
@@ -9410,6 +9577,10 @@ class AcpClient:
         # what the next session's guard judges, not this one's.
         self._mcp_ref_spec = None
         self._spec_denied_tools = frozenset()
+        self._session_mcp_unhonoured = frozenset()
+        self._session_harness_deny_rules = ()
+        self._opencode_denies_in_force = None
+        self._opencode_denies_unenforced = frozenset()
         # Save PID state before clearing it. A root is confirmed exited only
         # when its own Process reports a reaped return code; a missing or
         # unreadable PID is not enough to reclaim its working directory.
@@ -12693,7 +12864,13 @@ class AcpClient:
         if not isinstance(params, dict):
             return
         server, tool = params.get("server"), params.get("tool")
-        if not (isinstance(server, str) and isinstance(tool, str)):
+        if not (isinstance(server, str) and isinstance(tool, str) and server and tool):
+            # A harness that names the call in its _meta channel instead (goose) had
+            # that identity cached from the same tool_call frame.
+            call_id = result.tool_call_id or ""
+            server = (getattr(self, "_tool_call_mcp_server", None) or {}).get(call_id)
+            tool = (getattr(self, "_tool_call_tool_name", None) or {}).get(call_id)
+        if not (isinstance(server, str) and isinstance(tool, str) and server and tool):
             return
         if (server, tool) not in self._spec_denied_tools:
             return
@@ -13016,9 +13193,10 @@ class AcpClient:
             return False
         server, tool = identity
         logger.warning(
-            "codex session MCP: refusing %r on %r -- the agent spec's disabledTools "
+            "%s session MCP: refusing %r on %r -- the agent spec's disabledTools "
             "switches it off, and this transport has no wire channel for that "
             "restriction, so it is honoured at the permission request [session=%s]",
+            self.backend,
             tool,
             server,
             self._session_id,
