@@ -136,6 +136,47 @@ class TestResolveMany:
 
         assert await slack.conversations_list() == [channel]
 
+    @pytest.mark.asyncio
+    async def test_real_client_empty_first_page_then_failure_raises(self):
+        # An empty first page that carries a next_cursor, followed by a
+        # failing later page, has collected nothing: the result must stay a
+        # failure (raise) rather than returning [] — otherwise the resolver
+        # caches an empty "successful" refresh and suppresses retries for the
+        # full TTL. Keeping-the-partial only applies once channels exist.
+        web = AsyncMock()
+        web.conversations_list = AsyncMock(
+            side_effect=[
+                {"channels": [], "response_metadata": {"next_cursor": "next"}},
+                aiohttp.ClientError("second page failed"),
+            ]
+        )
+        slack = RealSlackClient.__new__(RealSlackClient)
+        slack._web = web
+
+        with pytest.raises(aiohttp.ClientError):
+            await slack.conversations_list()
+
+    @pytest.mark.asyncio
+    async def test_real_client_empty_first_page_failure_stays_retryable(self, tmp_path):
+        # End-to-end through the resolver: the above all-empty page failure
+        # must NOT be cached, so a later resolve re-hits the API.
+        resolver = ChannelNameResolver(cache_path=tmp_path / _CACHE_FILENAME)
+        web = AsyncMock()
+        web.conversations_list = AsyncMock(
+            side_effect=[
+                {"channels": [], "response_metadata": {"next_cursor": "next"}},
+                aiohttp.ClientError("second page failed"),
+                {"channels": [], "response_metadata": {}},
+            ]
+        )
+        slack = RealSlackClient.__new__(RealSlackClient)
+        slack._web = web
+
+        assert await resolver.resolve_many(slack, ["C111"]) == {"C111": "C111"}
+        assert await resolver.resolve_many(slack, ["C111"]) == {"C111": "C111"}
+
+        assert web.conversations_list.await_count == 3
+
 
 class TestDiskCache:
     @pytest.mark.asyncio

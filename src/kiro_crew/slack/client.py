@@ -993,7 +993,6 @@ class RealSlackClient(SlackClientOps):
         """
         out: list[dict] = []
         cursor: str | None = None
-        completed_pages = 0
         for _ in range(_CONVERSATIONS_LIST_MAX_PAGES):
             try:
                 kwargs: dict[str, Any] = {
@@ -1007,13 +1006,18 @@ class RealSlackClient(SlackClientOps):
                 data: dict = resp.data if hasattr(resp, "data") else dict(resp)  # type: ignore[assignment,call-overload]
                 channels: list[dict] = data.get("channels", [])
                 out.extend(channels)
-                completed_pages += 1
                 cursor = data.get("response_metadata", {}).get("next_cursor", "")
                 if not cursor:
                     break
             except (SlackClientError, aiohttp.ClientError, asyncio.TimeoutError):
                 logger.debug("conversations_list page failed", exc_info=True)
-                if completed_pages == 0:
+                # Re-raise while nothing has been collected yet: an all-empty
+                # result caused by a failing page (e.g. an empty first page that
+                # carried a next_cursor, then a later page erroring) must stay a
+                # failure, not a successful empty refresh — otherwise the
+                # resolver caches [] for an hour and suppresses retries. Once we
+                # have channels, keep the partial result instead.
+                if not out:
                     raise
                 break
         return out
