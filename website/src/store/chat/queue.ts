@@ -24,11 +24,11 @@ export function hydrateQueuedBubbles(
   queue: SlotQueueItem[] | undefined,
 ): ChatMessage[] {
   const base = list.filter((m) => m.role !== 'queued')
-  for (const { content, queueId, ts, kind, appLabel, ...attachments } of queue ?? []) {
+  for (const { content, queueId, ts, kind, appLabel, durable, ...attachments } of queue ?? []) {
     // The lists ride the row's meta under the same keys a user row carries
     // them, so a cancel on THIS tab restores a spaced path exactly even
     // though the send happened on another tab or before a reload.
-    base.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId, ...(kind ? { kind } : {}), ...(appLabel ? { appLabel } : {}), ...attachments } })
+    base.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId, ...(kind ? { kind } : {}), ...(appLabel ? { appLabel } : {}), ...(durable === false ? { durable: false } : {}), ...attachments } })
   }
   return base
 }
@@ -131,7 +131,7 @@ export const queueReducers = {
       if (msgs.some(m => m.role === 'queued' && (m.meta?.queueId as string) === queueId)) return
       // Same row shape as `hydrateQueuedBubbles`: the frame's attachment
       // lists ride the row so a cancel restores from them.
-      msgs.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId, ...queueEntryAttachments(meta) } })
+      msgs.push({ role: 'queued', content, cls: 'msg msg-queued', ts, meta: { queueId, ...((meta as Record<string, unknown> | undefined)?.durable === false ? { durable: false } : {}), ...queueEntryAttachments(meta) } })
     },
     prepare(payload: { slot: string; content: string; ts: string; queue_id?: string; meta?: unknown }) {
       return { payload: { ...payload, queueId: payload.queue_id || crypto.randomUUID() } }
