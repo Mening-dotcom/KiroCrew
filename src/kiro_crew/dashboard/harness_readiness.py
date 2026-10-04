@@ -246,8 +246,8 @@ def forget_status(backend: str) -> None:
 
 
 async def _ask_status(backend: str) -> bool | None:
-    from kiro_crew.acp.client import resolve_harness_executable, run_sign_in_status_command
-    from kiro_crew.agent_sdk.host_auth import declaration_for
+    from kiro_crew.acp.client import resolve_harness_command, run_sign_in_status_command
+    from kiro_crew.agent_sdk.host_auth import SIGN_IN_STATUS_APP_SERVER_ACCOUNT, declaration_for
     from kiro_crew.config.loader import KiroCrewConfig
     from kiro_crew.config.paths import data_home
 
@@ -255,14 +255,18 @@ async def _ask_status(backend: str) -> bool | None:
     command = declaration.sign_in_status_command
     if not command:
         return None
-    binary = await asyncio.to_thread(resolve_harness_executable, command[0])
-    if not binary:
+    prefix = await asyncio.to_thread(resolve_harness_command, command[0])
+    if not prefix:
         return None
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     work_dir = data_home() / "setup" / "harness-check"
     await asyncio.to_thread(work_dir.mkdir, parents=True, exist_ok=True)
     answer = await run_sign_in_status_command(
-        backend, [binary, *command[1:]], mode=cfg.agent.sandbox, work_dir=str(work_dir)
+        backend,
+        [*prefix, *command[1:]],
+        mode=cfg.agent.sandbox,
+        work_dir=str(work_dir),
+        app_server=declaration.sign_in_status_reading == SIGN_IN_STATUS_APP_SERVER_ACCOUNT,
     )
     if answer is None:
         return None
@@ -276,8 +280,8 @@ def read_sign_in_status(reading: str, exit_code: int, output: str) -> bool | Non
     happens to print one of them is not taken for an answer.
     """
     from kiro_crew.agent_sdk.host_auth import (
+        SIGN_IN_STATUS_APP_SERVER_ACCOUNT,
         SIGN_IN_STATUS_JSON_LOGGED_IN,
-        SIGN_IN_STATUS_LOGGED_IN_LINE,
     )
 
     if reading == SIGN_IN_STATUS_JSON_LOGGED_IN:
@@ -294,11 +298,17 @@ def read_sign_in_status(reading: str, exit_code: int, output: str) -> bool | Non
         if logged_in is False and exit_code != 0:
             return False
         return None
-    if reading == SIGN_IN_STATUS_LOGGED_IN_LINE:
-        lines = [line.strip() for line in output.splitlines()]
-        if exit_code == 0 and any(line.startswith("Logged in") for line in lines):
+    if reading == SIGN_IN_STATUS_APP_SERVER_ACCOUNT:
+        try:
+            parsed = json.loads(output) if exit_code == 0 else None
+        except ValueError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        account, requires = parsed.get("account"), parsed.get("requiresOpenaiAuth")
+        if isinstance(account, dict) or requires is False:
             return True
-        if exit_code != 0 and any(line.startswith("Not logged in") for line in lines):
+        if account is None and requires is True:
             return False
         return None
     return None

@@ -71,6 +71,7 @@ from kiro_crew.agent_sdk.backends import (
     ACP_BACKEND_KIRO,
     ACP_BACKEND_OPENCODE,
     ACP_BACKEND_PI,
+    ACP_BACKEND_PROCESS_NAMES,
     ACP_BACKENDS_KNOWN,
 )
 
@@ -136,12 +137,15 @@ ENTITLEMENT_SOURCES: FrozenSet[str] = frozenset(
 #: exits 0 exactly when it is true. Claude Code's ``auth status --json``.
 SIGN_IN_STATUS_JSON_LOGGED_IN = "json_logged_in"
 
-#: The command exits 0 with a line starting ``Logged in`` when signed in, and
-#: nonzero with a line starting ``Not logged in`` when not. Codex's ``login status``.
-SIGN_IN_STATUS_LOGGED_IN_LINE = "logged_in_line"
+#: The command is an app server speaking Codex's JSON-RPC on stdio: the host sends
+#: ``initialize`` then ``account/read`` and reads the answer. Signed in when it
+#: reports an account, or needs no OpenAI sign-in at all (a configured model
+#: provider); signed out when it needs that sign-in and has no account. That is
+#: the rule the Codex adapter applies before it opens a session.
+SIGN_IN_STATUS_APP_SERVER_ACCOUNT = "app_server_account"
 
 SIGN_IN_STATUS_READINGS: FrozenSet[str] = frozenset(
-    {SIGN_IN_STATUS_JSON_LOGGED_IN, SIGN_IN_STATUS_LOGGED_IN_LINE}
+    {SIGN_IN_STATUS_JSON_LOGGED_IN, SIGN_IN_STATUS_APP_SERVER_ACCOUNT}
 )
 
 
@@ -529,11 +533,19 @@ AGENT_AUTH_DECLARATIONS: Tuple[AgentAuthDeclaration, ...] = (
         # is still authenticated.
         host_logout_retires_children=False,
         entitlement_source=ENTITLEMENT_OWN_CREDENTIAL_FILE,
-        # Run live: ``Not logged in`` and exit 1 on an empty CODEX_HOME. A managed
-        # build that needs no login says so in other words and also exits 1, which
-        # reads as unknown rather than signed out.
-        sign_in_status_command=("codex", "login", "status"),
-        sign_in_status_reading=SIGN_IN_STATUS_LOGGED_IN_LINE,
+        # Asked of the app server of the SAME Codex a session runs, through the
+        # adapter's own ``cli`` pass-through (``CODEX_PATH``, or the build the
+        # adapter bundles), never of whatever ``codex`` is on PATH. Not ``codex
+        # login status``: it reports the OpenAI sign-in alone, so a Codex whose
+        # configured model provider needs none answered "Not logged in" while its
+        # sessions opened. Run live: an app server on such a provider reports an
+        # account of that provider's type and no OpenAI sign-in required.
+        sign_in_status_command=(
+            ACP_BACKEND_PROCESS_NAMES[ACP_BACKEND_CODEX],
+            "cli",
+            "app-server",
+        ),
+        sign_in_status_reading=SIGN_IN_STATUS_APP_SERVER_ACCOUNT,
         sign_in_command="codex login",
     ),
     AgentAuthDeclaration(

@@ -883,7 +883,7 @@ def test_a_host_vault_harness_names_the_config_surface_that_feeds_it() -> None:
     "overrides",
     [
         {"sign_in_status_command": ("tool", "status")},
-        {"sign_in_status_reading": host_auth.SIGN_IN_STATUS_LOGGED_IN_LINE},
+        {"sign_in_status_reading": host_auth.SIGN_IN_STATUS_APP_SERVER_ACCOUNT},
     ],
     ids=["command-without-reading", "reading-without-command"],
 )
@@ -909,8 +909,9 @@ def test_the_harnesses_that_can_say_they_are_signed_in_name_their_own_commands()
     assert claude.sign_in_status_reading == host_auth.SIGN_IN_STATUS_JSON_LOGGED_IN
     assert claude.sign_in_command == "claude auth login"
     codex = host_auth.declaration_for(ACP_BACKEND_CODEX)
-    assert codex.sign_in_status_command == ("codex", "login", "status")
-    assert codex.sign_in_status_reading == host_auth.SIGN_IN_STATUS_LOGGED_IN_LINE
+    # Through the adapter, so the app server asked is the one a session runs on.
+    assert codex.sign_in_status_command == ("codex-acp", "cli", "app-server")
+    assert codex.sign_in_status_reading == host_auth.SIGN_IN_STATUS_APP_SERVER_ACCOUNT
     assert codex.sign_in_command == "codex login"
     # A command never names one of the harness's own credential files.
     for declaration in host_auth.AGENT_AUTH_DECLARATIONS:

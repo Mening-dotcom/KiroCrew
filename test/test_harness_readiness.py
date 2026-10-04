@@ -318,65 +318,86 @@ class TestTheHarnessSaysWhetherItIsSignedIn:
         assert hr.read_sign_in_status(SIGN_IN_STATUS_JSON_LOGGED_IN, exit_code, output) is answer
 
     @pytest.mark.parametrize(
-        ("exit_code", "output", "answer"),
+        ("result", "answer"),
         [
-            (0, "Logged in using ChatGPT", True),
-            (1, "Not logged in", False),
-            # A managed build with no login of its own: unknown, never "signed out".
-            (1, "Login is not required. This Codex uses managed credentials.", None),
-            # An older Codex without the subcommand.
-            (2, "error: unexpected argument 'status' found", None),
+            # An OpenAI sign-in.
+            ({"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}, True),
+            # A configured model provider that needs no OpenAI sign-in: Codex's
+            # own ``login status`` said "Not logged in" here while sessions opened.
+            ({"account": {"type": "externalProvider"}, "requiresOpenaiAuth": False}, True),
+            ({"account": None, "requiresOpenaiAuth": False}, True),
+            ({"account": None, "requiresOpenaiAuth": True}, False),
+            # An answer in another shape (an older or newer protocol): unknown.
+            ({"loggedIn": True}, None),
         ],
     )
-    def test_codex_reads_its_status_line(self, exit_code, output, answer):
-        from kiro_crew.agent_sdk.host_auth import SIGN_IN_STATUS_LOGGED_IN_LINE
+    def test_codex_reads_its_app_servers_account(self, result, answer):
+        from kiro_crew.agent_sdk.host_auth import SIGN_IN_STATUS_APP_SERVER_ACCOUNT
 
-        assert hr.read_sign_in_status(SIGN_IN_STATUS_LOGGED_IN_LINE, exit_code, output) is answer
+        output = json.dumps(result)
+        assert hr.read_sign_in_status(SIGN_IN_STATUS_APP_SERVER_ACCOUNT, 0, output) is answer
 
     @pytest.fixture
     def status_runs(self, monkeypatch):
         from kiro_crew.acp import client as acp_client
 
         hr._status_cache.clear()
-        runs: list[tuple[str, list[str], str]] = []
+        runs: list[tuple[str, list[str], str, bool]] = []
         answers: dict[str, tuple[int, str] | None] = {}
 
-        async def _run(backend: str, argv: list[str], *, mode: str, work_dir: str) -> Any:
-            runs.append((backend, argv, mode))
+        async def _run(
+            backend: str, argv: list[str], *, mode: str, work_dir: str, app_server: bool = False
+        ) -> Any:
+            runs.append((backend, argv, mode, app_server))
             return answers.get(backend)
 
         monkeypatch.setattr(acp_client, "run_sign_in_status_command", _run)
-        monkeypatch.setattr(acp_client, "resolve_harness_executable", lambda name: f"/bin/{name}")
+        monkeypatch.setattr(acp_client, "resolve_harness_command", lambda name: [f"/bin/{name}"])
         return runs, answers
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("backend", "argv", "answer", "expected"),
+        ("backend", "argv", "app_server", "answer", "expected"),
         [
             (
                 "claude",
                 ["/bin/claude", "auth", "status", "--json"],
+                False,
                 (0, '{"loggedIn": true}'),
                 True,
             ),
             (
                 "claude",
                 ["/bin/claude", "auth", "status", "--json"],
+                False,
                 (1, '{"loggedIn": false}'),
                 False,
             ),
-            ("codex", ["/bin/codex", "login", "status"], (0, "Logged in using ChatGPT"), True),
-            ("codex", ["/bin/codex", "login", "status"], (1, "Not logged in"), False),
+            # Codex is asked through its adapter, so the answer is the session's Codex.
+            (
+                "codex",
+                ["/bin/codex-acp", "cli", "app-server"],
+                True,
+                (0, '{"account": {"type": "externalProvider"}, "requiresOpenaiAuth": false}'),
+                True,
+            ),
+            (
+                "codex",
+                ["/bin/codex-acp", "cli", "app-server"],
+                True,
+                (0, '{"account": null, "requiresOpenaiAuth": true}'),
+                False,
+            ),
         ],
     )
     async def test_each_harness_is_asked_its_own_command_in_its_sandbox(
-        self, status_runs, backend, argv, answer, expected
+        self, status_runs, backend, argv, app_server, answer, expected
     ):
         runs, answers = status_runs
         _write_config({"agent": {"sandbox": "strict"}})
         answers[backend] = answer
         assert await hr.signed_in(backend) is expected
-        assert runs == [(backend, argv, "strict")]
+        assert runs == [(backend, argv, "strict", app_server)]
 
     @pytest.mark.asyncio
     async def test_a_missing_status_command_is_unknown_and_spawns_nothing(
@@ -385,7 +406,7 @@ class TestTheHarnessSaysWhetherItIsSignedIn:
         from kiro_crew.acp import client as acp_client
 
         runs, _ = status_runs
-        monkeypatch.setattr(acp_client, "resolve_harness_executable", lambda name: None)
+        monkeypatch.setattr(acp_client, "resolve_harness_command", lambda name: None)
         assert await hr.signed_in("codex") is None
         assert runs == []
 
@@ -499,3 +520,61 @@ class TestTheSignInStatusRoute:
         async with TestClient(TestServer(self._app())) as client:
             r = await client.get(f"/api/setup/cards/{card.id}/signin-status")
             assert r.status == 403
+
+
+#: A stand-in app server: answers ``initialize`` and ``account/read`` the way Codex's
+#: does, and exits when its stdin closes.
+_FAKE_APP_SERVER = r"""
+import json, sys
+account = json.loads(sys.argv[1])
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "method": "remoteControl/status", "params": {}}))
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"userAgent": "x"}}))
+    elif msg.get("method") == "account/read":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": account}))
+    sys.stdout.flush()
+"""
+
+_SILENT_APP_SERVER = "import sys, time\nsys.stdin.readline()\ntime.sleep(60)\n"
+
+
+class TestTheAppServerIsAskedForItsAccount:
+    """The exchange itself, against a stand-in: three frames in, one answer out."""
+
+    def _script(self, tmp_path, body: str) -> str:
+        path = tmp_path / "app_server.py"
+        path.write_text(body)
+        return str(path)
+
+    @pytest.mark.parametrize(
+        ("account", "answer"),
+        [
+            ({"account": {"type": "externalProvider"}, "requiresOpenaiAuth": False}, True),
+            ({"account": None, "requiresOpenaiAuth": True}, False),
+        ],
+    )
+    def test_the_account_is_read_and_the_server_ends(self, tmp_path, account, answer):
+        import sys
+
+        from kiro_crew.acp import client as acp_client
+        from kiro_crew.agent_sdk.host_auth import SIGN_IN_STATUS_APP_SERVER_ACCOUNT
+
+        argv = [sys.executable, self._script(tmp_path, _FAKE_APP_SERVER), json.dumps(account)]
+        got = acp_client._read_app_server_account(argv, str(tmp_path))
+        assert got is not None and got[0] == 0
+        assert json.loads(got[1]) == account
+        assert hr.read_sign_in_status(SIGN_IN_STATUS_APP_SERVER_ACCOUNT, *got) is answer
+
+    def test_a_server_that_never_answers_is_unknown_and_is_ended(self, tmp_path, monkeypatch):
+        import sys
+        import time
+
+        from kiro_crew.acp import client as acp_client
+
+        monkeypatch.setattr(acp_client, "SIGN_IN_STATUS_TIMEOUT_SECS", 0.5)
+        started = time.monotonic()
+        argv = [sys.executable, self._script(tmp_path, _SILENT_APP_SERVER)]
+        assert acp_client._read_app_server_account(argv, str(tmp_path)) is None
+        assert time.monotonic() - started < 10, "a silent server must not hold the check"

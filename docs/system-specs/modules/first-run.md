@@ -120,7 +120,11 @@ owner's click alone. The order (`setup_cards.SCRIPTED_KINDS`):
    skips the install. Any other harness shows its install command, then what
    the harness itself says about its sign-in: a harness whose `host_auth`
    declaration names a `sign_in_status_command` (Claude Code's
-   `claude auth status --json`, Codex's `codex login status`) is asked through
+   `claude auth status --json`; for Codex, the app server of the Codex its
+   sessions run, reached through the adapter's `codex-acp cli app-server` and
+   asked `account/read`, because `codex login status` reports the OpenAI
+   sign-in alone and says "Not logged in" for a configured model provider whose
+   sessions open) is asked through
    `GET /api/setup/cards/{id}/signin-status` (`harness_readiness.signed_in`,
    one answer per 8 s however many tabs ask; asked again every 10 s while it says
    signed out). Signed in reads "Signed in to …" with Continue lit; signed out

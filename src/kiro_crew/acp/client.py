@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -29,6 +30,7 @@ import stat
 import subprocess as subprocess_mod
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -4086,21 +4088,25 @@ SIGN_IN_STATUS_TIMEOUT_SECS = 20.0
 _SIGN_IN_STATUS_MAX_CHARS = 16_000
 
 
-def resolve_harness_executable(name: str) -> str | None:
-    """The binary a harness's own command *name* resolves to, as its session finds it.
+def resolve_harness_command(name: str) -> list[str] | None:
+    """The argv prefix a harness's own command *name* resolves to, as its session finds it.
 
     ``claude`` takes the session's own resolution (:func:`_resolve_claude_code_executable`,
-    the binary handed to the adapter), so its status describes the same install.
-    Any other name resolves the same way that one does past its override: mise, then
-    the augmented PATH. ``None`` when nothing resolves.
+    the binary handed to the adapter), and ``codex-acp`` the adapter's entry script
+    (:func:`_resolve_codex_acp_bin`, its Node runtime first), so a status describes
+    the install a session runs. Any other name resolves the way those do past their
+    overrides: mise, then the augmented PATH. ``None`` when nothing resolves.
     """
     if name == CLAUDE_CODE_BIN:
-        return _resolve_claude_code_executable()
+        claude = _resolve_claude_code_executable()
+        return [claude] if claude else None
+    if name == CODEX_ACP_BIN:
+        return _resolve_codex_acp_bin()[0]
     resolved = _mise_which(name)
-    if resolved:
-        return resolved
-    search_path = augmented_path(os.environ.get("PATH", ""))
-    return _normalize_exe_casing(shutil.which(name, path=search_path))
+    if not resolved:
+        search_path = augmented_path(os.environ.get("PATH", ""))
+        resolved = _normalize_exe_casing(shutil.which(name, path=search_path))
+    return [resolved] if resolved else None
 
 
 def _run_sign_in_status(argv: list[str], cwd: str) -> tuple[int, str] | None:
@@ -4113,13 +4119,11 @@ def _run_sign_in_status(argv: list[str], cwd: str) -> tuple[int, str] | None:
     into an interactive prompt cannot wait on it. stdout and stderr are read
     together, because harnesses differ in which one carries the answer.
     """
-    env = scrub_agent_subprocess_env(_resolve_spawn_env({**os.environ}, kiro_api_key=False))
-    env["PATH"] = augmented_path(env.get("PATH", ""))
     try:
         completed = subprocess_mod.run(
             argv,
             cwd=cwd,
-            env=env,
+            env=_sign_in_status_env(),
             stdin=subprocess_mod.DEVNULL,
             stdout=subprocess_mod.PIPE,
             stderr=subprocess_mod.STDOUT,
@@ -4133,8 +4137,113 @@ def _run_sign_in_status(argv: list[str], cwd: str) -> tuple[int, str] | None:
     return completed.returncode, (completed.stdout or "")[:_SIGN_IN_STATUS_MAX_CHARS]
 
 
+def _sign_in_status_env() -> dict[str, str]:
+    """The environment a session spawn of a harness builds, scrub included."""
+    env = scrub_agent_subprocess_env(_resolve_spawn_env({**os.environ}, kiro_api_key=False))
+    env["PATH"] = augmented_path(env.get("PATH", ""))
+    return env
+
+
+#: What an app-server status reading sends: who is asking, then its one question.
+_APP_SERVER_INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "clientInfo": {"name": CLIENT_NAME, "title": "Kiro Crew", "version": CLIENT_VERSION}
+    },
+}
+_APP_SERVER_INITIALIZED = {"jsonrpc": "2.0", "method": "initialized"}
+_APP_SERVER_ACCOUNT_READ = {"jsonrpc": "2.0", "id": 2, "method": "account/read", "params": {}}
+
+
+def _pump_lines(stream: Any, sink: "queue.Queue[bytes | None]") -> None:
+    """Feed *stream*'s lines into *sink*, then ``None`` at its end."""
+    try:
+        for line in iter(lambda: stream.readline(_SIGN_IN_STATUS_MAX_CHARS), b""):
+            sink.put(line)
+    except (OSError, ValueError):
+        pass
+    sink.put(None)
+
+
+def _await_response(sink: "queue.Queue[bytes | None]", rid: int, deadline: float) -> Any:
+    """The JSON-RPC response with id *rid* off *sink*, or ``None`` at its end or the deadline."""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            line = sink.get(timeout=remaining)
+        except queue.Empty:
+            return None
+        if line is None:
+            return None
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(message, dict) and message.get("id") == rid and "method" not in message:
+            return message
+
+
+def _read_app_server_account(argv: list[str], cwd: str) -> tuple[int, str] | None:
+    """Ask an already-wrapped app server for its account: ``(0, result JSON)``, or ``None``.
+
+    Blocking; callers run it off the loop. The same environment a session spawn
+    builds, as for a one-shot status command. Three frames go in -- ``initialize``,
+    ``initialized``, ``account/read`` -- and one answer is read, inside
+    :data:`SIGN_IN_STATUS_TIMEOUT_SECS`. Closing stdin ends the server, which is
+    how it shuts down after a session too; one that outlives that is killed.
+    """
+    try:
+        proc = subprocess_mod.Popen(
+            argv,
+            cwd=cwd,
+            env=_sign_in_status_env(),
+            stdin=subprocess_mod.PIPE,
+            stdout=subprocess_mod.PIPE,
+            stderr=subprocess_mod.DEVNULL,
+        )
+    except (OSError, subprocess_mod.SubprocessError):
+        return None
+    sink: "queue.Queue[bytes | None]" = queue.Queue()
+    threading.Thread(target=_pump_lines, args=(proc.stdout, sink), daemon=True).start()
+    deadline = time.monotonic() + SIGN_IN_STATUS_TIMEOUT_SECS
+
+    def _send(frame: dict[str, Any]) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write((json.dumps(frame) + "\n").encode("utf-8"))
+        proc.stdin.flush()
+
+    answer: Any = None
+    try:
+        _send(_APP_SERVER_INITIALIZE)
+        if _await_response(sink, 1, deadline) is not None:
+            _send(_APP_SERVER_INITIALIZED)
+            _send(_APP_SERVER_ACCOUNT_READ)
+            answer = _await_response(sink, 2, deadline)
+    except (OSError, ValueError):
+        answer = None
+    finally:
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except subprocess_mod.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    result = answer.get("result") if isinstance(answer, dict) else None
+    if not isinstance(result, dict):
+        return None
+    return 0, json.dumps(result)
+
+
 async def run_sign_in_status_command(
-    backend: str, argv: list[str], *, mode: str, work_dir: str
+    backend: str, argv: list[str], *, mode: str, work_dir: str, app_server: bool = False
 ) -> tuple[int, str] | None:
     """Run *backend*'s own sign-in status command inside the sandbox its session gets.
 
@@ -4147,7 +4256,9 @@ async def run_sign_in_status_command(
     *argv* is a fixed command from the harness's declaration
     (``host_auth.AgentAuthDeclaration.sign_in_status_command``) with its executable
     resolved; nothing in it comes from a turn. Returns ``(exit code, output)``, or
-    ``None`` when the command could not run or did not answer in time. The output
+    ``None`` when the command could not run or did not answer in time. With
+    *app_server*, the command is an app server asked for its account
+    (:func:`_read_app_server_account`) and the output is that answer. The output
     can carry an account name or a masked key, so callers parse it and never show
     or log it.
     """
@@ -4166,8 +4277,9 @@ async def run_sign_in_status_command(
         is_kiro_cli=backend in ACP_BACKENDS_INTERNAL_SANDBOX,
         _prepare=wrap_argv,
     )
+    run = _read_app_server_account if app_server else _run_sign_in_status
     try:
-        return await asyncio.to_thread(_run_sign_in_status, wrapped, work_dir)
+        return await asyncio.to_thread(run, wrapped, work_dir)
     finally:
         if cleanup:
             await asyncio.to_thread(_unlink_readback_launcher, cleanup)

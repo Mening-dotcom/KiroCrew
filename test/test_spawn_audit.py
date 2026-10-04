@@ -325,6 +325,15 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # spawn gets, so the child sees its own sign-in and nothing the mask denies
         # it. Called from a worker thread, never the event loop.
         "acp/client.py::_run_sign_in_status",
+        # The same caller pattern for a harness whose status is asked of its app
+        # server (Codex, through its adapter's ``cli app-server``): one fixed argv
+        # from its ``host_auth`` declaration, wrapped by ``run_sign_in_status_command``
+        # in the session's sandbox and credential mask before it reaches here. The
+        # only input is three constant JSON-RPC frames (``initialize``,
+        # ``initialized``, ``account/read``); nothing in it comes from a turn. A
+        # 20s deadline, stdin closed to end the server, killed if it outlives that.
+        # Called from a worker thread, never the event loop.
+        "acp/client.py::_read_app_server_account",
         # The pi gate read-back, the same shape as the opencode one above. ONE fixed
         # argv -- Kiro Crew's own gate launcher (a file this core wrote into the
         # sandbox run directory, execing the resolved ``pi`` binary) plus the three
