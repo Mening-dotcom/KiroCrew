@@ -5322,8 +5322,12 @@ class TestPreparePrPreSubmitReview:
         assert "concurrently" in skill.lower() or "run at the same time" in skill.lower()
         assert "Charter is read-only" in skill
         # The two reviewers mirror their own (divergent) server contracts.
-        assert ".github/workflows/codex-review.yml" in skill
-        assert ".github/workflows/claude-review.yml" in skill
+        charters = (PREPARE_PR_SKILL.parent / "references" / "fallback-charters.md").read_text(
+            encoding="utf-8"
+        )
+        assert "references/fallback-charters.md" in skill
+        assert ".github/workflows/codex-review.yml" in charters
+        assert ".github/workflows/claude-review.yml" in charters
         assert "REVIEWED_SHA=$(git rev-parse HEAD)" in skill
         assert '"$(git rev-parse HEAD)" = "$REVIEWED_SHA"' in skill
 
