@@ -10,10 +10,9 @@ triggers: prepare pr, prep pr, prepare pull request, ship pr, ship this pr, rais
 Drive the working tree to a **review-ready PR**, then keep driving until CI and the
 review bots are satisfied. Opening the PR is the midpoint, not the end.
 
-This file carries only what the loop executes. The reasons behind the rules —
-incident evidence, script internals, design history — are in
-`references/rationale.md`; read it when you need to justify a deviation, not on
-every load.
+This file carries only what the loop executes. The reasons behind the rules
+(incident evidence, script internals, design history) are in
+`references/rationale.md`; read it to justify a deviation.
 
 ## Mode — decide once, at the start
 
@@ -133,7 +132,7 @@ Answering is prose work. It never needs a push and never widens the diff.
 |---|---|---|
 | `fixed` | you changed the code | the change and the SHA |
 | `rebutted` | the code stays correct as-is | the evidence it does not hold, **or** the reasoning it is disproportional |
-| `accepted-and-deferred` | the work is already decided, just out of scope here — unlike `needs-a-decision`, nothing is being asked | why, plus an issue whose body names a task someone can pick up. The issue MUST carry the `deferred-finding` label, the `needs-triage` label (so the triage pipeline's intake sees it and the follow-up PR can pass `Issue Gate`), an assignee (the owner), and a `Due: YYYY-MM-DD` line in its body — an untracked deferral is how flagged findings ship anyway, and the Disposition Deferral Check replies to dispositions whose issue lacks any of the three. Note the server-side asymmetry: the GPT lane's convergence rules do not accept a deferral as a ruling on a security / data-loss / corruption finding, so a deferred one of those is re-raised every round until fixed, rebutted as not-a-defect, or human-overridden |
+| `accepted-and-deferred` | the work is already decided, just out of scope here — unlike `needs-a-decision`, nothing is being asked | why, plus an issue whose body names a task someone can pick up. The issue MUST carry the `deferred-finding` label, the `needs-triage` label (so triage intake sees it and the follow-up PR can pass `Issue Gate`), an assignee (the owner), and a `Due: YYYY-MM-DD` line in its body — an untracked deferral is how flagged findings ship anyway; the Disposition Deferral Check replies to a disposition whose issue lacks any of the three. Server-side asymmetry: the GPT lane's convergence rules do not accept a deferral as a ruling on a security / data-loss / corruption finding, so it re-raises one every round until fixed, rebutted as not-a-defect, or human-overridden |
 | `needs-a-decision` | the outcome depends on a maintainer ruling | the question, put to the maintainer directly — do **not** file an issue for it |
 
 **What must be answered:**
@@ -282,7 +281,7 @@ explicit `base_ref`.
 **`single_commit` governs history handling in one place.** When `true`, run the
 pre-squash guard (Phase 1.3), squash (Phase 1.4), and the post-squash guard
 (Phase 3.1). When `false`, skip all three and preserve the branch's history;
-commits still go through `push_guard.py --commit` / `--amend`.
+commits still use `push_guard.py --commit` / `--amend`.
 
 Kiro Crew allows at most **two** commits per PR: squash to one before pushing
 unless a mechanical follow-up is genuinely worth keeping separable.
