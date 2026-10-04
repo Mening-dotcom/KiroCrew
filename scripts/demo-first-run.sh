@@ -85,7 +85,18 @@ stop_demo() {
   . "$LAST"
   say "Stopping the demo on port $DEMO_PORT"
   DEMO_WORKSPACE="${DEMO_WORKSPACE:-}"
+  # The stop only signals the gateway; it keeps writing to the crew home while it
+  # shuts down, so wait for it to exit before the folders below are removed.
+  _gw_pid="$(cat "$DEMO_HOME/run/gateway-$DEMO_PORT.pid" 2>/dev/null | tr -dc '0-9' || true)"
   KIROCREW_HOME="$DEMO_HOME" KIRO_HOME="$DEMO_HOME/kiro" "$DEMO_KIROCREW" stop --port "$DEMO_PORT" || true
+  if [ -n "$_gw_pid" ]; then
+    _waited=0
+    while kill -0 "$_gw_pid" 2>/dev/null && [ "$_waited" -lt 150 ]; do
+      sleep 0.2
+      _waited=$((_waited + 1))
+    done
+    kill -0 "$_gw_pid" 2>/dev/null && note "The gateway (pid $_gw_pid) is still stopping; its files may reappear."
+  fi
   if [ "${DEMO_REAL_AWS:-0}" = 1 ]; then
     say "This demo could have built a REAL home in AWS. Its cloud instances:"
     KIROCREW_HOME="$DEMO_HOME" KIRO_HOME="$DEMO_HOME/kiro" "$DEMO_KIROCREW" cloud list || true
