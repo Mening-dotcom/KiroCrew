@@ -489,21 +489,33 @@ def plain_title(text: Any, limit: int = 60) -> str:
     return out if len(out) <= limit else out[: limit - 1] + "…"
 
 
-def card_state_words(card: SetupCard) -> str:
+#: What a pending card means for the next proposal, by whether it holds others
+#: back (``setup_actions.holds_others``). Said beside its state because "waiting
+#: for the user's decision" alone read as "no other card can be shown", and the
+#: agent then refused a job the user asked for while the home card waited.
+_HOLDS_OTHERS_WORDS = {
+    True: "a new card waits until it is decided",
+    False: "other cards can still be shown while it waits",
+}
+
+
+def card_state_words(card: SetupCard, *, holds_others: bool) -> str:
     """A card's status in words the model reads correctly.
 
     The raw ``waiting`` means the card's own work is running (a build, a
     sign-in, a preview), not that the user owes it an answer; printed as is,
     the main chat told the user a home that was building still awaited them.
+    *holds_others* is ``setup_actions.holds_others(card)``: whether, pending,
+    it keeps the next card from showing.
     """
     if card.status == STATUS_PENDING:
-        return "waiting for the user's decision"
+        return f"waiting for the user's decision; {_HOLDS_OTHERS_WORDS[holds_others]}"
     if card.status in (STATUS_WAITING, STATUS_WORKING):
         return "in progress, nothing needed from the user"
     return card.status
 
 
-def home_state_words(card: SetupCard) -> str:
+def home_state_words(card: SetupCard, *, holds_others: bool) -> str:
     """Where a home card stands, in the same plain words as :func:`card_state_words`."""
     outcome = card.outcome or {}
     if outcome.get("moved"):
@@ -522,7 +534,7 @@ def home_state_words(card: SetupCard) -> str:
         where = f": {plain_title(str(active.get('label') or ''))}" if active else ""
         return f"building in the background{where}; nothing needed from the user"
     if card.status == STATUS_PENDING:
-        return "waiting for the user's decision on its card"
+        return f"waiting for the user's decision on its card; {_HOLDS_OTHERS_WORDS[holds_others]}"
     return card.status
 
 

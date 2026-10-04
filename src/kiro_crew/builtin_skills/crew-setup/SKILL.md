@@ -213,7 +213,10 @@ What they are working on and what they want from it.
   Review or Not now; the hint already offers both. That sentence is the card's
   reason, not a second question, and it never repeats the card's details.
 - One card per turn, then end your turn. Do not stack cards: while a card
-  waits for the user, a second proposal is refused (the home card excepted).
+  waits for the user, a second proposal is refused. A waiting card whose state
+  (in the `[CREW OVERVIEW]` or `setup_status`) says "other cards can still be
+  shown while it waits", as the home card's does, holds nothing back: when the
+  user asks for something else meanwhile, propose its card.
 - Proposing a card only asks the gateway to show it, so say what the card does,
   never that it is already on screen. If a `[Setup card result]` says the card
   was **not shown**, tell the user in one line, in plain words ("I'll set up the

@@ -102,17 +102,21 @@ def setup_status(name: str, args: dict[str, Any]) -> str:
                 "the user skipped scheduling. Do not conclude setup before this choice."
             )
         elif homes and homes[-1].status not in (sc.STATUS_COMMITTED, sc.STATUS_DECLINED):
-            lines.append(
-                f"The home step is not finished yet: {sc.home_state_words(homes[-1])}. "
-                "Do not say setup is done."
+            home = sc.home_state_words(
+                homes[-1], holds_others=setup_actions.holds_others(homes[-1])
             )
+            lines.append(f"The home step is not finished yet: {home}. Do not say setup is done.")
     if not cards:
         lines.append("No setup cards in this session.")
     # The same plain states the crew overview uses: a raw ``waiting`` reads as
-    # "the user owes it an answer" when it means the card's own work is running.
+    # "the user owes it an answer" when it means the card's own work is running,
+    # and a pending card says whether another card can still be shown beside it.
     for card in cards[-20:]:
+        held = setup_actions.holds_others(card)
         words = (
-            sc.home_state_words(card) if card.kind == sc.KIND_HOME else sc.card_state_words(card)
+            sc.home_state_words(card, holds_others=held)
+            if card.kind == sc.KIND_HOME
+            else sc.card_state_words(card, holds_others=held)
         )
         line = f"- {card.kind} ({card.id}): {words}"
         if card.error:

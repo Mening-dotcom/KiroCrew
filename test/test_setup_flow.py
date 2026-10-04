@@ -1249,6 +1249,12 @@ class TestMainChat:
         sc.update_card(card.id, _asking)
         block = await setup_flow.crew_overview(state, state.slots["chat-1-1"])
         assert "waiting for the user's decision" in block
+        # A waiting home card holds no other card back, and the overview says so.
+        assert (
+            "Home in the cloud: waiting for the user's decision on its card; "
+            "other cards can still be shown while it waits." in block
+        )
+        assert "Your home in the cloud (waiting for the user's decision; other cards" in block
 
 
 class TestImportResult:

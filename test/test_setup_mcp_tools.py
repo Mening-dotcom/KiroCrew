@@ -107,3 +107,48 @@ def test_home_rejects_an_unknown_proposal_step(dashboard_key):
     out = setup_tools.setup_card("setup_card", {"kind": "home", "step": "finish"})
     assert out.startswith("Error:")
     assert not session_directive.has_marker(out)
+
+
+def test_a_pending_card_says_whether_another_card_can_still_show(dashboard_key):
+    """Read off ``stack_exempt``: the waiting home card holds nothing back, a job does.
+
+    "Waiting for the user's decision" alone read as "no other card can be shown",
+    and the agent refused a job the user asked for while the home card waited.
+    """
+    home = sc.create_card(
+        slot="chat-1-1",
+        session_key=dashboard_key,
+        kind=sc.KIND_HOME,
+        payload={"region": "us-east-1", "size": {"key": "lite"}},
+    )
+    job = sc.create_card(
+        slot="chat-1-1",
+        session_key=dashboard_key,
+        kind=sc.KIND_CRON,
+        payload={"name": "Brief"},
+    )
+    out = setup_tools.setup_status("setup_status", {})
+    assert (
+        f"- home ({home.id}): waiting for the user's decision on its card; "
+        "other cards can still be shown while it waits" in out
+    )
+    assert (
+        f"- cron ({job.id}): waiting for the user's decision; "
+        "a new card waits until it is decided" in out
+    )
+
+
+def test_the_wording_follows_the_stack_exempt_flag_not_the_kind(dashboard_key, monkeypatch):
+    import dataclasses
+
+    from kiro_crew import setup_actions
+
+    card = sc.create_card(
+        slot="chat-1-1", session_key=dashboard_key, kind=sc.KIND_CRON, payload={"name": "B"}
+    )
+    exempt = dataclasses.replace(setup_actions.get(sc.KIND_CRON), stack_exempt=True)
+    monkeypatch.setitem(setup_actions._BY_KIND, sc.KIND_CRON, exempt)
+    assert setup_actions.holds_others(card) is False
+    assert "other cards can still be shown while it waits" in setup_tools.setup_status(
+        "setup_status", {}
+    )

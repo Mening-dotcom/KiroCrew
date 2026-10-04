@@ -40,7 +40,7 @@ from kiro_crew.setup_actions import (
     soul,
 )
 from kiro_crew.setup_actions.base import SETUP_SCOPE, Decision, SetupAction
-from kiro_crew.setup_cards import DECISION_COMMIT, DECISION_DECLINE
+from kiro_crew.setup_cards import DECISION_COMMIT, DECISION_DECLINE, SetupCard
 
 __all__ = [
     "ACTIONS",
@@ -86,6 +86,19 @@ _DESCRIPTION_TAIL = (
 def get(kind: str) -> SetupAction | None:
     """The action registered for *kind*, or ``None``."""
     return _BY_KIND.get(kind)
+
+
+def holds_others(card: SetupCard) -> bool:
+    """Whether *card*, while pending, holds the agent's next proposal back.
+
+    One decision at a time, except for a ``stack_exempt`` kind (decided on its
+    own schedule, as the home card is while its build runs) and the gateway's
+    own steps. A kind this build does not know holds, the conservative answer.
+    """
+    action = get(card.kind)
+    if action is None:
+        return True
+    return not action.stack_exempt and not action.is_gateway_card(card)
 
 
 def proposable() -> tuple[SetupAction, ...]:

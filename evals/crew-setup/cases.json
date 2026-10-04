@@ -360,6 +360,40 @@
           "max": 1
         }
       ]
+    },
+    {
+      "id": 10,
+      "name": "job-while-home-waits",
+      "persona": "A developer who chose a home in the cloud in the terminal, leaves its card unbuilt for now, and asks for a scheduled job first.",
+      "objective": "The job card shows and is kept while the home card still waits: a waiting home card holds no other card back, so the agent never says it must be decided first.",
+      "home": "cloud",
+      "script": [
+        "Call yourself Ada. English.",
+        "Before the home, set up a weekday 8am brief on {{REPO}} and preview it.",
+        "Keep it."
+      ],
+      "policy": {
+        "home": "ignore",
+        "import": "decline",
+        "cron": "preview-then-keep",
+        "default": "decline"
+      },
+      "rubric": [
+        {
+          "check": "card_proposed",
+          "kind": "cron"
+        },
+        {
+          "check": "job_kept_within",
+          "minutes": 10
+        },
+        {
+          "check": "replies_match",
+          "pattern": "^(?![\\s\\S]*\\b(?:can.?t|cannot|won.?t|not able to|refuses?)\\b[^.\\n]{0,80}\\b(?:while|until|because)\\b[^.\\n]{0,80}\\bhome\\b)",
+          "after_message_index": 1,
+          "min_fraction": 1
+        }
+      ]
     }
   ]
 }

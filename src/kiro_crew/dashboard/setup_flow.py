@@ -342,7 +342,8 @@ async def propose(
         if home is not None:
             await _refuse(
                 "home_exists",
-                f"the home step already has a card ({sc.home_state_words(home)}).",
+                "the home step already has a card "
+                f"({sc.home_state_words(home, holds_others=setup_actions.holds_others(home))}).",
             )
             return (
                 f"The home step already has a card ({home.status}). Do not propose it again. "
@@ -370,7 +371,7 @@ async def propose(
     # user's attention and buries the first. A stack-exempt kind (the home card,
     # which builds in the background by design) is decided on its own schedule.
     waiting = next(
-        (c for c in existing if c.status == sc.STATUS_PENDING and _holds_others(c)),
+        (c for c in existing if c.status == sc.STATUS_PENDING and setup_actions.holds_others(c)),
         None,
     )
     if waiting is not None and not action.stack_exempt:
@@ -399,14 +400,6 @@ def _is_gateway_card(card: sc.SetupCard) -> bool:
 def _lifts_budget(card: sc.SetupCard) -> bool:
     action = setup_actions.get(card.kind)
     return action is not None and action.lifts_budget
-
-
-def _holds_others(card: sc.SetupCard) -> bool:
-    """Whether this pending card holds the agent's next proposal back."""
-    action = setup_actions.get(card.kind)
-    if action is None:
-        return True
-    return not action.stack_exempt and not action.is_gateway_card(card)
 
 
 async def _build_connect(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2731,7 +2724,8 @@ async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
     open_cards = [c for c in cards if not c.terminal]
     if open_cards:
         items = "; ".join(
-            f"{_plain(_card_title(c))} ({sc.card_state_words(c)}"
+            f"{_plain(_card_title(c))} "
+            f"({sc.card_state_words(c, holds_others=setup_actions.holds_others(c))}"
             f"{'' if c.slot == slot.key else ', another chat'})"
             for c in open_cards[-5:]
         )
@@ -2758,7 +2752,8 @@ async def crew_overview(state: "DashboardState", slot: "_ChatSlot") -> str:
             lines.append(f"- Scheduled jobs ({len(jobs)}), next due first: {names}.")
     home = next((c for c in reversed(cards) if c.kind == sc.KIND_HOME), None)
     if home is not None:
-        lines.append(f"- Home in the cloud: {sc.home_state_words(home)}.")
+        words = sc.home_state_words(home, holds_others=setup_actions.holds_others(home))
+        lines.append(f"- Home in the cloud: {words}.")
     from kiro_crew.context import _neutralize_structural_markers
 
     # Chat and job titles are user- and agent-authored; a forged block marker in

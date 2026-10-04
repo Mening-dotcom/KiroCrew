@@ -1066,7 +1066,13 @@ quoting, and the block is capped at `OVERVIEW_MAX_CHARS`. It carries what
 `list_sessions` and `setup_status` already return, so it widens nothing. Both
 word a card's state the same way (`setup_cards.card_state_words`,
 `home_state_words`): a card whose own work is running (a build, a sign-in, a
-preview) reads "nothing needed from the user", never the raw `waiting`.
+preview) reads "nothing needed from the user", never the raw `waiting`. A pending
+card also says what it means for the next proposal, from
+`setup_actions.holds_others` (the same predicate the one-at-a-time refusal
+applies): "a new card waits until it is decided", or, for a `stack_exempt` kind
+or a gateway step, "other cards can still be shown while it waits". Without the
+second, "waiting for the user's decision" on the home card read as "no other
+card can be shown", and the agent refused a job the user asked for.
 
 **The main chat's agent.** The first-run chat runs on the `kirocrew-main` agent
 spec (`slot.agent`, `agent_files.MAIN_CHAT_AGENT_NAME`), set when the chat is
