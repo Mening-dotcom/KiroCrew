@@ -398,6 +398,12 @@ class TestTheWindowsStopPathIsReachable:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:
         """The in-app diagnosis an operator needs: which daemon, whose code."""
+        import kiro_crew.code_fingerprint as fp_mod
+
+        # Pin the install side: with IS_WINDOWS patched, a cold code_fingerprint()
+        # trusts no git and falls to the mtime rule, and a cross-scheme pong reads
+        # as another install, not a stale daemon.
+        monkeypatch.setattr(fp_mod, "code_fingerprint", lambda: "b4cf148542b8e6a5")
         monkeypatch.setattr(platform_compat, "IS_WINDOWS", True)
         monkeypatch.setattr(
             dc, "_ping_detailed", lambda p: ("ok", _pong(pid=9999, fingerprint="old-checkout"))
