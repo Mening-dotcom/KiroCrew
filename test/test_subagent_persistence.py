@@ -335,11 +335,13 @@ class TestWriteFinishedResult:
         write_result_chunk("f1", "a fragment with a hole")
         answer = "x" * 5_000
 
+        assert (read_state("f1") or {}).get("status") == "running"
         assert write_finished_result("f1", answer, update_state) is True
         assert (agent_root / "f1" / "result.txt").read_bytes() == cm.cap_result_bytes(
             answer.encode("utf-8")
         )
         assert (read_state("f1") or {}).get("result_complete") is True
+        assert (read_state("f1") or {}).get("status") == "ended"
 
     def test_an_empty_whole_answer_leaves_no_file(self, agent_root):
         from kiro_crew.subagent_persistence import write_finished_result
@@ -350,6 +352,7 @@ class TestWriteFinishedResult:
         assert write_finished_result("f2", "", update_state) is True
         assert not (agent_root / "f2" / "result.txt").exists()
         assert (read_state("f2") or {}).get("result_complete") is True
+        assert (read_state("f2") or {}).get("status") == "ended"
 
     def test_any_other_ending_is_capped_in_place_and_not_flagged(self, agent_root, monkeypatch):
         import kiro_crew.context_management as cm
@@ -363,6 +366,9 @@ class TestWriteFinishedResult:
         on_disk = (agent_root / "f3" / "result.txt").read_bytes()
         assert on_disk == cm.cap_result_bytes(b"y" * 9_000)
         assert (read_state("f3") or {}).get("result_complete") is False
+        assert (read_state("f3") or {}).get("status") == "ended", (
+            "an unclaimed ending is still an ending; the folder must not read as running"
+        )
 
     @pytest.mark.parametrize("text", ["z" * 9_000, None], ids=["whole", "partial"])
     def test_a_refused_rename_still_leaves_the_file_capped(self, agent_root, monkeypatch, text):
@@ -398,6 +404,7 @@ class TestWriteFinishedResult:
         on_disk = (agent_root / "f4" / "result.txt").read_bytes()
         assert on_disk == cm.cap_result_bytes(b"z" * 9_000)
         assert (read_state("f4") or {}).get("result_complete") is False
+        assert (read_state("f4") or {}).get("status") == "ended"
 
     def test_a_cleared_folder_is_not_recreated_or_flagged(self, agent_root):
         from kiro_crew.subagent_persistence import write_finished_result

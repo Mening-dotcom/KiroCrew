@@ -1,7 +1,9 @@
 """Subagent persistence — disk I/O for agent folders.
 
 Each subagent gets a folder at ``~/.kiro/crew/subagents/{id}/`` containing:
-- ``state.json``   — running state (task, PID, turns, last_tool)
+- ``state.json``   — run state (task, PID, turns, last_tool); ``status`` is
+  ``running`` from creation until the ending's ``result_complete`` write
+  settles it to ``ended``
 - ``result.txt``   — streamed result text
 - ``tombstone.json`` — written on abnormal exit only
 """
@@ -1202,6 +1204,17 @@ def write_finished_result(
     a Windows reader holding the file). *state_writer* is the caller's seam for
     ``update_state``. A transient run keeps its record in memory and its folder
     never exists, so it records the flag and touches no disk.
+
+    The same write settles ``status``: ``state.json`` is created ``running``
+    and no other writer touches that field, so this write is what keeps a
+    finished folder from reading as a live child (a ``409
+    slot_subagents_running`` inquest reads these folders). Every ending of a
+    managed run reaches here — the claimed ending with its text, every other
+    ending through the ``_run`` finally's cap with ``None`` — so ``ended``
+    lands in the ``result_complete`` write rather than at a new write site.
+    HOW the run ended stays ``tombstone.json``'s to say. A run the process's
+    death cut short settles nothing, by nature; its folder is the boot
+    reconcile's to announce.
     """
     from kiro_crew.context_management import cap_result_bytes, cap_result_file
 
@@ -1232,7 +1245,7 @@ def write_finished_result(
             )
             whole = False
     try:
-        return bool(state_writer(agent_id, result_complete=whole))
+        return bool(state_writer(agent_id, result_complete=whole, status="ended"))
     except (OSError, ValueError):
         logger.warning("Could not record result_complete for %s", agent_id, exc_info=True)
         return False
