@@ -803,9 +803,30 @@ async def test_a_sync_while_the_temp_is_still_staging_never_commits_it(
                 assert not sync.done(), "the Sync ran while a note was still staging"
             finally:
                 release_stage.set()
-                save_status, save_body = await real_asyncio.wait_for(save, timeout=10)
+                # Fail-safes against a genuine deadlock, not races to run out
+                # on, so their budgets are generous like the park's own 120 s
+                # above rather than tight: on a loaded host the released save's
+                # publish — and the Sync's whole run behind it — queue their
+                # worker-thread git calls behind whatever else holds the shared
+                # `to_thread` executor, and a tight budget measures the runner
+                # (flake class 2, see testing-conventions.md). Named, so a
+                # starved executor reads as itself and not as a bare timeout.
+                try:
+                    save_status, save_body = await real_asyncio.wait_for(save, timeout=120)
+                except TimeoutError:
+                    raise AssertionError(
+                        "the released save never completed; a starved shared "
+                        "to_thread executor holds its publish (flake class 2)"
+                    ) from None
             assert sync is not None
-            sync_status, sync_body = await real_asyncio.wait_for(sync, timeout=30)
+            try:
+                sync_status, sync_body = await real_asyncio.wait_for(sync, timeout=120)
+            except TimeoutError:
+                raise AssertionError(
+                    "the Sync never completed after staging was released; a "
+                    "starved shared to_thread executor holds its git calls "
+                    "(flake class 2)"
+                ) from None
             assert sync_status == 200, sync_body
             committed = [c["path"] for c in sync_body["result"]["committed"]]
 
