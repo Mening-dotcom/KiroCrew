@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         record_interaction_event,
         redact,
         redact_local_paths,
+        resolve_crew_agent_binding,
         rollback_skill_bodies,
         run_in_embed_pool,
         runtime_death,
@@ -561,8 +562,22 @@ async def _run_turn(turn: _SlackTurn) -> bool:
         # Re-resolve _agent against (possibly linked) session_key for the main
         # LLM path — linked dashboard sessions may carry a different thread agent.
         _agent = _thread_agents.get(session_key) or channel_agent or _get_default_agent() or None
+        # A name that is a Crew agent record collapses to the record's kiro
+        # agent, workspace and crew identity (resolve_crew_agent_binding), the
+        # same resolution the dashboard, spawn and cron dispatches apply; any
+        # other name passes through with no extra kwargs. Off the loop: the
+        # resolve reads the whole config, which is not work to do inline.
+        # Mirrors the transport dispatch.
+        _crew_kiro, _crew_cwd, _crew_alias = await asyncio.to_thread(
+            resolve_crew_agent_binding, _agent
+        )
+        _crew_kwargs = {"cwd": _crew_cwd, "crew_agent": _crew_alias} if _crew_alias else {}
         client, is_new, resumed = await sessions.get_or_create(
-            session_key, agent=_agent, channel_id=channel, start_priority=start_priority
+            session_key,
+            agent=_crew_kiro or _agent,
+            channel_id=channel,
+            start_priority=start_priority,
+            **_crew_kwargs,
         )
         _acquired = True
         if _compaction_replay is not None:

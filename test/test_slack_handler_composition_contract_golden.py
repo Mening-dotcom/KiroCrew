@@ -1058,7 +1058,7 @@ _GOLDEN_DIGESTS: dict[str, str] = {
     "transport_floor_refusal": "8bc29ce9634f29549dbcab78cb139f12f0eb565ea92cc8a6856f6aa8eaae1803",
     "trusted_session": "33cdb5f7e51781f7636d4a8591bda14b7b57c094df5590633f5124d4bf05759d",
     "turn_ceiling_and_shutdown": "3ac9dcaeb5c6c42bf8886118f06df788a8b280da346addf25dbc811baf9e2c9d",
-    "turn_with_history": "bcc140758baf11312bd9e0bd2ec299c92cc4f51802eb5d8afb0e376d29799583",
+    "turn_with_history": "fd1c764174a89f81f248044d31b0f0720a0ba757934b961f806a8948a3ee7555",
     "unstreamed_long_reply": "a338e70172346e12ef9c1d2a7cc155041dfdb54d5e155bd5fb3aa56a58601a94",
     "unstreamed_tool_and_auto_approval": "a771de255da501fa0a5a7a2636fd02cfa115f6bd75e5fd0a058b891bf890acf8",
     "voice_reply_requested": "c7447016937c719eb3bbb1d9e0dc753256f7c4b910cdc450aa01efe6fbbb5f5c",

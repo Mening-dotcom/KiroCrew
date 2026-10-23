@@ -192,6 +192,52 @@ def _get_default_agent() -> str:
     return _cached_default_agent
 
 
+def resolve_crew_agent_binding(alias: str | None) -> tuple[str | None, str | None, str | None]:
+    """Collapse a Crew agent record name to ``(kiro_agent, workspace cwd, alias)``.
+
+    A Slack thread or channel selection (``!agent``, ``slack.channels.<id>.agent``,
+    the configured default) may name a ``config.agents`` record rather than a kiro
+    agent. The dashboard, spawn and cron dispatches resolve such a name through
+    ``resolve_agent_bindings`` to the record's kiro agent and workspace; this is
+    the chat turns' read of the same rule, so a bound channel runs as the record's
+    kiro agent in the record's workspace instead of treating the record name as a
+    kiro mode in a scratch directory. Answers ``(None, None, None)`` for a name
+    that is not a Crew record — a plain kiro agent name passes through to
+    ``get_or_create`` unchanged — and on any resolve failure, since an unreadable
+    config must not stop a turn.
+    """
+    if not alias:
+        return None, None, None
+    try:
+        from kiro_crew.config.loader import resolve_agent_bindings, workspace_dir_from_entry
+
+        cfg = KiroCrewConfig.load()
+        agents = getattr(cfg, "agents", None) or {}
+        # ONLY collapse a real Crew record: resolve_agent_bindings falls back to
+        # the default agent for an unknown name, so resolving unconditionally
+        # would rewrite a legitimate kiro mode into the default.
+        if alias not in agents:
+            return None, None, None
+        # validate_memory_files=False: only the kiro_agent + workspace mapping is
+        # needed here, and this runs on the gateway event loop; the session's own
+        # execution-context resolution validates the store later. Same read the
+        # cron dispatch takes.
+        bindings = resolve_agent_bindings(cfg, alias, validate_memory_files=False)
+        agent_cfg = agents.get(alias)
+        ws_name = getattr(agent_cfg, "workspace", None) if agent_cfg else None
+        ws_entry = None
+        if ws_name:
+            ws_entry = (getattr(cfg, "workspaces", {}) or {}).get(ws_name)
+        # workspace_dir_from_entry anchors a relative configured dir under
+        # config_dir() and honors an absolute one; the raw configured value as a
+        # cwd would resolve against the gateway process directory instead.
+        ws_dir = workspace_dir_from_entry(ws_entry)
+        return bindings.kiro_agent or None, str(ws_dir) if ws_dir else None, alias
+    except Exception:
+        logger.debug("crew agent binding resolve failed for %r", alias, exc_info=True)
+        return None, None, None
+
+
 def _read_thread_overrides(
     session_key: str, conversation_log: ConversationLog | None
 ) -> tuple[str, str]:

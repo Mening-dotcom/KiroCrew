@@ -320,6 +320,7 @@ from kiro_crew.slack.handler_runtime.inbound import (  # noqa: F401
     adopt_default_agent,
     maybe_apply_privacy_modifiers,
     maybe_route_linked_thread,
+    resolve_crew_agent_binding,
 )
 from kiro_crew.slack.handler_runtime.permission_ladder import (  # noqa: F401
     _answer_permission_request,

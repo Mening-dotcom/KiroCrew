@@ -71,6 +71,7 @@ from kiro_crew.slack.handler import (
     maybe_apply_privacy_modifiers,
     maybe_handle_keyword_command,
     maybe_route_linked_thread,
+    resolve_crew_agent_binding,
     track_background_task,
 )
 from kiro_crew.slack.renderer import PARTIAL_TURN_MARKER
@@ -640,16 +641,29 @@ async def handle_message_transport(
         # per-channel override (slack.channels.<id>.agent), then the configured
         # default win; otherwise fall back to the canonical "kirocrew" agent so
         # the session loads kirocrew-core (spawn_run) rather than kiro-cli's bare
-        # built-in default. In the Slack path these values are kiro agent names,
-        # passed straight through to get_or_create. Mirrors native handle_message.
+        # built-in default. Mirrors native handle_message.
         _agent = (
             _thread_agents.get(session_key)
             or agent_override
             or _get_default_agent()
             or _DEFAULT_KIROCREW_AGENT
         )
+        # A name that is a Crew agent record collapses to the record's kiro
+        # agent, workspace and crew identity (resolve_crew_agent_binding), the
+        # same resolution the dashboard, spawn and cron dispatches apply; any
+        # other name passes through with no extra kwargs. Off the loop: the
+        # resolve reads the whole config, which is not work to do inline.
+        # Mirrors the native turn in handler_runtime/turn.py.
+        _crew_kiro, _crew_cwd, _crew_alias = await asyncio.to_thread(
+            resolve_crew_agent_binding, _agent
+        )
+        _crew_kwargs = {"cwd": _crew_cwd, "crew_agent": _crew_alias} if _crew_alias else {}
         client, is_new, resumed = await sessions.get_or_create(
-            session_key, agent=_agent, channel_id=channel, start_priority=start_priority
+            session_key,
+            agent=_crew_kiro or _agent,
+            channel_id=channel,
+            start_priority=start_priority,
+            **_crew_kwargs,
         )
         _acquired = True
         # Authorize the outbound-image root, which only exists once the provider
