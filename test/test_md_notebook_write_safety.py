@@ -804,15 +804,20 @@ async def test_a_sync_while_the_temp_is_still_staging_never_commits_it(
             finally:
                 release_stage.set()
                 # Fail-safes against a genuine deadlock, not races to run out
-                # on, so their budgets are generous like the park's own 120 s
-                # above rather than tight: on a loaded host the released save's
-                # publish — and the Sync's whole run behind it — queue their
-                # worker-thread git calls behind whatever else holds the shared
-                # `to_thread` executor, and a tight budget measures the runner
-                # (flake class 2, see testing-conventions.md). Named, so a
-                # starved executor reads as itself and not as a bare timeout.
+                # on, so their budget is the file's measured lost-run ceiling
+                # (_BARRIER_LOST_RUN_SEC) rather than a tight bound: on a loaded
+                # host the released save's publish — and the Sync's whole run
+                # behind it — queue their worker-thread git calls behind
+                # whatever else holds the shared `to_thread` executor, and a
+                # tight budget measures the runner (flake class 2, see
+                # testing-conventions.md). Named, so a starved executor reads as
+                # itself and not as a bare timeout — which also needs each bound
+                # to stay well under the suite's whole-test timeout, or
+                # pytest-timeout kills the worker before the name can fire.
                 try:
-                    save_status, save_body = await real_asyncio.wait_for(save, timeout=120)
+                    save_status, save_body = await real_asyncio.wait_for(
+                        save, timeout=_BARRIER_LOST_RUN_SEC
+                    )
                 except TimeoutError:
                     raise AssertionError(
                         "the released save never completed; a starved shared "
@@ -820,7 +825,9 @@ async def test_a_sync_while_the_temp_is_still_staging_never_commits_it(
                     ) from None
             assert sync is not None
             try:
-                sync_status, sync_body = await real_asyncio.wait_for(sync, timeout=120)
+                sync_status, sync_body = await real_asyncio.wait_for(
+                    sync, timeout=_BARRIER_LOST_RUN_SEC
+                )
             except TimeoutError:
                 raise AssertionError(
                     "the Sync never completed after staging was released; a "
