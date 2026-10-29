@@ -10,6 +10,7 @@ the dict once, off the event loop, from the transcripts on disk.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import errno
 import json
 import os
@@ -42,13 +43,24 @@ def _restarted(
     """A transcript written by an earlier process, read by a fresh consolidator."""
     writer = ConversationLog(base_dir=tmp_path / "sessions")
     writer.init()
-    with history_mod.allow_on_loop_persist():
+
+    # Written OFF the event loop, like the earlier process these records stand
+    # for. On the loop, atomic_write's Windows replace retry is skipped by
+    # design (replace_with_retry re-raises rather than sleeping there), so a
+    # transient AV/indexer handle on the fresh temp fails the setup with
+    # WinError 5. A worker thread has no running loop: the bounded retry
+    # applies, and the on-loop persist hatch is unnecessary. The join is
+    # bounded and exceptions propagate through the future.
+    def _write_as_the_earlier_process() -> None:
         for i in range(3):
             writer.append(key, "user", f"m{i}")
         if not unconsolidated:
             writer.mark_consolidated(key, 3)
         if memory_mode:
             writer.update_metadata(key, {"memory_mode": memory_mode})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(_write_as_the_earlier_process).result(timeout=30)
     old = time.time() - age_days * 86400
     os.utime(writer._path(key), (old, old))
     log = ConversationLog(base_dir=tmp_path / "sessions")
@@ -329,12 +341,19 @@ def _live(
     """Sessions with a turn in this process, idle since, each fully consolidated or not."""
     log = ConversationLog(base_dir=tmp_path / "sessions")
     log.init()
-    with history_mod.allow_on_loop_persist():
+
+    # Off the event loop for the same reason ``_restarted`` writes off it: the
+    # on-loop path skips atomic_write's Windows replace retry by design, so a
+    # transient scanner handle on the fresh temp fails the setup with WinError 5.
+    def _write_the_sessions() -> None:
         for key in keys:
             for i in range(3):
                 log.append(key, "user", f"m{i}")
             if consolidated:
                 log.mark_consolidated(key, 3)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(_write_the_sessions).result(timeout=30)
     memory = MagicMock()
     memory.read_preferences.return_value = ""
     memory.read_projects.return_value = ""
